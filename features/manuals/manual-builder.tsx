@@ -107,6 +107,7 @@ function Inspector({
   progress,
   saveState,
   tab,
+  canEdit,
   onTab,
   onSetCompletion,
   onClose,
@@ -116,6 +117,7 @@ function Inspector({
   progress: number;
   saveState: SaveState;
   tab: "Validasi" | "Metadata";
+  canEdit: boolean;
   onTab: (t: "Validasi" | "Metadata") => void;
   onSetCompletion: (s: CompletionState) => void;
   onClose?: () => void;
@@ -148,21 +150,31 @@ function Inspector({
           </div>
           <section>
             <h3>Status bab ini</h3>
-            <div className="chapter-status-buttons">
-              {(["incomplete", "in_progress", "complete", "issue"] as const).map((s) => (
-                <button
-                  key={s}
-                  className="secondary-button"
-                  data-active={section?.completionState === s}
-                  onClick={() => onSetCompletion(s)}
-                >
-                  {COMPLETION_LABEL[s]}
-                </button>
-              ))}
-            </div>
-            <p className="save-state" role="status">
-              <Save aria-hidden="true" size={14} /> {SAVE_STATE_LABEL[saveState]}
-            </p>
+            {canEdit ? (
+              <>
+                <div className="chapter-status-buttons">
+                  {(["incomplete", "in_progress", "complete", "issue"] as const).map((s) => (
+                    <button
+                      key={s}
+                      className="secondary-button"
+                      data-active={section?.completionState === s}
+                      onClick={() => onSetCompletion(s)}
+                    >
+                      {COMPLETION_LABEL[s]}
+                    </button>
+                  ))}
+                </div>
+                <p className="save-state" role="status">
+                  <Save aria-hidden="true" size={14} /> {SAVE_STATE_LABEL[saveState]}
+                </p>
+              </>
+            ) : (
+              <p className="chapter-status-readonly">
+                <StateIcon state={section?.completionState ?? "incomplete"} />
+                {COMPLETION_LABEL[section?.completionState ?? "incomplete"]}
+                <span className="readonly-flag">Baca-saja</span>
+              </p>
+            )}
           </section>
           <section>
             <h3>Asisten penulisan</h3>
@@ -221,7 +233,7 @@ function Inspector({
   );
 }
 
-export function ManualBuilder({ vm }: { vm: ManualViewModel }) {
+export function ManualBuilder({ vm, canEdit = false }: { vm: ManualViewModel; canEdit?: boolean }) {
   const identity = manualIdentity(vm);
   const [selectedId, setSelectedId] = useState(vm.sections[0]?.id ?? "");
   const [mobilePanel, setMobilePanel] = useState<"chapters" | "inspector" | null>(null);
@@ -245,6 +257,7 @@ export function ManualBuilder({ vm }: { vm: ManualViewModel }) {
    * silent overwrite (AC-P2-20). The full block editor + its autosave arrive in Phase 3.
    */
   function setCompletion(next: CompletionState) {
+    if (!canEdit) return; // server also enforces manual:update
     const target = section;
     if (!target) return;
     setSections((prev) => prev.map((s) => (s.id === target.id ? { ...s, completionState: next } : s)));
@@ -282,15 +295,23 @@ export function ManualBuilder({ vm }: { vm: ManualViewModel }) {
           </span>
         </div>
         <div className="save-state" role="status">
-          <Save aria-hidden="true" size={15} /> {SAVE_STATE_LABEL[saveState]}
+          {canEdit ? (
+            <>
+              <Save aria-hidden="true" size={15} /> {SAVE_STATE_LABEL[saveState]}
+            </>
+          ) : (
+            <span className="readonly-flag">Tampilan baca-saja</span>
+          )}
         </div>
         <div className="builder-top-actions">
           <Link className="secondary-button" href={`/manuals/${vm.manual.id}/preview`}>
             <Eye aria-hidden="true" size={17} /> Preview manual
           </Link>
-          <button className="primary-button" disabled title="Pengiriman review tersedia pada Phase 6">
-            Kirim review
-          </button>
+          {canEdit && (
+            <button className="primary-button" disabled title="Pengiriman review tersedia pada Phase 6">
+              Kirim review
+            </button>
+          )}
         </div>
       </header>
 
@@ -326,9 +347,11 @@ export function ManualBuilder({ vm }: { vm: ManualViewModel }) {
               <span className="block-count">
                 <FileText aria-hidden="true" size={15} /> {section?.blocks.length ?? 0} blok
               </span>
-              <button className="secondary-button" disabled title="Block editor tersedia pada Phase 3">
-                Tambah blok
-              </button>
+              {canEdit && (
+                <button className="secondary-button" disabled title="Block editor tersedia pada Phase 3">
+                  Tambah blok
+                </button>
+              )}
             </div>
           </div>
           <div className="editor-canvas">{section && <SectionContent section={section} vm={vm} />}</div>
@@ -340,6 +363,7 @@ export function ManualBuilder({ vm }: { vm: ManualViewModel }) {
             progress={progress}
             saveState={saveState}
             tab={tab}
+            canEdit={canEdit}
             onTab={setTab}
             onSetCompletion={setCompletion}
           />
@@ -365,6 +389,7 @@ export function ManualBuilder({ vm }: { vm: ManualViewModel }) {
               progress={progress}
               saveState={saveState}
               tab={tab}
+              canEdit={canEdit}
               onTab={setTab}
               onSetCompletion={setCompletion}
               onClose={() => setMobilePanel(null)}

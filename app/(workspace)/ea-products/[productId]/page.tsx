@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
 import { getWorkspaceContext } from "@/lib/auth/context";
+import { canAny } from "@/lib/permissions/actions";
 import { getEaProduct } from "@/features/ea-products/queries";
 import { listEaVersions, getEaVersionWithSetups } from "@/features/ea-versions/queries";
 import { VersionCreateForm } from "@/features/ea-versions/version-create-form";
@@ -20,6 +21,10 @@ export default async function EAProductDetailPage({
   const { productId } = await params;
   const ctx = await getWorkspaceContext();
   const orgId = ctx.activeOrg!.id;
+  const roles = ctx.activeOrg?.roles ?? [];
+  const canCreateVersion = canAny(roles, "ea_version:create");
+  const canManageSetup = canAny(roles, "ea_setup:manage");
+  const canManageParams = canAny(roles, "ea_parameter:manage");
 
   const product = await getEaProduct(orgId, productId);
   if (!product) notFound();
@@ -43,9 +48,11 @@ export default async function EAProductDetailPage({
           <h1>{product.name as string}</h1>
           <p>{(product.description as string) || "Tanpa deskripsi."}</p>
         </div>
-        <div className="page-actions">
-          <VersionCreateForm eaProductId={productId} />
-        </div>
+        {canCreateVersion && (
+          <div className="page-actions">
+            <VersionCreateForm eaProductId={productId} />
+          </div>
+        )}
       </div>
 
       <section className="card">
@@ -72,6 +79,9 @@ export default async function EAProductDetailPage({
             <h2>Versi EA</h2>
             <p>Konfigurasi yang didukung dan parameter dimiliki oleh setiap versi EA.</p>
           </div>
+          {!canManageSetup && !canManageParams && (
+            <span className="readonly-flag">Tampilan baca-saja</span>
+          )}
         </div>
 
         {versionsWithSetups.length === 0 ? (
@@ -95,6 +105,7 @@ export default async function EAProductDetailPage({
                     <h4 className="version-subhead">Konfigurasi yang didukung</h4>
                     <SupportedConfigurationEditor
                       eaVersionId={meta.id}
+                      readOnly={!canManageSetup}
                       initial={detail.setups
                         .sort((a, b) => a.position - b.position)
                         .map(
@@ -109,7 +120,11 @@ export default async function EAProductDetailPage({
                         )}
                     />
                     <h4 className="version-subhead">Parameter EA</h4>
-                    <ParameterManager eaVersionId={meta.id} initialGroups={parameterGroups} />
+                    <ParameterManager
+                      eaVersionId={meta.id}
+                      initialGroups={parameterGroups}
+                      readOnly={!canManageParams}
+                    />
                   </>
                 )}
               </li>

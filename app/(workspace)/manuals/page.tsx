@@ -3,6 +3,7 @@ import Link from "next/link";
 import { PageHeader } from "@/components/page-header";
 import { ManualTable } from "@/features/manuals/manual-table";
 import { getWorkspaceContext } from "@/lib/auth/context";
+import { canAny } from "@/lib/permissions/actions";
 import { listManuals } from "@/features/manuals/queries";
 
 export const dynamic = "force-dynamic";
@@ -10,6 +11,7 @@ export const dynamic = "force-dynamic";
 export default async function ManualsPage() {
   const ctx = await getWorkspaceContext();
   const rows = await listManuals(ctx.activeOrg!.id);
+  const canCreateManual = canAny(ctx.activeOrg?.roles ?? [], "manual:create");
 
   return (
     <div className="page-container">
@@ -18,13 +20,15 @@ export default async function ManualsPage() {
         title="Manual Book"
         description="Kelola versi manual, kelengkapan bab, dan kesiapan review untuk setiap produk EA."
         action={
-          <Link className="primary-button" href="/manuals/new">
-            <Plus aria-hidden="true" size={18} /> Buat manual
-          </Link>
+          canCreateManual ? (
+            <Link className="primary-button" href="/manuals/new">
+              <Plus aria-hidden="true" size={18} /> Buat manual
+            </Link>
+          ) : undefined
         }
       />
       <section className="card manual-list-card">
-        <ManualTable rows={rows} />
+        <ManualTable rows={rows} canCreate={canCreateManual} />
       </section>
     </div>
   );

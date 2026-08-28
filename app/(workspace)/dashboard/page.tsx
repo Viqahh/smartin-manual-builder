@@ -3,6 +3,7 @@ import Link from "next/link";
 import { PageHeader } from "@/components/page-header";
 import { ManualTable } from "@/features/manuals/manual-table";
 import { getWorkspaceContext } from "@/lib/auth/context";
+import { canAny } from "@/lib/permissions/actions";
 import { dashboardMetrics, listManuals } from "@/features/manuals/queries";
 
 export const dynamic = "force-dynamic";
@@ -10,6 +11,7 @@ export const dynamic = "force-dynamic";
 export default async function DashboardPage() {
   const ctx = await getWorkspaceContext();
   const orgId = ctx.activeOrg!.id;
+  const canCreateManual = canAny(ctx.activeOrg?.roles ?? [], "manual:create");
 
   const [metrics, manuals] = await Promise.all([dashboardMetrics(orgId), listManuals(orgId)]);
 
@@ -27,9 +29,11 @@ export default async function DashboardPage() {
         title="Dashboard dokumentasi"
         description="Pantau kesiapan manual, kelengkapan bab, dan proses review dalam satu workspace."
         action={
-          <Link className="primary-button" href="/manuals/new">
-            <Plus aria-hidden="true" size={18} /> Buat manual
-          </Link>
+          canCreateManual ? (
+            <Link className="primary-button" href="/manuals/new">
+              <Plus aria-hidden="true" size={18} /> Buat manual
+            </Link>
+          ) : undefined
         }
       />
       <section className="metric-grid" aria-label="Ringkasan dokumentasi">
@@ -57,7 +61,7 @@ export default async function DashboardPage() {
             Lihat semua <ArrowRight aria-hidden="true" size={16} />
           </Link>
         </div>
-        <ManualTable rows={manuals} compact />
+        <ManualTable rows={manuals} compact canCreate={canCreateManual} />
       </section>
     </div>
   );

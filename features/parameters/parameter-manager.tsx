@@ -24,14 +24,49 @@ type Param = ParameterGroupWithParams["parameters"][number];
 export function ParameterManager({
   eaVersionId,
   initialGroups,
+  readOnly = false,
 }: {
   eaVersionId: string;
   initialGroups: ParameterGroupWithParams[];
+  readOnly?: boolean;
 }) {
   const router = useRouter();
   const [pending, start] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const [newGroupName, setNewGroupName] = useState("");
+
+  // Read-only presentation for reviewer roles — a clean facts view, never a disabled form.
+  if (readOnly) {
+    if (initialGroups.length === 0) {
+      return <p className="param-empty">Belum ada grup parameter untuk versi EA ini.</p>;
+    }
+    return (
+      <div className="param-manager">
+        {initialGroups.map((group) => (
+          <section className="param-group" key={group.id}>
+            <header>
+              <h4>{group.name}</h4>
+              <span>{group.parameters.length} parameter</span>
+            </header>
+            {group.parameters.length === 0 ? (
+              <p className="param-empty">Belum ada parameter.</p>
+            ) : (
+              <ul className="param-list">
+                {group.parameters.map((p) => (
+                  <li className="param-row param-row-readonly" key={p.id}>
+                    <div className="param-main">
+                      <strong>{p.display_name}</strong> <code>{p.technical_name}</code> <code>{p.param_type}</code>
+                      <span className="param-default">default: {p.default_value ?? "—"}</span>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        ))}
+      </div>
+    );
+  }
 
   function run(fn: () => Promise<{ ok: boolean; message?: string; issues?: { message: string }[] }>) {
     setError(null);

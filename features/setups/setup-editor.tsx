@@ -1,7 +1,7 @@
 "use client";
 
 import { useId, useRef, useState, useTransition } from "react";
-import { ArrowDown, ArrowUp, GripVertical, Info, Plus, Trash2 } from "lucide-react";
+import { ArrowDown, ArrowUp, Check, GripVertical, Info, Minus, Plus, Trash2 } from "lucide-react";
 import { MT_TIMEFRAMES, MT_TIMEFRAME_LABELS, type MtTimeframe } from "@/lib/domain/timeframes";
 import { SYMBOL_PATTERN, normalizeSymbol, setupDedupeKey } from "@/lib/domain/symbol";
 import { BROKER_MIN_LOT_NOTE_ID } from "@/lib/domain/setups";
@@ -125,6 +125,50 @@ export function SupportedConfigurationEditor({
       }
       setFormError(result.message);
     });
+  }
+
+  // Read-only presentation for reviewer roles — a clean facts view, never a disabled form.
+  if (readOnly) {
+    const filled = rows.filter((r) => r.symbol.trim() !== "");
+    return (
+      <div className="setup-editor" aria-describedby={groupId}>
+        {filled.length === 0 ? (
+          <p className="param-empty">Belum ada konfigurasi yang didukung untuk versi EA ini.</p>
+        ) : (
+          <ul className="setup-readonly">
+            {filled.map((row, index) => (
+              <li key={index} className="setup-readonly-row">
+                <div className="setup-readonly-head">
+                  <span className="mono setup-readonly-symbol">{normalizeSymbol(row.symbol)}</span>
+                  <span className="platform-badge">{row.timeframe}</span>
+                  <span className="setup-readonly-supported" data-on={row.isSupported}>
+                    {row.isSupported ? <Check aria-hidden="true" size={13} /> : <Minus aria-hidden="true" size={13} />}
+                    {row.isSupported ? "Didukung" : "Tidak didukung"}
+                  </span>
+                </div>
+                <dl className="setup-readonly-meta">
+                  <div>
+                    <dt>Preset</dt>
+                    <dd>{row.presetRef.trim() || "—"}</dd>
+                  </div>
+                  <div>
+                    <dt>Tested Minimum Lot</dt>
+                    <dd>{row.testedMinimumLot.trim() || "—"}</dd>
+                  </div>
+                  <div className="setup-readonly-notes">
+                    <dt>Notes</dt>
+                    <dd>{row.notes.trim() || "—"}</dd>
+                  </div>
+                </dl>
+              </li>
+            ))}
+          </ul>
+        )}
+        <p className="setup-note" id={groupId}>
+          <Info aria-hidden="true" size={15} /> {BROKER_MIN_LOT_NOTE_ID}
+        </p>
+      </div>
+    );
   }
 
   return (

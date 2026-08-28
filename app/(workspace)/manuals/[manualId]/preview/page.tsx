@@ -3,6 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ManualRenderer } from "@/components/manual-renderer/manual-renderer";
 import { getWorkspaceContext } from "@/lib/auth/context";
+import { canAny } from "@/lib/permissions/actions";
 import { SupabaseManualDataSource } from "@/features/manuals/data-source";
 import { assembleManualViewModel, manualIdentity } from "@/lib/manual/view-model";
 
@@ -20,12 +21,17 @@ export default async function ManualPreviewPage({
   const vm = await assembleManualViewModel(source, manualId);
   if (!vm) notFound();
   const id = manualIdentity(vm);
+  const canEdit = canAny(ctx.activeOrg?.roles ?? [], "manual:update");
 
   return (
     <div className="preview-page">
       <header className="preview-toolbar">
         <div>
-          <Link className="icon-button" href={`/manuals/${manualId}/edit`} aria-label="Kembali ke editor">
+          <Link
+            className="icon-button"
+            href={`/manuals/${manualId}/edit`}
+            aria-label={canEdit ? "Kembali ke editor" : "Kembali ke tampilan bab"}
+          >
             <ArrowLeft aria-hidden="true" />
           </Link>
           <div>
@@ -36,9 +42,11 @@ export default async function ManualPreviewPage({
           </div>
         </div>
         <div>
-          <Link className="secondary-button" href={`/manuals/${manualId}/edit`}>
-            <Pencil aria-hidden="true" size={17} /> Edit manual
-          </Link>
+          {canEdit && (
+            <Link className="secondary-button" href={`/manuals/${manualId}/edit`}>
+              <Pencil aria-hidden="true" size={17} /> Edit manual
+            </Link>
+          )}
           <button className="primary-button" disabled title="Ekspor PDF tersedia pada Phase 7">
             <FileDown aria-hidden="true" size={17} /> Ekspor PDF
           </button>

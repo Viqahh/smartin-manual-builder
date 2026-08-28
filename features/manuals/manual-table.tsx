@@ -70,7 +70,15 @@ function Row({ manual }: { manual: ManualListRow }) {
   );
 }
 
-export function ManualTable({ rows, compact = false }: { rows: ManualListRow[]; compact?: boolean }) {
+export function ManualTable({
+  rows,
+  compact = false,
+  canCreate = false,
+}: {
+  rows: ManualListRow[];
+  compact?: boolean;
+  canCreate?: boolean;
+}) {
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState<"ALL" | ManualStatusDb>("ALL");
 
@@ -113,10 +121,16 @@ export function ManualTable({ rows, compact = false }: { rows: ManualListRow[]; 
         <div className="empty-state">
           <Search aria-hidden="true" size={26} />
           <h2>Belum ada manual</h2>
-          <p>Buat manual pertama untuk organisasi ini.</p>
-          <Link className="secondary-button" href="/manuals/new">
-            Buat manual
-          </Link>
+          <p>
+            {canCreate
+              ? "Buat manual pertama untuk organisasi ini."
+              : "Manual akan muncul di sini setelah dibuat oleh developer."}
+          </p>
+          {canCreate && (
+            <Link className="secondary-button" href="/manuals/new">
+              Buat manual
+            </Link>
+          )}
         </div>
       ) : displayed.length === 0 ? (
         <div className="empty-state">

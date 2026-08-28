@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import { ManualBuilder } from "@/features/manuals/manual-builder";
 import { getWorkspaceContext } from "@/lib/auth/context";
+import { canAny } from "@/lib/permissions/actions";
 import { SupabaseManualDataSource } from "@/features/manuals/data-source";
 import { assembleManualViewModel } from "@/lib/manual/view-model";
 
@@ -18,5 +19,7 @@ export default async function ManualBuilderPage({
   const vm = await assembleManualViewModel(source, manualId);
   if (!vm) notFound();
 
-  return <ManualBuilder vm={vm} />;
+  const canEdit = canAny(ctx.activeOrg?.roles ?? [], "manual:update");
+
+  return <ManualBuilder vm={vm} canEdit={canEdit} />;
 }
