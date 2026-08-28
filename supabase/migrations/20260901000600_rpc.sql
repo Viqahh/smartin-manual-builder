@@ -1,35 +1,15 @@
--- Phase 2 · Callable RPCs (PostgREST -> live in `public`). Every function is
--- SECURITY DEFINER and enforces BOTH:
---   * organisation access  (app.has_org_access)  — no cross-org
---   * authoring capability  (app.can_author)     — DEVELOPER or ADMIN only;
---                                                   reviewers cannot invoke them
--- so an authenticated reviewer cannot bypass the Next.js server actions by
--- calling these directly (spec §2). Multi-statement bodies are transactional.
-
--- ---------------------------------------------------------------------------
--- helper: assert the caller may author in an organisation
--- ---------------------------------------------------------------------------
-create or replace function app.assert_author(p_org uuid)
-returns void
-language plpgsql
-stable
-security definer
-set search_path = public
-as $$
-begin
-  -- auth.uid() is NULL for trusted backend sessions (service_role, migrations, seed) which
-  -- already bypass RLS; only end-user (`authenticated`) calls are gated here.
-  if auth.uid() is null then
-    return;
-  end if;
-  if not app.has_org_access(p_org) then
-    raise exception 'forbidden: not a member of organisation' using errcode = 'insufficient_privilege';
-  end if;
-  if not app.can_author(p_org) then
-    raise exception 'forbidden: authoring requires DEVELOPER or ADMIN' using errcode = 'insufficient_privilege';
-  end if;
-end;
-$$;
+-- Phase 2 · Callable RPCs (PostgREST -> live in `public`).
+--
+-- Authorisation: every mutating RPC calls `app.assert_author(org)` FIRST
+-- (defined in 20260901000100_core.sql). That gate:
+--   * allows a genuine service-role request (JWT role = service_role) or the DB owner
+--     (migrations / seed);
+--   * DENIES an anonymous caller (auth.uid() NULL and not a service request);
+--   * otherwise requires an authenticated member with DEVELOPER or ADMIN.
+--
+-- EXECUTE hardening: PostgreSQL grants EXECUTE to PUBLIC by default, and PUBLIC
+-- includes `anon`. The grant block at the bottom REVOKEs EXECUTE from PUBLIC and
+-- from `anon` on every RPC, then GRANTs only `authenticated` + `service_role`.
 
 -- ---------------------------------------------------------------------------
 -- create_ea_version_with_setups
@@ -92,8 +72,6 @@ $$;
 
 -- ---------------------------------------------------------------------------
 -- replace_ea_version_setups — ATOMIC full-list replace (AC-P2-9b / spec §5).
--- DELETE + re-INSERT in one transactional function body: if the insert fails
--- (e.g. a duplicate), the whole call rolls back and the previous list is intact.
 -- ---------------------------------------------------------------------------
 create or replace function public.replace_ea_version_setups(
   p_org uuid,
@@ -146,9 +124,10 @@ end;
 $$;
 
 -- ---------------------------------------------------------------------------
--- create_manual_with_version — resolves the ACTIVE system template, records
--- template_id + template_version, instantiates sections from that exact
--- template version (AC-P2-10/26).
+-- create_manual_with_version — records template_id + template_version on the
+-- Manual Version as immutable creation evidence; instantiates from that exact
+-- template version (AC-P2-10/26). Callers pass a concrete `p_template_id`;
+-- the active system template is only a defensive fallback.
 -- ---------------------------------------------------------------------------
 create or replace function public.create_manual_with_version(
   p_org uuid,
@@ -181,7 +160,6 @@ begin
     raise exception 'ea version does not belong to the given product' using errcode = 'foreign_key_violation';
   end if;
 
-  -- Resolve the template: an explicit org template (must belong to p_org) or the active system template.
   if p_template_id is not null then
     select mt.id, mt.version into v_template, v_template_version
     from manual_templates mt
@@ -201,8 +179,8 @@ begin
   values (p_org, p_ea_product_id, v_template, coalesce(p_locale, 'id'))
   returning id into v_manual;
 
-  insert into manual_versions (organization_id, manual_id, ea_version_id, version, status, template_version)
-  values (p_org, v_manual, p_ea_version_id, p_manual_version, 'DRAFT', v_template_version)
+  insert into manual_versions (organization_id, manual_id, ea_version_id, version, status, template_id, template_version)
+  values (p_org, v_manual, p_ea_version_id, p_manual_version, 'DRAFT', v_template, v_template_version)
   returning id into v_version;
 
   perform app.instantiate_sections_from_template(v_version, v_template);
@@ -217,6 +195,7 @@ $$;
 
 -- ---------------------------------------------------------------------------
 -- create_product_version_manual — the wizard "new EA" path (AC-P2-11), fully atomic.
+-- Takes an explicit `p_template_id` — no internal null.
 -- ---------------------------------------------------------------------------
 create or replace function public.create_product_version_manual(
   p_org uuid,
@@ -231,9 +210,10 @@ create or replace function public.create_product_version_manual(
   p_support jsonb,
   p_setups jsonb,
   p_manual_version text,
+  p_template_id uuid,
   p_locale text default 'id'
 )
-returns table (product_id uuid, ea_version_id uuid, manual_id uuid, manual_version_id uuid)
+returns table (product_id uuid, ea_version_id uuid, manual_id uuid, manual_version_id uuid, template_version integer)
 language plpgsql
 security definer
 set search_path = public
@@ -244,6 +224,9 @@ declare
   v_row record;
 begin
   perform app.assert_author(p_org);
+  if p_template_id is null then
+    raise exception 'template id is required' using errcode = 'null_value_not_allowed';
+  end if;
 
   insert into ea_products (organization_id, owner_id, name, slug, description)
   values (p_org, p_owner, p_product_name, p_product_slug, coalesce(p_product_description, ''))
@@ -254,20 +237,52 @@ begin
   );
 
   select * into v_row
-  from public.create_manual_with_version(p_org, v_product, v_version, p_manual_version, null, p_locale);
+  from public.create_manual_with_version(p_org, v_product, v_version, p_manual_version, p_template_id, p_locale);
 
   product_id := v_product;
   ea_version_id := v_version;
   manual_id := v_row.manual_id;
   manual_version_id := v_row.manual_version_id;
+  template_version := v_row.template_version;
   return next;
 end;
 $$;
 
 -- ---------------------------------------------------------------------------
--- Transactional reorder helpers (unique/non-negative positions preserved).
--- Two-phase: shift to a high offset, then set final 0..n-1.
+-- Transactional reorder helpers.
+-- Each independently verifies the ordered id list against the CURRENT rows:
+--   * no NULLs, no duplicates
+--   * exact count == number of live target rows
+--   * no foreign id (every id is a live row of the target parent)
+--   * (count match + subset + no dupes  ==>  exact permutation, none omitted)
+-- Two-phase update (shift to a high offset, then 0..n-1) keeps positions unique.
+-- The whole function is one transaction: any failure rolls back the original order.
 -- ---------------------------------------------------------------------------
+create or replace function app.assert_reorder_list(p_ids uuid[], p_current_count integer)
+returns void
+language plpgsql
+immutable
+as $$
+declare
+  n integer := coalesce(array_length(p_ids, 1), 0);
+begin
+  if n = 0 then
+    raise exception 'reorder list is empty' using errcode = 'check_violation';
+  end if;
+  if exists (select 1 from unnest(p_ids) x where x is null) then
+    raise exception 'reorder list contains a null id' using errcode = 'check_violation';
+  end if;
+  if (select count(distinct x) from unnest(p_ids) x) <> n then
+    raise exception 'reorder list contains duplicate ids' using errcode = 'check_violation';
+  end if;
+  if n <> p_current_count then
+    raise exception 'reorder list count (%) does not match the current rows (%)', n, p_current_count
+      using errcode = 'check_violation';
+  end if;
+end;
+$$;
+revoke execute on function app.assert_reorder_list(uuid[], integer) from public;
+
 create or replace function public.reorder_manual_blocks(p_section_id uuid, p_ordered_ids uuid[])
 returns void
 language plpgsql
@@ -276,7 +291,6 @@ set search_path = public
 as $$
 declare
   v_org uuid;
-  v_expected integer;
   v_actual integer;
   i integer;
 begin
@@ -285,15 +299,12 @@ begin
   perform app.assert_author(v_org);
 
   select count(*) into v_actual from manual_blocks where manual_section_id = p_section_id and deleted_at is null;
-  v_expected := array_length(p_ordered_ids, 1);
-  if v_expected is distinct from v_actual then
-    raise exception 'reorder list must contain every live block exactly once' using errcode = 'check_violation';
-  end if;
+  perform app.assert_reorder_list(p_ordered_ids, v_actual);
 
   update manual_blocks set position = position + 1000000
   where manual_section_id = p_section_id and deleted_at is null;
 
-  for i in 1 .. v_expected loop
+  for i in 1 .. array_length(p_ordered_ids, 1) loop
     update manual_blocks set position = i - 1
     where id = p_ordered_ids[i] and manual_section_id = p_section_id and deleted_at is null;
     if not found then
@@ -312,11 +323,15 @@ set search_path = public
 as $$
 declare
   v_org uuid;
+  v_actual integer;
   i integer;
 begin
   select organization_id into v_org from ea_versions where id = p_ea_version_id;
   if v_org is null then raise exception 'ea version not found' using errcode = 'no_data_found'; end if;
   perform app.assert_author(v_org);
+
+  select count(*) into v_actual from parameter_groups where ea_version_id = p_ea_version_id;
+  perform app.assert_reorder_list(p_ordered_ids, v_actual);
 
   update parameter_groups set position = position + 1000000 where ea_version_id = p_ea_version_id;
   for i in 1 .. array_length(p_ordered_ids, 1) loop
@@ -337,11 +352,15 @@ set search_path = public
 as $$
 declare
   v_org uuid;
+  v_actual integer;
   i integer;
 begin
   select organization_id into v_org from parameter_groups where id = p_group_id;
   if v_org is null then raise exception 'group not found' using errcode = 'no_data_found'; end if;
   perform app.assert_author(v_org);
+
+  select count(*) into v_actual from ea_parameters where parameter_group_id = p_group_id;
+  perform app.assert_reorder_list(p_ordered_ids, v_actual);
 
   update ea_parameters set position = position + 1000000 where parameter_group_id = p_group_id;
   for i in 1 .. array_length(p_ordered_ids, 1) loop
@@ -355,28 +374,41 @@ end;
 $$;
 
 -- ---------------------------------------------------------------------------
--- Grants
---   * public.* RPCs -> authenticated (bodies enforce author role) + service_role
---   * app.* helpers -> service_role only. SECURITY DEFINER public RPCs run as
---     owner and can still call them; untrusted clients cannot invoke app.* via
---     PostgREST (only `public` is exposed) and are explicitly denied EXECUTE.
+-- Grants — explicitly strip PUBLIC's + anon's default EXECUTE, then grant only
+-- the intended roles. Applies to every public RPC and every privileged app.* helper.
 -- ---------------------------------------------------------------------------
--- RLS policies (run as `authenticated`) reference app.can_author / app.member_org_ids /
--- app.is_admin, so `authenticated` keeps schema USAGE but is denied EXECUTE on the
--- privileged mutation helpers below.
-grant usage on schema app to authenticated, service_role;
-revoke execute on function app.instantiate_manual_sections(uuid) from public;
-revoke execute on function app.instantiate_sections_from_template(uuid, uuid) from public;
-revoke execute on function app.copy_parameter_definitions(uuid, uuid) from public;
-revoke execute on function app.assert_author(uuid) from public;
-grant execute on function app.instantiate_manual_sections(uuid) to service_role;
-grant execute on function app.instantiate_sections_from_template(uuid, uuid) to service_role;
-grant execute on function app.copy_parameter_definitions(uuid, uuid) to service_role;
+grant usage on schema app to authenticated, service_role; -- RLS references app.can_author / app.member_org_ids / app.is_admin
 
-grant execute on function public.create_ea_version_with_setups(uuid, uuid, text, ea_platform, date, jsonb, jsonb, jsonb, uuid) to authenticated, service_role;
-grant execute on function public.replace_ea_version_setups(uuid, uuid, jsonb) to authenticated, service_role;
-grant execute on function public.create_manual_with_version(uuid, uuid, uuid, text, uuid, text) to authenticated, service_role;
-grant execute on function public.create_product_version_manual(uuid, uuid, text, text, text, text, ea_platform, date, jsonb, jsonb, jsonb, text, text) to authenticated, service_role;
-grant execute on function public.reorder_manual_blocks(uuid, uuid[]) to authenticated, service_role;
-grant execute on function public.reorder_parameter_groups(uuid, uuid[]) to authenticated, service_role;
-grant execute on function public.reorder_ea_parameters(uuid, uuid[]) to authenticated, service_role;
+do $$
+declare
+  fn text;
+  public_rpcs text[] := array[
+    'public.create_ea_version_with_setups(uuid, uuid, text, ea_platform, date, jsonb, jsonb, jsonb, uuid)',
+    'public.replace_ea_version_setups(uuid, uuid, jsonb)',
+    'public.create_manual_with_version(uuid, uuid, uuid, text, uuid, text)',
+    'public.create_product_version_manual(uuid, uuid, text, text, text, text, ea_platform, date, jsonb, jsonb, jsonb, text, uuid, text)',
+    'public.reorder_manual_blocks(uuid, uuid[])',
+    'public.reorder_parameter_groups(uuid, uuid[])',
+    'public.reorder_ea_parameters(uuid, uuid[])'
+  ];
+  app_helpers text[] := array[
+    'app.assert_author(uuid)',
+    'app.assert_reorder_list(uuid[], integer)',
+    'app.is_service_request()',
+    'app.instantiate_manual_sections(uuid)',
+    'app.instantiate_sections_from_template(uuid, uuid)',
+    'app.copy_parameter_definitions(uuid, uuid)'
+  ];
+begin
+  foreach fn in array public_rpcs loop
+    execute format('revoke execute on function %s from public', fn);
+    execute format('revoke execute on function %s from anon', fn);
+    execute format('grant execute on function %s to authenticated, service_role', fn);
+  end loop;
+  foreach fn in array app_helpers loop
+    execute format('revoke execute on function %s from public', fn);
+    execute format('revoke execute on function %s from anon', fn);
+    execute format('grant execute on function %s to service_role', fn);
+  end loop;
+end;
+$$;

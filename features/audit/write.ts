@@ -1,9 +1,11 @@
 import "server-only";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { getRequestId, logServerError } from "@/lib/observability/request-id";
 
 /**
- * Append an audit event (PRD-SEC-007). Best-effort: an audit write failure must not
- * fail the primary mutation, but it is logged server-side.
+ * Append an audit event (PRD-SEC-007). Best-effort: an audit write failure must not fail the
+ * primary mutation, but it is logged (with the request id, no contents/secrets — PRD-SEC-009).
+ * Every audit row carries the request id in `metadata.requestId` (AC-P2-23).
  */
 export async function writeAudit(
   orgId: string,
@@ -14,6 +16,7 @@ export async function writeAudit(
   metadata: Record<string, unknown> = {},
 ): Promise<void> {
   try {
+    const requestId = await getRequestId();
     const supabase = await createSupabaseServerClient();
     await supabase.from("audit_events").insert({
       organization_id: orgId,
@@ -21,9 +24,13 @@ export async function writeAudit(
       action,
       entity_type: entityType,
       entity_id: entityId,
-      metadata,
+      metadata: { ...metadata, requestId },
     });
   } catch (e) {
-    console.error("[audit] failed to record", { action, entityType, error: (e as Error).message });
+    await logServerError("audit", "failed to record audit event", {
+      action,
+      entityType,
+      error: (e as Error).message,
+    });
   }
 }

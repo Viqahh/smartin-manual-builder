@@ -17,13 +17,17 @@ const EXT: Record<string, string> = {
   "image/gif": "gif",
 };
 
-export type UploadedImage = { id: string; storageKey: string; width: number | null; height: number | null };
+export type UploadedImage = { id: string; storageKey: string; width: number; height: number };
 
 /**
- * Private image upload (AC-P2-19). Object path `<organization_id>/<image_asset_id>.<ext>` in the
- * private `manual-images` bucket. Intrinsic `width`/`height` are extracted from the file header
- * and persisted (never left null for a supported type). Access is later via short-lived signed
- * URLs only; the object is never public.
+ * Private image upload (AC-P2-19).
+ *
+ * The `image_assets` id and the FINAL storage key are computed up front, so the row is never
+ * written with a `pending-…` key. Order of operations, with full cleanup on every failure path:
+ *   1. insert image_assets (final storage_key, width/height)
+ *   2. upload the object     — on failure: delete the row, return error
+ *   3. (no step 3 — nothing to reconcile)
+ * No success result can leave `storage_key = pending-…`, an orphan object, or an orphan row.
  */
 export async function uploadManualImage(formData: FormData): Promise<ActionResult<UploadedImage>> {
   try {
@@ -43,37 +47,33 @@ export async function uploadManualImage(formData: FormData): Promise<ActionResul
     if (!dims) return fail("VALIDATION", "Berkas gambar tidak dapat dibaca (header tidak valid).");
 
     const supabase = await createSupabaseServerClient();
-
-    const { data: inserted, error: insErr } = await supabase
-      .from("image_assets")
-      .insert({
-        organization_id: orgId,
-        owner_id: userId,
-        storage_key: `pending-${crypto.randomUUID()}`,
-        mime_type: file.type,
-        byte_size: file.size,
-        width: dims.width,
-        height: dims.height,
-        caption,
-        alt_text: altText,
-        scan_status: "pending",
-      })
-      .select("id")
-      .single();
-    if (insErr || !inserted) return fail("UPLOAD", "Gagal mencatat gambar.");
-
-    const assetId = inserted.id as string;
+    const assetId = crypto.randomUUID();
     const storageKey = `${orgId}/${assetId}.${EXT[file.type]}`;
+
+    const { error: insErr } = await supabase.from("image_assets").insert({
+      id: assetId,
+      organization_id: orgId,
+      owner_id: userId,
+      storage_key: storageKey, // FINAL key — no pending state
+      mime_type: file.type,
+      byte_size: file.size,
+      width: dims.width,
+      height: dims.height,
+      caption,
+      alt_text: altText,
+      scan_status: "pending",
+    });
+    if (insErr) return fail("UPLOAD", "Gagal mencatat gambar.");
 
     const { error: upErr } = await supabase.storage
       .from("manual-images")
       .upload(storageKey, file, { contentType: file.type, upsert: false });
     if (upErr) {
+      // roll back the metadata row so nothing points at a non-existent object
       await supabase.from("image_assets").delete().eq("id", assetId);
       return fail("UPLOAD", "Gagal mengunggah gambar.");
     }
 
-    await supabase.from("image_assets").update({ storage_key: storageKey }).eq("id", assetId);
     await writeAudit(orgId, userId, "image:upload", "image_asset", assetId, {
       mime: file.type,
       width: dims.width,

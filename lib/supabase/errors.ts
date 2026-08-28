@@ -1,6 +1,7 @@
 import "server-only";
 import type { PostgrestError } from "@supabase/supabase-js";
 import { type ActionResult, fail, uniqueViolation } from "@/lib/errors";
+import { logServerError } from "@/lib/observability/request-id";
 
 /**
  * Translate a Postgrest/Postgres error into a typed ActionResult without leaking
@@ -27,6 +28,8 @@ export function mapPostgrestError(
   if (error.code === "42501" || error.code === "PGRST301") {
     return fail("FORBIDDEN", "Akses ditolak.");
   }
+  // Unmapped -> log with the request id (code only, never the raw SQL/message contents).
+  void logServerError("db", "unmapped postgrest error", { code: error.code });
   return fail("INTERNAL", "Terjadi kesalahan pada server.");
 }
 

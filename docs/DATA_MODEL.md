@@ -103,6 +103,8 @@ type ManualBlock =
 - `published_at` and snapshot are required for `PUBLISHED`.
 - Published manual versions are rejected by update/delete triggers except controlled archive metadata.
 - All organization-owned tables carry `organization_id` where needed for simple, auditable RLS.
+- **Same-organization relational integrity is enforced by the database, not by RLS/visibility.** Every organization-owned parent exposes `unique (id, organization_id)`, and every organization-owned child foreign key is composite `(<parent>_id, organization_id) → (id, organization_id)`. A child row can therefore never reference a parent in a different organization, even if a caller supplies a parent UUID they should not know.
+- Mutating SECURITY DEFINER RPCs are gated by `app.assert_author(org)`, which denies an anonymous caller (a null `auth.uid()` is not treated as trusted) and requires `DEVELOPER`/`ADMIN` otherwise. `EXECUTE` on those RPCs and on the privileged `app.*` helpers is revoked from `PUBLIC` and `anon`.
 
 ## Index plan
 

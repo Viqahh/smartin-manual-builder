@@ -1,5 +1,10 @@
 -- Phase 2 · EA build facts: EAProduct -> EAVersion -> {EAVersionSetup, EAParameterGroup -> EAParameter}
 -- Ownership: parameters and setups belong to EA VERSION, never to a manual (DATA_MODEL, PRD-CNT-010, GI-11).
+--
+-- Same-organisation relational integrity is enforced by the DATABASE, not by RLS visibility or
+-- server actions: every parent carries `unique (id, organization_id)` and every child FK is
+-- COMPOSITE `(<parent>_id, organization_id) -> (id, organization_id)`. A row can therefore never
+-- point at a parent in a different organisation even if a caller supplies a crafted parent UUID.
 
 -- ---------------------------------------------------------------------------
 -- Enums
@@ -25,7 +30,8 @@ create table ea_products (
   archived_at     timestamptz,
   created_at      timestamptz not null default now(),
   updated_at      timestamptz not null default now(),
-  unique (organization_id, slug)
+  unique (organization_id, slug),
+  unique (id, organization_id)          -- composite-FK target
 );
 create index ea_products_org_idx on ea_products (organization_id) where archived_at is null;
 create trigger ea_products_touch before update on ea_products
@@ -37,7 +43,7 @@ create trigger ea_products_touch before update on ea_products
 create table ea_versions (
   id              uuid primary key default gen_random_uuid(),
   organization_id uuid not null references organizations (id) on delete cascade,
-  ea_product_id   uuid not null references ea_products (id) on delete cascade,
+  ea_product_id   uuid not null,
   version         text not null check (version ~ '^\d+\.\d+\.\d+$'),
   platform        ea_platform not null,
   release_date    date,
@@ -47,7 +53,10 @@ create table ea_versions (
   support         jsonb not null default '{}'::jsonb,
   created_at      timestamptz not null default now(),
   updated_at      timestamptz not null default now(),
-  unique (ea_product_id, platform, version)
+  unique (ea_product_id, platform, version),
+  unique (id, organization_id),
+  foreign key (ea_product_id, organization_id)
+    references ea_products (id, organization_id) on delete cascade
 );
 create index ea_versions_product_idx on ea_versions (ea_product_id);
 create trigger ea_versions_touch before update on ea_versions
@@ -59,7 +68,7 @@ create trigger ea_versions_touch before update on ea_versions
 create table ea_version_setups (
   id                 uuid primary key default gen_random_uuid(),
   organization_id    uuid not null references organizations (id) on delete cascade,
-  ea_version_id      uuid not null references ea_versions (id) on delete cascade,
+  ea_version_id      uuid not null,
   symbol             text not null check (symbol ~ '^[A-Za-z0-9]{2,}([._][A-Za-z0-9]+)?$'),
   timeframe          mt_timeframe not null,
   preset_ref         text,
@@ -69,7 +78,9 @@ create table ea_version_setups (
   position           integer not null default 0 check (position >= 0),
   created_at         timestamptz not null default now(),
   updated_at         timestamptz not null default now(),
-  unique (ea_version_id, symbol, timeframe)
+  unique (ea_version_id, symbol, timeframe),
+  foreign key (ea_version_id, organization_id)
+    references ea_versions (id, organization_id) on delete cascade
 );
 create index ea_version_setups_version_pos_idx on ea_version_setups (ea_version_id, position);
 create trigger ea_version_setups_touch before update on ea_version_setups
@@ -81,12 +92,15 @@ create trigger ea_version_setups_touch before update on ea_version_setups
 create table parameter_groups (
   id              uuid primary key default gen_random_uuid(),
   organization_id uuid not null references organizations (id) on delete cascade,
-  ea_version_id   uuid not null references ea_versions (id) on delete cascade,
+  ea_version_id   uuid not null,
   name            text not null check (length(btrim(name)) between 1 and 120),
   position        integer not null default 0 check (position >= 0),
   created_at      timestamptz not null default now(),
   updated_at      timestamptz not null default now(),
-  unique (ea_version_id, name)
+  unique (ea_version_id, name),
+  unique (id, organization_id),
+  foreign key (ea_version_id, organization_id)
+    references ea_versions (id, organization_id) on delete cascade
 );
 create index parameter_groups_version_pos_idx on parameter_groups (ea_version_id, position);
 create trigger parameter_groups_touch before update on parameter_groups
@@ -98,7 +112,7 @@ create trigger parameter_groups_touch before update on parameter_groups
 create table ea_parameters (
   id                 uuid primary key default gen_random_uuid(),
   organization_id    uuid not null references organizations (id) on delete cascade,
-  parameter_group_id uuid not null references parameter_groups (id) on delete cascade,
+  parameter_group_id uuid not null,
   display_name       text not null check (length(btrim(display_name)) between 1 and 160),
   technical_name     text not null check (technical_name ~ '^[A-Za-z_][A-Za-z0-9_]*$'),
   param_type         ea_param_type not null,
@@ -116,7 +130,9 @@ create table ea_parameters (
   position           integer not null default 0 check (position >= 0),
   created_at         timestamptz not null default now(),
   updated_at         timestamptz not null default now(),
-  unique (parameter_group_id, technical_name)
+  unique (parameter_group_id, technical_name),
+  foreign key (parameter_group_id, organization_id)
+    references parameter_groups (id, organization_id) on delete cascade
 );
 create index ea_parameters_group_pos_idx on ea_parameters (parameter_group_id, position);
 create trigger ea_parameters_touch before update on ea_parameters

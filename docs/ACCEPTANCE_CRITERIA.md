@@ -80,7 +80,7 @@
 | AC-P2-23 | Server logs use a request id and contain no manual contents, tokens, source code, or signed URLs. (PRD-NFR-007, PRD-SEC-009) | SHOULD | log inspection on an error path. |
 | AC-P2-24 | `/dashboard`, `/manuals`, `/ea-products` render from org-scoped real data (no `localStorage` fallback in the shipped path). (PRD-PLT-007) | MUST | inspect + network. |
 | AC-P2-25 | Vitest + Testing Library are configured and run in CI; domain logic (slug uniqueness, version uniqueness, permission map, autosave conflict) has unit coverage. (PRD-NFR-009) | MUST | CI. |
-| AC-P2-26 | The manual template and checklist template are versioned; each manual version records the template version that instantiated it. (PRD-VER-008) | SHOULD | DB inspection. |
+| AC-P2-26 | The **manual** template is versioned (`manual_templates` + `manual_template_sections`); each manual version records the **template id + template version** that instantiated it, and its sections are instantiated from that exact template version. *(The **checklist** template is versioned in Phase 5 with the checklist engine — out of Phase 2 scope; `PRD-VER-008` spans both.)* | SHOULD | DB inspection. |
 | AC-P2-27 | Open Questions `PRD-OQ-001` (styling), `PRD-OQ-003` (auth route group), `PRD-OQ-012` (template editing depth) have recorded decisions before the work that depends on them lands. (`PRD-OQ-006` supported-setup granularity is already **resolved** — see PRD §25 / `PRD-EA-009`.) | MUST | decision log in the phase report. |
 
 ---

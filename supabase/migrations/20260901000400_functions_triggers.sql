@@ -27,10 +27,7 @@ begin
   if v_org is null then
     raise exception 'manual version % not found', p_manual_version_id;
   end if;
-  -- auth.uid() is NULL for trusted backend sessions (service_role / seed / migrations).
-  if auth.uid() is not null and not app.can_author(v_org) then
-    raise exception 'forbidden' using errcode = 'insufficient_privilege';
-  end if;
+  perform app.assert_author(v_org); -- anon denied; non-author denied; service_role/seed allowed
   if not exists (select 1 from manual_templates where id = p_template_id) then
     raise exception 'manual template % not found', p_template_id;
   end if;
@@ -144,11 +141,15 @@ begin
   join manual_versions mv on mv.id = ms.manual_version_id
   where ms.id = new.manual_section_id;
 
+  -- every referenced group must exist, belong to the linked EA version, AND be in the
+  -- same organisation as the block (defence in depth against a crafted cross-org UUID).
   select count(*)
     into v_bad_count
   from unnest(new.parameter_group_ids) as gid
   left join parameter_groups pg on pg.id = gid
-  where pg.id is null or pg.ea_version_id is distinct from v_ea_version;
+  where pg.id is null
+     or pg.ea_version_id is distinct from v_ea_version
+     or pg.organization_id is distinct from new.organization_id;
 
   if v_bad_count > 0 then
     raise exception 'parameterTable hanya boleh mereferensikan grup parameter dari EA Version yang terkait.'
@@ -161,6 +162,42 @@ $$;
 create trigger manual_blocks_guard_parameter_table
   before insert or update on manual_blocks
   for each row execute function app.guard_parameter_table_ownership();
+
+-- ---------------------------------------------------------------------------
+-- Guard: a manual / manual_version may only reference a SYSTEM template
+-- (organization_id NULL) or a template owned by its OWN organisation
+-- (manual_templates is mixed system/org so a plain composite FK can't express this).
+-- ---------------------------------------------------------------------------
+create or replace function app.guard_manual_template_org()
+returns trigger
+language plpgsql
+as $$
+declare
+  v_template_org uuid;
+  v_found boolean;
+begin
+  if new.template_id is null then
+    return new;
+  end if;
+  select organization_id, true into v_template_org, v_found
+  from manual_templates where id = new.template_id;
+  if not coalesce(v_found, false) then
+    raise exception 'manual template % not found', new.template_id using errcode = 'foreign_key_violation';
+  end if;
+  if v_template_org is not null and v_template_org is distinct from new.organization_id then
+    raise exception 'manual template belongs to another organisation' using errcode = 'foreign_key_violation';
+  end if;
+  return new;
+end;
+$$;
+
+create trigger manuals_guard_template_org
+  before insert or update on manuals
+  for each row execute function app.guard_manual_template_org();
+
+create trigger manual_versions_guard_template_org
+  before insert or update on manual_versions
+  for each row execute function app.guard_manual_template_org();
 
 -- ---------------------------------------------------------------------------
 -- copy_parameter_definitions: EA-version -> EA-version copy only (AC-P2-18c).
@@ -195,10 +232,7 @@ begin
     raise exception 'cross-organisation parameter copy is not allowed'
       using errcode = 'insufficient_privilege';
   end if;
-  -- auth.uid() is NULL for trusted backend sessions.
-  if auth.uid() is not null and not app.can_author(v_target_org) then
-    raise exception 'forbidden' using errcode = 'insufficient_privilege';
-  end if;
+  perform app.assert_author(v_target_org); -- anon denied; non-author denied; service_role/seed allowed
 
   for r_group in
     select * from parameter_groups where ea_version_id = p_source_ea_version order by position

@@ -12,15 +12,17 @@ values
   ('11111111-1111-4111-8111-111111111111', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'developer@smartin.demo',  crypt('demo-password-123', gen_salt('bf')), now(), '{"provider":"email","providers":["email"]}', '{"display_name":"Andi Setiawan (DEMO)"}', now(), now()),
   ('22222222-2222-4222-8222-222222222222', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'admin@smartin.demo',      crypt('demo-password-123', gen_salt('bf')), now(), '{"provider":"email","providers":["email"]}', '{"display_name":"Sri Admin (DEMO)"}', now(), now()),
   ('33333333-3333-4333-8333-333333333333', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'reviewer@smartin.demo',   crypt('demo-password-123', gen_salt('bf')), now(), '{"provider":"email","providers":["email"]}', '{"display_name":"Rina Reviewer (DEMO)"}', now(), now()),
-  ('44444444-4444-4444-8444-444444444444', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'outsider@smartin.demo',   crypt('demo-password-123', gen_salt('bf')), now(), '{"provider":"email","providers":["email"]}', '{"display_name":"Budi Outsider (DEMO)"}', now(), now())
+  ('44444444-4444-4444-8444-444444444444', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'outsider@smartin.demo',   crypt('demo-password-123', gen_salt('bf')), now(), '{"provider":"email","providers":["email"]}', '{"display_name":"Budi Outsider (DEMO)"}', now(), now()),
+  ('55555555-5555-4555-8555-555555555555', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'compliance@smartin.demo', crypt('demo-password-123', gen_salt('bf')), now(), '{"provider":"email","providers":["email"]}', '{"display_name":"Citra Compliance (DEMO)"}', now(), now())
 on conflict (id) do nothing;
 
 -- profiles are normally created by the on_auth_user_created trigger; ensure they exist for idempotent re-seeds
 insert into public.profiles (id, email, display_name) values
-  ('11111111-1111-4111-8111-111111111111', 'developer@smartin.demo', 'Andi Setiawan (DEMO)'),
-  ('22222222-2222-4222-8222-222222222222', 'admin@smartin.demo',     'Sri Admin (DEMO)'),
-  ('33333333-3333-4333-8333-333333333333', 'reviewer@smartin.demo',  'Rina Reviewer (DEMO)'),
-  ('44444444-4444-4444-8444-444444444444', 'outsider@smartin.demo',  'Budi Outsider (DEMO)')
+  ('11111111-1111-4111-8111-111111111111', 'developer@smartin.demo',  'Andi Setiawan (DEMO)'),
+  ('22222222-2222-4222-8222-222222222222', 'admin@smartin.demo',      'Sri Admin (DEMO)'),
+  ('33333333-3333-4333-8333-333333333333', 'reviewer@smartin.demo',   'Rina Reviewer (DEMO)'),
+  ('44444444-4444-4444-8444-444444444444', 'outsider@smartin.demo',   'Budi Outsider (DEMO)'),
+  ('55555555-5555-4555-8555-555555555555', 'compliance@smartin.demo', 'Citra Compliance (DEMO)')
 on conflict (id) do nothing;
 
 -- ---------------------------------------------------------------------------
@@ -31,12 +33,15 @@ insert into organizations (id, name, slug) values
   ('b0000000-0000-4000-8000-00000000000b', 'Organisasi Lain (DEMO)',           'org-lain-demo')
 on conflict (id) do nothing;
 
--- One row per (org, user, role) — multi-role model (PRD §6). "developer+" also gets a
--- TECHNICAL_REVIEWER role to exercise the multi-role authoring path.
+-- One row per (org, user, role) — multi-role model (PRD §6).
+-- `developer@` holds BOTH DEVELOPER and TECHNICAL_REVIEWER in org A: a live multi-role fixture
+-- proving roles aggregate, authoring capability is retained, and ADMIN capability is NOT gained.
 insert into memberships (organization_id, user_id, role) values
   ('a0000000-0000-4000-8000-00000000000a', '11111111-1111-4111-8111-111111111111', 'DEVELOPER'),
+  ('a0000000-0000-4000-8000-00000000000a', '11111111-1111-4111-8111-111111111111', 'TECHNICAL_REVIEWER'),
   ('a0000000-0000-4000-8000-00000000000a', '22222222-2222-4222-8222-222222222222', 'ADMIN'),
   ('a0000000-0000-4000-8000-00000000000a', '33333333-3333-4333-8333-333333333333', 'TECHNICAL_REVIEWER'),
+  ('a0000000-0000-4000-8000-00000000000a', '55555555-5555-4555-8555-555555555555', 'COMPLIANCE_REVIEWER'),
   ('b0000000-0000-4000-8000-00000000000b', '44444444-4444-4444-8444-444444444444', 'ADMIN')
 on conflict (organization_id, user_id, role) do nothing;
 
@@ -91,8 +96,9 @@ values ('10000000-0000-4000-8000-000000000010', 'a0000000-0000-4000-8000-0000000
         'a1a1a1a1-1111-4111-8111-000000000001', 'id')
 on conflict do nothing;
 
-insert into manual_versions (id, organization_id, manual_id, ea_version_id, version, status, template_version)
-values ('20000000-0000-4000-8000-000000000020', 'a0000000-0000-4000-8000-00000000000a', '10000000-0000-4000-8000-000000000010', 'e0000000-0000-4000-8000-00000000000e', '1.0.0', 'DRAFT', 1)
+insert into manual_versions (id, organization_id, manual_id, ea_version_id, version, status, template_id, template_version)
+values ('20000000-0000-4000-8000-000000000020', 'a0000000-0000-4000-8000-00000000000a', '10000000-0000-4000-8000-000000000010', 'e0000000-0000-4000-8000-00000000000e', '1.0.0', 'DRAFT',
+        'a1a1a1a1-1111-4111-8111-000000000001', 1)
 on conflict do nothing;
 
 select app.instantiate_sections_from_template(

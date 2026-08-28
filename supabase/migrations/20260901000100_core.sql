@@ -181,6 +181,58 @@ as $$
 $$;
 
 -- ---------------------------------------------------------------------------
+-- Trusted-caller detection for SECURITY DEFINER functions.
+--
+-- A NULL auth.uid() is NOT proof of a trusted caller — an *anonymous* API
+-- request also has auth.uid() = NULL. Trust is asserted only when the request's
+-- JWT role claim is `service_role`, or the session role is the DB owner
+-- (migrations / `supabase db reset` seed). Everything else — including the
+-- `anon` role — is untrusted.
+-- ---------------------------------------------------------------------------
+create or replace function app.is_service_request()
+returns boolean
+language sql
+stable
+as $$
+  select
+    coalesce(
+      nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'role' = 'service_role',
+      false
+    )
+    or session_user in ('postgres', 'supabase_admin');
+$$;
+
+-- Single authorisation gate for mutating SECURITY DEFINER RPCs / helpers.
+-- Denies anonymous callers outright; requires an authenticated member with
+-- authoring capability (DEVELOPER or ADMIN) otherwise.
+create or replace function app.assert_author(p_org uuid)
+returns void
+language plpgsql
+stable
+security definer
+set search_path = public
+as $$
+begin
+  if app.is_service_request() then
+    return;
+  end if;
+  if auth.uid() is null then
+    raise exception 'forbidden: authentication required' using errcode = 'insufficient_privilege';
+  end if;
+  if not app.has_org_access(p_org) then
+    raise exception 'forbidden: not a member of organisation' using errcode = 'insufficient_privilege';
+  end if;
+  if not app.can_author(p_org) then
+    raise exception 'forbidden: authoring requires DEVELOPER or ADMIN' using errcode = 'insufficient_privilege';
+  end if;
+end;
+$$;
+
+-- Untrusted callers must never invoke the gate helper directly.
+revoke execute on function app.is_service_request() from public;
+revoke execute on function app.assert_author(uuid) from public;
+
+-- ---------------------------------------------------------------------------
 -- audit_events  (append only — no UPDATE/DELETE policy is ever added)
 -- ---------------------------------------------------------------------------
 create table audit_events (

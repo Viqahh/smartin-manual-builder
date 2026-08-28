@@ -24,6 +24,28 @@ const SETUP_UNIQUE_HINT = {
   manual_versions_manual_id_version_key: { path: "manualVersion", message: "Versi manual sudah dipakai." },
 };
 
+/**
+ * Resolve the ACTIVE versioned manual template to a concrete UUID + version.
+ * Normal standard manual creation always passes this concrete id to the RPC —
+ * the RPC never receives null (finding: "Template ID must be explicit").
+ */
+async function resolveActiveTemplate(
+  supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>,
+  orgId: string,
+): Promise<{ id: string; version: number } | null> {
+  const { data } = await supabase
+    .from("manual_templates")
+    .select("id, version, organization_id")
+    .eq("key", "smartin-ea-manual")
+    .eq("is_active", true)
+    .or(`organization_id.is.null,organization_id.eq.${orgId}`)
+    .order("organization_id", { ascending: true, nullsFirst: false }) // prefer an org template if one exists
+    .order("version", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  return data ? { id: data.id as string, version: Number(data.version) } : null;
+}
+
 export async function createManual(input: unknown): Promise<ActionResult<{ manualId: string }>> {
   try {
     const { orgId, userId, roles } = await requireActiveOrg();
@@ -35,6 +57,8 @@ export async function createManual(input: unknown): Promise<ActionResult<{ manua
     }
 
     const supabase = await createSupabaseServerClient();
+    const template = await resolveActiveTemplate(supabase, orgId);
+    if (!template) return fail("INTERNAL", "Template manual aktif tidak ditemukan.");
 
     if (parsed.data.mode === "existing") {
       const { data, error } = await supabase.rpc("create_manual_with_version", {
@@ -42,7 +66,7 @@ export async function createManual(input: unknown): Promise<ActionResult<{ manua
         p_ea_product_id: parsed.data.eaProductId,
         p_ea_version_id: parsed.data.eaVersionId,
         p_manual_version: parsed.data.manualVersion,
-        p_template_id: null,
+        p_template_id: template.id, // explicit — never null
         p_locale: parsed.data.locale,
       });
       if (error) return mapPostgrestError(error, { unique: SETUP_UNIQUE_HINT });
@@ -51,6 +75,7 @@ export async function createManual(input: unknown): Promise<ActionResult<{ manua
       const manualId = created.manual_id;
       await writeAudit(orgId, userId, "manual:create", "manual", manualId, {
         mode: "existing",
+        templateId: template.id,
         templateVersion: created.template_version,
       });
       revalidatePath("/manuals");
@@ -89,12 +114,18 @@ export async function createManual(input: unknown): Promise<ActionResult<{ manua
         position: index,
       })),
       p_manual_version: parsed.data.manualVersion,
+      p_template_id: template.id, // explicit — never null
       p_locale: parsed.data.locale,
     });
     if (error) return mapPostgrestError(error, { unique: SETUP_UNIQUE_HINT });
     const row = Array.isArray(data) ? data[0] : data;
-    const manualId = (row as { manual_id: string }).manual_id;
-    await writeAudit(orgId, userId, "manual:create", "manual", manualId, { mode: "new" });
+    const created = row as { manual_id: string; template_version: number | null };
+    const manualId = created.manual_id;
+    await writeAudit(orgId, userId, "manual:create", "manual", manualId, {
+      mode: "new",
+      templateId: template.id,
+      templateVersion: created.template_version,
+    });
     revalidatePath("/manuals");
     revalidatePath("/ea-products");
     return ok({ manualId });

@@ -57,7 +57,8 @@ create table image_assets (
   annotations     jsonb not null default '{}'::jsonb,
   scan_status     image_scan_status not null default 'pending',
   created_at      timestamptz not null default now(),
-  updated_at      timestamptz not null default now()
+  updated_at      timestamptz not null default now(),
+  unique (id, organization_id)          -- composite-FK target for manual_blocks
 );
 create index image_assets_org_idx on image_assets (organization_id);
 create trigger image_assets_touch before update on image_assets
@@ -69,11 +70,14 @@ create trigger image_assets_touch before update on image_assets
 create table manuals (
   id              uuid primary key default gen_random_uuid(),
   organization_id uuid not null references organizations (id) on delete cascade,
-  ea_product_id   uuid not null references ea_products (id) on delete cascade,
-  template_id     uuid references manual_templates (id) on delete set null,
+  ea_product_id   uuid not null,
+  template_id     uuid not null references manual_templates (id) on delete restrict,
   locale          text not null default 'id',
   created_at      timestamptz not null default now(),
-  updated_at      timestamptz not null default now()
+  updated_at      timestamptz not null default now(),
+  unique (id, organization_id),
+  foreign key (ea_product_id, organization_id)
+    references ea_products (id, organization_id) on delete cascade
 );
 create index manuals_org_idx on manuals (organization_id);
 create index manuals_product_idx on manuals (ea_product_id);
@@ -86,18 +90,25 @@ create trigger manuals_touch before update on manuals
 create table manual_versions (
   id               uuid primary key default gen_random_uuid(),
   organization_id  uuid not null references organizations (id) on delete cascade,
-  manual_id        uuid not null references manuals (id) on delete cascade,
-  ea_version_id    uuid not null references ea_versions (id) on delete restrict,
+  manual_id        uuid not null,
+  ea_version_id    uuid not null,
   version          text not null check (version ~ '^\d+\.\d+\.\d+$'),
   status           manual_status not null default 'DRAFT',
-  template_version integer,
+  -- immutable creation evidence: the exact template row + its version number.
+  template_id      uuid not null references manual_templates (id) on delete restrict,
+  template_version integer not null,
   completion       jsonb not null default '{}'::jsonb,
   row_version      bigint not null default 1,
   created_at       timestamptz not null default now(),
   updated_at       timestamptz not null default now(),
   published_at     timestamptz,
   reviewed_at      timestamptz,
-  unique (manual_id, version)
+  unique (manual_id, version),
+  unique (id, organization_id),
+  foreign key (manual_id, organization_id)
+    references manuals (id, organization_id) on delete cascade,
+  foreign key (ea_version_id, organization_id)
+    references ea_versions (id, organization_id) on delete restrict
 );
 create index manual_versions_status_idx on manual_versions (organization_id, status, updated_at desc);
 create index manual_versions_manual_idx on manual_versions (manual_id);
@@ -110,7 +121,7 @@ create trigger manual_versions_bump before update on manual_versions
 create table manual_sections (
   id                uuid primary key default gen_random_uuid(),
   organization_id   uuid not null references organizations (id) on delete cascade,
-  manual_version_id uuid not null references manual_versions (id) on delete cascade,
+  manual_version_id uuid not null,
   section_key       text not null,
   title             text not null,
   required          boolean not null default false,
@@ -121,7 +132,10 @@ create table manual_sections (
   created_at        timestamptz not null default now(),
   updated_at        timestamptz not null default now(),
   unique (manual_version_id, section_key),
-  unique (manual_version_id, position) deferrable initially deferred
+  unique (manual_version_id, position) deferrable initially deferred,
+  unique (id, organization_id),
+  foreign key (manual_version_id, organization_id)
+    references manual_versions (id, organization_id) on delete cascade
 );
 create index manual_sections_version_pos_idx on manual_sections (manual_version_id, position);
 create trigger manual_sections_bump before update on manual_sections
@@ -133,16 +147,22 @@ create trigger manual_sections_bump before update on manual_sections
 create table manual_blocks (
   id                  uuid primary key default gen_random_uuid(),
   organization_id     uuid not null references organizations (id) on delete cascade,
-  manual_section_id   uuid not null references manual_sections (id) on delete cascade,
+  manual_section_id   uuid not null,
   block_type          manual_block_type not null,
   payload             jsonb not null,
   position            integer not null check (position >= 0),
-  image_asset_id      uuid references image_assets (id) on delete set null,
+  image_asset_id      uuid,
   parameter_group_ids uuid[] not null default '{}',
   deleted_at          timestamptz,
   row_version         bigint not null default 1,
   created_at          timestamptz not null default now(),
-  updated_at          timestamptz not null default now()
+  updated_at          timestamptz not null default now(),
+  foreign key (manual_section_id, organization_id)
+    references manual_sections (id, organization_id) on delete cascade,
+  -- composite FK: a referenced image must be in the SAME organisation (NULL image_asset_id
+  -- satisfies the FK under MATCH SIMPLE). Only image_asset_id is nulled on parent delete.
+  foreign key (image_asset_id, organization_id)
+    references image_assets (id, organization_id) on delete set null (image_asset_id)
 );
 -- position unique among LIVE blocks only (soft-deleted rows are excluded).
 create unique index manual_blocks_live_pos_idx
