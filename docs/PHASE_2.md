@@ -16,6 +16,12 @@
 > (RLS, RPC authorisation, relational integrity, storage, template instantiation, parameter
 > ownership, multi-role). No credentials or secret values are recorded in this document.
 >
+> **Final frontend correction ([§0d](#0d-final-frontend-correction--browser-smoke-test-2026-08-29)):**
+> commit `9d24daa` makes the UI role-aware (reviewer / compliance read-only, developer / admin
+> authoring retained) and fixes the Supported Configuration / Parameter / wizard responsive
+> overflow. Verified in-browser at 375 / 768 / 1024 / 1440. `lint` / `typecheck` / `test` / `build`
+> pass; live integration stays **27 passed / 0 failed / 0 skipped**.
+>
 > Baseline: `docs/IMPLEMENTATION_PLAN.md` Phase 2, `docs/ACCEPTANCE_CRITERIA.md` Phase 2,
 > corrected `docs/DATA_MODEL.md`. No Phase 3+ functionality was implemented.
 
@@ -78,6 +84,59 @@ and schema was **not** changed):
 No credentials, keys, connection strings or other secret values are recorded in this document.
 `npm run test` on its own (no `SUPABASE_TEST_*` env) still runs the 57 unit tests and skips
 the integration suite by design — that path is credential-free for CI, not "blocked".
+
+---
+
+## 0d. Final frontend correction / browser smoke test (2026-08-29)
+
+Commit **`9d24daacc2ee1e8cd6c5dca621ebae98f150ca5f`**
+(`fix(phase-2): role-aware authoring UI + responsive layout corrections`) closes the frontend
+gaps that earlier passes had recorded as "UI/e2e pending". **No application data behaviour, RLS,
+RPC, schema, or server authorisation was changed** — the server stays the enforcement boundary;
+the frontend now mirrors the same permission model (`lib/permissions/actions.ts` →
+`canAny(roles, action)`).
+
+**Role behaviour — verified in-browser against Supabase DEV:**
+
+| Identity | Roles | Verified in the browser |
+|---|---|---|
+| `developer@smartin.demo` | DEVELOPER + TECHNICAL_REVIEWER | Authoring retained (roles aggregate): "Buat versi EA", the interactive Supported Configuration editor (drag handle + keyboard ↑/↓ + delete + "Tambah / Simpan konfigurasi"), the Parameter manager CRUD surface, the manual-builder chapter-status buttons + "Tambah blok" + "Kirim review", and the "Buat manual" entry points all render. |
+| `reviewer@smartin.demo` | TECHNICAL_REVIEWER | Read-only everywhere: Supported Configuration and Parameter EA render as a facts view (no inputs, drag handle, reorder, delete, add or save controls); "Buat versi EA" / "Tambah produk" / "Buat manual" are not rendered; `/manuals/new` shows a "not available for your role" panel with the wizard not rendered; the manual builder shows a read-only status line + "Baca-saja" flag and no "Tambah blok" / "Kirim review"; preview hides "Edit manual" (read + preview navigation kept). |
+| `compliance@smartin.demo` | COMPLIANCE_REVIEWER | Same read-only behaviour as `reviewer@`, confirmed in the manual builder. |
+| `admin@smartin.demo` | ADMIN | Not signed in during this pass. `ADMIN_ACTIONS` grants every action, so every gate resolves true and the rendered control set equals `developer@`'s. |
+
+**Responsive verification** — viewport-emulated at **375px / 768px / 1024px / 1440px**, with
+`document.scrollWidth === document.clientWidth` (no document-level horizontal scroll) confirmed on
+Dashboard, EA Products list, EA Product detail (reviewer read-only **and** developer interactive),
+Manuals list, New Manual wizard (Configuration step **and** the reviewer guard panel), Manual edit
+shell (developer 3-column **and** reviewer read-only), Preview, Templates, Review Teknis, Review
+Kepatuhan, and Settings.
+
+- Supported Configuration editor: the reorder / delete actions and row errors now wrap onto their
+  own line inside the card (measured at 375px: setup-row right edge == container right edge); the
+  Notes field spans the full grid width and stays inside the card / `.wizard-card`.
+- New Manual wizard Configuration step: the configuration row and the Notes field no longer extend
+  past the card boundary at any of the four widths.
+- Manual builder 3-column grid: no horizontal scroll at 1440px (centre track changed to
+  `minmax(0, 1fr)`).
+- Console on the main workflow: **no errors or warnings** (only dev-mode HMR / React DevTools info
+  logs); the Next.js `scroll-behavior` advisory is resolved by `data-scroll-behavior="smooth"`.
+
+**Not exercised in this pass — still pending e2e, no evidence invented:**
+
+- An actual pointer drag-and-drop / keyboard reorder **gesture** in the Supported Configuration
+  editor. Its controls are present, visible and non-overflowing at all four widths, but no reorder
+  interaction was performed.
+- Two-browser-session autosave-conflict flow.
+- Signed-in user with **zero** organisation memberships (every seed identity has a membership).
+- In-app create/persist CRUD round-trips end to end through the server actions (create EA
+  product / version, create manual, block editing).
+
+**Checks on the post-commit tree:** `npm run lint`, `npm run typecheck`, `npm run test`
+(57 unit passed; integration suite skipped without `SUPABASE_TEST_*`, by design) and
+`npm run build` all pass. The database layer was untouched, so the live integration result from
+[§0c](#0c-live-dev-verification-2026-08-29) stands unchanged: **27 passed / 0 failed / 0 skipped**.
+No credentials or secret values are recorded here.
 
 ---
 
@@ -230,16 +289,24 @@ npx vitest run tests/integration/rls.test.ts
 | `/` / `/login` / `/dashboard` (configured, no session) | ✅ 307→/login (guard) / 200 / 307→/login |
 | `npx vitest run tests/integration/rls.test.ts` — Supabase DEV | ✅ **27 passed / 0 failed / 0 skipped** ([§0c](#0c-live-dev-verification-2026-08-29)) |
 | App sign-in against DEV | ✅ `developer@smartin.demo` authenticates; organisation memberships resolve |
+| Frontend role + responsive smoke test — Supabase DEV | ✅ reviewer / compliance read-only, developer authoring retained; no document horizontal scroll at 375 / 768 / 1024 / 1440; console clean ([§0d](#0d-final-frontend-correction--browser-smoke-test-2026-08-29)) |
 
 **Covered by the live DEV run (§0c):** migration/seed apply, RLS role enforcement, SECURITY
 DEFINER RPC denial (anon + reviewer), same-org composite-FK relational integrity, private-storage
 access + signed-URL expiry, template instantiation, parameter-ownership propagation, multi-role
 aggregation.
 
-**Still UI/e2e work (not a database gap):** in-app CRUD round-trips through the server actions,
-the signed-in-zero-membership screen, the two-browser-session autosave-conflict flow, pointer-drag
-reorder in the browser, and the Polaris-vs-VMax render walkthrough. These need the Phase 3 editor
-surface and browser-level e2e, not more credentials.
+**Covered by the frontend smoke test (§0d):** role-aware authoring controls (reviewer / compliance
+read-only vs developer / admin), the Supported Configuration / Parameter / New Manual wizard
+responsive layout (no overflow at four widths), the manual-builder / preview permission
+presentation, and live-data rendering of the Phase 2 pages against Supabase DEV.
+
+**Still UI/e2e work (not a database gap):** in-app create/persist CRUD round-trips through the
+server actions, the signed-in-zero-membership screen, the two-browser-session autosave-conflict
+flow, an actual drag / keyboard reorder **gesture** in the Supported Configuration editor (its
+controls are now browser-verified present and non-overflowing — §0d), and the deliberate
+Polaris-vs-VMax no-bleed render walkthrough. These need the Phase 3 editor surface and
+browser-level e2e, not more credentials.
 
 ---
 
@@ -261,7 +328,7 @@ a schema/credential gap · ⬜ SHOULD / Phase boundary.
 | AC-P2-8 | 🟦 | `requirements`/`support` JSON persisted on `ea_versions`; "no free-text symbols/timeframes" enforced by the `ea_version_setups` schema (parity test ✅). A full form round-trip is UI e2e. |
 | AC-P2-9 | 🟦 | `create_ea_version_with_setups` writes one row per configuration; 3-config distinctness is unit-tested and the RPC's **authorisation** is verified live (anon + reviewer refused). The positive multi-config persistence path is pending e2e. |
 | AC-P2-9a | ✅ / 🟦 | No inference path (unit-tested); full rendered-output scan pending (UI e2e). |
-| AC-P2-9b | ✅ / 🟦 | Editor has **pointer drag + keyboard** reorder, suffix symbols, controlled TF, inline dup rejection — built + unit-tested; browser e2e pending. |
+| AC-P2-9b | ✅ / 🟦 | Editor has **pointer drag + keyboard** reorder, suffix symbols, controlled TF, inline dup rejection — built + unit-tested. Its controls are browser-verified present and non-overflowing at 375 / 768 / 1024 / 1440 (§0d); an actual drag / keyboard reorder **gesture** is still pending e2e. |
 | AC-P2-9c | ✅ | Broker-min-lot note + "data uji developer" labels present in editor, wizard, version form, renderer. |
 | AC-P2-10 | ✅ | Verified live against DEV: `create_manual_with_version` instantiates exactly the system template's section set and records `template_id` + `template_version` on the manual version. |
 | AC-P2-11 | 🟦 | New-EA path is one transactional RPC (`create_product_version_manual`); its authorisation is verified live (anon + reviewer refused). The positive atomic create / rollback assertion is pending e2e. |
@@ -277,10 +344,10 @@ a schema/credential gap · ⬜ SHOULD / Phase boundary.
 | AC-P2-18c | ✅ | Verified live against DEV: an Org B admin's `create_ea_version_with_setups` copying parameter definitions from an Org A EA version is refused and nothing is copied (same-org + author guard). |
 | AC-P2-19 | ✅ | Verified live against DEV: private-bucket fixture — owning-org member can sign a URL, another org cannot, the object is not publicly reachable, a signed URL expires. `width`/`height` header parsing has 4-format unit tests. |
 | AC-P2-20 | ✅ / 🟦 | `row_version`-guarded UPDATE + `resolveWrite` unit-tested; the `row_version` bump is observed live in the block round-trip; 5 UI states. The two-browser-session conflict flow is pending e2e (Phase 3 editor). |
-| AC-P2-21 | ✅ | Verified live against DEV: RLS is role-aware (reviewers read-only, cross-org reads/writes refused), the SECURITY DEFINER gate denies anon on all 7 mutating RPCs, `EXECUTE` is revoked from PUBLIC/anon, and same-org composite FKs block cross-org parent references (INSERT + UPDATE). |
+| AC-P2-21 | ✅ | Verified live against DEV: RLS is role-aware (reviewers read-only, cross-org reads/writes refused), the SECURITY DEFINER gate denies anon on all 7 mutating RPCs, `EXECUTE` is revoked from PUBLIC/anon, and same-org composite FKs block cross-org parent references (INSERT + UPDATE). The reviewer / compliance read-only **UI** now mirrors this and is browser-verified (§0d). |
 | AC-P2-22 | ✅ | `assertCan(roles, …)` typed-error unit tests, incl. multi-role; the live multi-role fixture confirms roles aggregate, authoring is retained and admin is not gained. |
 | AC-P2-23 | ✅ (SHOULD) | Request ids implemented: `middleware.ts` assigns/echoes `x-request-id` (verified on every response); `writeAudit` stores `metadata.requestId`; `mapPostgrestError` logs unmapped errors with it via a redacting logger. Human messages only — no SQL/tokens/signed URLs. |
-| AC-P2-24 | ✅ / 🟦 | Pages read from `features/*/queries.ts`; `mock-data.ts` deleted. Live-data render walkthrough pending (UI e2e). |
+| AC-P2-24 | ✅ | Pages read from `features/*/queries.ts`; `mock-data.ts` deleted. Live-data rendering of the Phase 2 pages verified in-browser against Supabase DEV (§0d): dashboard metrics, EA Product detail (identity / versions / setups / parameters), manual list, manual builder (18 template chapters), preview. |
 | AC-P2-25 | ✅ | Vitest + Testing Library green in CI; slug/version mapping, permission map, autosave conflict, reorder, image dims all covered; integration suite green against DEV. |
 | AC-P2-26 | ✅ | `manual_templates`/`_sections` versioned + installed by migration; `manual_versions.template_id` **NOT NULL** + `template_version` recorded and verified live (§0c / AC-P2-10). **Checklist template versioning is Phase 5** (documented in `ACCEPTANCE_CRITERIA.md` AC-P2-26). |
 | AC-P2-27 | ✅ | Decisions in §12; the multi-role question resolved by implementing it. |
@@ -330,12 +397,20 @@ hardened-reorder malformed-list rejection, the cross-org `copy_parameter_definit
 private-image fixture group, template instantiation, parameter-ownership propagation, and the
 multi-role fixture. Results recorded in §0c, §10 and §11.
 
+**Frontend: role-aware and responsive.** Commit `9d24daa` (§0d) made the authoring UI role-aware
+(reviewer / compliance read-only, developer / admin authoring retained) and fixed the Supported
+Configuration / Parameter / New Manual wizard responsive overflow. Verified in-browser at
+375 / 768 / 1024 / 1440 with no document horizontal scroll and a clean console.
+
 **Still outstanding — UI / end-to-end, not a schema or credential gap:** the browser walkthroughs
-behind AC-P2-1 (copy scan), AC-P2-5 (signed-in zero-membership screen), AC-P2-8/9/9a/9b (config
-form + rendered output), AC-P2-11/13 (create/duplicate flows in the app), AC-P2-12/24 (Polaris vs
-VMax render), AC-P2-14 (required-section-delete in the UI), AC-P2-18 (parameter management UI),
-and AC-P2-20 (two-browser-session autosave conflict). These depend on the Phase 3 editor surface
-and browser-level e2e.
+behind AC-P2-1 (copy scan), AC-P2-5 (signed-in zero-membership screen), AC-P2-8 / 9 / 9a (config
+form persist round-trip + rendered-output scan), AC-P2-9b (an actual drag / keyboard reorder
+gesture — its controls are now browser-verified present and non-overflowing), AC-P2-11 / 13
+(create / duplicate flows persisting through the server actions), AC-P2-12 (deliberate
+Polaris-vs-VMax no-bleed render), AC-P2-14 (required-section-delete in the UI), AC-P2-18
+(parameter create / edit / delete persisted from the management UI), and AC-P2-20
+(two-browser-session autosave conflict). These depend on the Phase 3 editor surface and
+browser-level e2e.
 
 ---
 
