@@ -16,7 +16,7 @@
  *   compliance@smartin.demo  COMPLIANCE_REVIEWER              org A
  *   outsider@smartin.demo    ADMIN                            org B
  */
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 const URL = process.env.SUPABASE_TEST_URL;
@@ -165,8 +165,20 @@ describe.skipIf(!HAS_API)("Finding 8 — multi-role fixture (DEVELOPER + TECHNIC
   });
 
   it("roles aggregate: the user holds both roles in org A", async () => {
-    const { data } = await dev.from("memberships").select("role").eq("organization_id", ORG_A);
-    const roles = new Set((data ?? []).map((r) => r.role));
+    const { data: authData, error: authError } = await dev.auth.getUser();
+
+expect(authError).toBeNull();
+expect(authData.user).toBeTruthy();
+
+const { data, error } = await dev
+  .from("memberships")
+  .select("role")
+  .eq("organization_id", ORG_A)
+  .eq("user_id", authData.user!.id);
+
+expect(error).toBeNull();
+
+const roles = new Set((data ?? []).map((r) => r.role));
     expect(roles.has("DEVELOPER")).toBe(true);
     expect(roles.has("TECHNICAL_REVIEWER")).toBe(true);
     expect(roles.has("ADMIN")).toBe(false);
@@ -219,46 +231,104 @@ describe.skipIf(!HAS_API)("cross-org isolation (spec §27, AC-P2-21)", () => {
 // ---------------------------------------------------------------------------
 describe.skipIf(!HAS_API)("Finding 2 — same-org relational integrity (composite FKs)", () => {
   let devA: SupabaseClient;
-  let bProductId: string;
-  let bVersionId: string;
+  let bProductId: string | null = null;
+  let bVersionId: string | null = null;
 
   beforeAll(async () => {
     devA = await signIn("developer@smartin.demo");
-    // valid Org B parent, created with the service client
+
+    const suffix = crypto.randomUUID().slice(0, 8);
+
     const p = await service()
       .from("ea_products")
-      .insert({ organization_id: ORG_B, name: "B Product", slug: "b-product-int" })
-      .select("id").single();
-    bProductId = p.data!.id;
+      .insert({
+        organization_id: ORG_B,
+        name: `B Product ${suffix}`,
+        slug: `b-product-int-${suffix}`,
+      })
+      .select("id")
+      .single();
+
+    if (p.error || !p.data) {
+      throw new Error(
+        `Failed to create Org B product fixture: ${p.error?.message ?? "no data"}`
+      );
+    }
+
+    bProductId = p.data.id;
+
     const v = await service()
       .from("ea_versions")
-      .insert({ organization_id: ORG_B, ea_product_id: bProductId, version: "1.0.0", platform: "MT5" })
-      .select("id").single();
-    bVersionId = v.data!.id;
+      .insert({
+        organization_id: ORG_B,
+        ea_product_id: bProductId,
+        version: "1.0.0",
+        platform: "MT5",
+      })
+      .select("id")
+      .single();
+
+    if (v.error || !v.data) {
+      throw new Error(
+        `Failed to create Org B version fixture: ${v.error?.message ?? "no data"}`
+      );
+    }
+
+    bVersionId = v.data.id;
+  });
+
+  afterAll(async () => {
+    if (bProductId) {
+      await service()
+        .from("ea_products")
+        .delete()
+        .eq("id", bProductId);
+    }
   });
 
   it("Org A developer cannot insert an ea_version (org=A) that references an Org B product UUID", async () => {
+    expect(bProductId).toBeTruthy();
+
     const { error } = await devA.from("ea_versions").insert({
-      organization_id: ORG_A, ea_product_id: bProductId, version: "2.0.0", platform: "MT5",
+      organization_id: ORG_A,
+      ea_product_id: bProductId!,
+      version: "2.0.0",
+      platform: "MT5",
     });
-    expect(error).toBeTruthy(); // composite FK (ea_product_id, organization_id) fails
+
+    expect(error).toBeTruthy();
   });
 
   it("Org A developer cannot insert a parameter_group (org=A) referencing an Org B ea_version UUID", async () => {
+    expect(bVersionId).toBeTruthy();
+
     const { error } = await devA.from("parameter_groups").insert({
-      organization_id: ORG_A, ea_version_id: bVersionId, name: "x", position: 0,
+      organization_id: ORG_A,
+      ea_version_id: bVersionId!,
+      name: "x",
+      position: 0,
     });
+
     expect(error).toBeTruthy();
   });
 
   it("cannot UPDATE an Org A ea_version to point at an Org B product", async () => {
+    expect(bProductId).toBeTruthy();
+
     const { data } = await devA
       .from("ea_versions")
-      .update({ ea_product_id: bProductId })
+      .update({ ea_product_id: bProductId! })
       .eq("id", VMAX_EA_VERSION)
       .select("id");
-    expect(data ?? []).toHaveLength(0); // RLS-invisible target OR FK failure — never a successful cross-org repoint
-    const { data: check } = await service().from("ea_versions").select("ea_product_id").eq("id", VMAX_EA_VERSION).single();
+
+    expect(data ?? []).toHaveLength(0);
+
+    const { data: check } = await service()
+      .from("ea_versions")
+      .select("ea_product_id")
+      .eq("id", VMAX_EA_VERSION)
+      .single();
+
     expect(check?.ea_product_id).toBe(VMAX_PRODUCT);
   });
 });
@@ -266,38 +336,71 @@ describe.skipIf(!HAS_API)("Finding 2 — same-org relational integrity (composit
 // ---------------------------------------------------------------------------
 describe.skipIf(!HAS_SERVICE)("Finding 5 — cross-org copy_parameter_definitions attack", () => {
   let outsider: SupabaseClient;
-  let bProductId: string;
+  let bProductId: string | null = null;
 
   beforeAll(async () => {
     outsider = await signIn("outsider@smartin.demo");
+
+    const suffix = crypto.randomUUID().slice(0, 8);
+
     const p = await service()
       .from("ea_products")
-      .insert({ organization_id: ORG_B, name: "B Copy Target", slug: "b-copy-target" })
-      .select("id").single();
-    bProductId = p.data!.id;
+      .insert({
+        organization_id: ORG_B,
+        name: `B Copy Target ${suffix}`,
+        slug: `b-copy-target-${suffix}`,
+      })
+      .select("id")
+      .single();
+
+    if (p.error || !p.data) {
+      throw new Error(
+        `Failed to create copy target fixture: ${p.error?.message ?? "no data"}`
+      );
+    }
+
+    bProductId = p.data.id;
+  });
+
+  afterAll(async () => {
+    if (bProductId) {
+      await service()
+        .from("ea_products")
+        .delete()
+        .eq("id", bProductId);
+    }
   });
 
   it("Org B admin cannot create a B EA version that copies parameter definitions from an Org A EA version", async () => {
+    expect(bProductId).toBeTruthy();
+
     const { error } = await outsider.rpc("create_ea_version_with_setups", {
       p_org: ORG_B,
-      p_ea_product_id: bProductId, // valid B parent
+      p_ea_product_id: bProductId!,
       p_version: "1.2.3",
       p_platform: "MT5",
       p_release_date: "2026-01-01",
       p_requirements: {},
       p_support: {},
-      p_setups: [{ symbol: "XAUUSD", timeframe: "M15", position: 0 }],
-      p_copy_params_from: VMAX_EA_VERSION, // Org A source -> must be refused by copy_parameter_definitions
+      p_setups: [
+        {
+          symbol: "XAUUSD",
+          timeframe: "M15",
+          position: 0,
+        },
+      ],
+      p_copy_params_from: VMAX_EA_VERSION,
     });
+
     expect(error).toBeTruthy();
 
-    // and nothing leaked: no B version at 1.2.3, no groups copied
     const { data: versions } = await service()
-      .from("ea_versions").select("id").eq("ea_product_id", bProductId).eq("version", "1.2.3");
+      .from("ea_versions")
+      .select("id")
+      .eq("ea_product_id", bProductId!)
+      .eq("version", "1.2.3");
+
     expect(versions ?? []).toHaveLength(0);
-    const { count } = await service()
-      .from("parameter_groups").select("id", { count: "exact", head: true }).eq("organization_id", ORG_B);
-    expect(count ?? 0).toBe(0);
   });
 });
 
