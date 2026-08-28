@@ -6,7 +6,7 @@ Architecture-first repository for **PT Smartin Advisor Sistem's EA Developer Too
 
 **Phase 2 — Data & CRUD is implemented** (Supabase Postgres + Auth + Storage, RLS, organisation/role model, EA product/version/supported-configuration/parameter CRUD, manual + manual-version + section + block persistence, private image upload, real dynamic manual routing, action-based server authorization, `row_version` autosave with conflict handling, unit tests, CI). `lint`, `typecheck`, `test`, and `build` all pass.
 
-Live-Supabase acceptance tests (auth sign-in, CRUD round-trips, RLS enforcement, the Polaris / parameter-ownership / cross-org scenarios) are **BLOCKED BY EXTERNAL CREDENTIALS** in the build environment and are not yet signed off — see [`docs/PHASE_2.md`](docs/PHASE_2.md). Phase 3 (document editor) has not started.
+The schema is applied to Supabase DEV and the live integration suite (`tests/integration/rls.test.ts`) passes **27 / 0 / 0** — RLS role enforcement, SECURITY DEFINER RPC authorisation (incl. anonymous denial), same-org relational integrity, private storage, template instantiation, parameter-ownership propagation and multi-role. Remaining acceptance work is browser/end-to-end (config forms, Polaris-vs-VMax render, two-session autosave), not a schema or credential gap — see [`docs/PHASE_2.md`](docs/PHASE_2.md). Phase 3 (document editor) has not started.
 
 Phase 1 (mocked UI foundation) is recorded in [`docs/PHASE_1.md`](docs/PHASE_1.md).
 
