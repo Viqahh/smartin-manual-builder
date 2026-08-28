@@ -8,3 +8,7 @@ playwright-report/
 test-results/
 *.log
 *.tsbuildinfo
+
+# Supabase CLI scratch
+supabase/.temp/
+supabase/.branches/

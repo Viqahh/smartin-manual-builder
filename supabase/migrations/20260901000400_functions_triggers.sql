@@ -2,11 +2,19 @@
 -- Enforce invariants in the database, not only the frontend (spec §7).
 
 -- ---------------------------------------------------------------------------
--- instantiate_manual_sections: seed the canonical 18-chapter structure for a
--- freshly created ManualVersion (PRD-MAN-006, AC-P2-10). Mirrors
--- lib/domain/canonical-sections.ts — keep the two in sync.
+-- instantiate_sections_from_template: seed a freshly created ManualVersion's
+-- sections from a SPECIFIC manual_templates row's manual_template_sections
+-- (PRD-MAN-006, AC-P2-10/26). The canonical system template + its 18 sections
+-- are installed by 20260901000350_system_template.sql.
+--
+-- SECURITY: this helper mutates manual_sections, so it verifies the caller has
+-- authoring access to the manual version's organisation — a caller who merely
+-- knows a UUID of another org's manual version cannot use it (spec §2).
 -- ---------------------------------------------------------------------------
-create or replace function app.instantiate_manual_sections(p_manual_version_id uuid)
+create or replace function app.instantiate_sections_from_template(
+  p_manual_version_id uuid,
+  p_template_id uuid
+)
 returns void
 language plpgsql
 security definer
@@ -19,28 +27,45 @@ begin
   if v_org is null then
     raise exception 'manual version % not found', p_manual_version_id;
   end if;
+  -- auth.uid() is NULL for trusted backend sessions (service_role / seed / migrations).
+  if auth.uid() is not null and not app.can_author(v_org) then
+    raise exception 'forbidden' using errcode = 'insufficient_privilege';
+  end if;
+  if not exists (select 1 from manual_templates where id = p_template_id) then
+    raise exception 'manual template % not found', p_template_id;
+  end if;
 
   insert into manual_sections (organization_id, manual_version_id, section_key, title, required, is_custom, position)
-  values
-    (v_org, p_manual_version_id, 'cover',            'Sampul & Identitas Produk',      true,  false, 0),
-    (v_org, p_manual_version_id, 'overview',         'Ringkasan Produk',               true,  false, 1),
-    (v_org, p_manual_version_id, 'requirements',     'Persyaratan Sistem & Broker',    true,  false, 2),
-    (v_org, p_manual_version_id, 'package',          'Isi Paket',                      false, false, 3),
-    (v_org, p_manual_version_id, 'installation',     'Instalasi',                      true,  false, 4),
-    (v_org, p_manual_version_id, 'quick-start',      'Mulai Cepat',                    true,  false, 5),
-    (v_org, p_manual_version_id, 'how-it-works',     'Cara Kerja EA',                  true,  false, 6),
-    (v_org, p_manual_version_id, 'parameters',       'Referensi Input / Parameter',    true,  false, 7),
-    (v_org, p_manual_version_id, 'risk',             'Risiko & Manajemen Dana',        true,  false, 8),
-    (v_org, p_manual_version_id, 'presets',          'Preset, Pair & Timeframe',       true,  false, 9),
-    (v_org, p_manual_version_id, 'interface',        'Antarmuka EA',                   false, false, 10),
-    (v_org, p_manual_version_id, 'performance',      'Informasi Backtest',             true,  false, 11),
-    (v_org, p_manual_version_id, 'troubleshooting',  'Pemecahan Masalah',              true,  false, 12),
-    (v_org, p_manual_version_id, 'faq',              'Pertanyaan Umum',                false, false, 13),
-    (v_org, p_manual_version_id, 'changelog',        'Catatan Perubahan',              true,  false, 14),
-    (v_org, p_manual_version_id, 'disclaimer',       'Pernyataan Risiko',              false, false, 15),
-    (v_org, p_manual_version_id, 'support',          'Dukungan',                       false, false, 16),
-    (v_org, p_manual_version_id, 'transparency',     'Transparansi Strategi',          false, false, 17)
+  select v_org, p_manual_version_id, ts.section_key, ts.title, ts.required, false, ts.position
+  from manual_template_sections ts
+  where ts.template_id = p_template_id
   on conflict (manual_version_id, section_key) do nothing;
+
+  if not found then
+    raise exception 'manual template % has no sections', p_template_id;
+  end if;
+end;
+$$;
+
+-- Back-compat shim: resolve the active system template, then delegate.
+create or replace function app.instantiate_manual_sections(p_manual_version_id uuid)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_template uuid;
+begin
+  select id into v_template
+  from manual_templates
+  where organization_id is null and key = 'smartin-ea-manual' and is_active
+  order by version desc
+  limit 1;
+  if v_template is null then
+    raise exception 'no active system manual template installed';
+  end if;
+  perform app.instantiate_sections_from_template(p_manual_version_id, v_template);
 end;
 $$;
 
@@ -140,6 +165,11 @@ create trigger manual_blocks_guard_parameter_table
 -- ---------------------------------------------------------------------------
 -- copy_parameter_definitions: EA-version -> EA-version copy only (AC-P2-18c).
 -- Never touches manual versions.
+--
+-- SECURITY: BOTH the source and the target EA version must belong to the SAME
+-- organisation, and the caller must have authoring access to it. A caller who
+-- knows another org's EA-version UUID cannot copy its parameter definitions
+-- across an organisation boundary (spec §2).
 -- ---------------------------------------------------------------------------
 create or replace function app.copy_parameter_definitions(p_source_ea_version uuid, p_target_ea_version uuid)
 returns void
@@ -148,13 +178,26 @@ security definer
 set search_path = public
 as $$
 declare
+  v_source_org uuid;
   v_target_org uuid;
   r_group record;
   v_new_group uuid;
 begin
+  select organization_id into v_source_org from ea_versions where id = p_source_ea_version;
   select organization_id into v_target_org from ea_versions where id = p_target_ea_version;
+  if v_source_org is null then
+    raise exception 'source EA version % not found', p_source_ea_version;
+  end if;
   if v_target_org is null then
     raise exception 'target EA version % not found', p_target_ea_version;
+  end if;
+  if v_source_org is distinct from v_target_org then
+    raise exception 'cross-organisation parameter copy is not allowed'
+      using errcode = 'insufficient_privilege';
+  end if;
+  -- auth.uid() is NULL for trusted backend sessions.
+  if auth.uid() is not null and not app.can_author(v_target_org) then
+    raise exception 'forbidden' using errcode = 'insufficient_privilege';
   end if;
 
   for r_group in

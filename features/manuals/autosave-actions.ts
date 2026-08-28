@@ -26,8 +26,8 @@ export type AutosaveResult = ActionResult<{ rowVersion: number; updatedAt: strin
  */
 export async function saveSection(input: unknown): Promise<AutosaveResult> {
   try {
-    const { orgId, role } = await requireActiveOrg();
-    assertCan(role, "manual:update");
+    const { orgId, roles } = await requireActiveOrg();
+    assertCan(roles, "manual:update");
 
     const parsed = saveSectionSchema.safeParse(input);
     if (!parsed.success) {

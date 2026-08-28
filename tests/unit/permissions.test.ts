@@ -49,9 +49,22 @@ describe("permission / action map (PRD-SEC-003, AC-P2-22)", () => {
     expect(can(undefined, "manual:read")).toBe(false);
   });
 
-  it("canAny grants when any held role permits", () => {
+  it("canAny grants when any held role permits (multi-role user — PRD §6)", () => {
+    // A user holding both TECHNICAL_REVIEWER and DEVELOPER in one org may author.
     expect(canAny(["TECHNICAL_REVIEWER", "DEVELOPER"], "manual:update")).toBe(true);
+    expect(canAny(["TECHNICAL_REVIEWER", "DEVELOPER"], "ea_parameter:manage")).toBe(true);
+    // Reviewer-only combination stays read-only for content.
     expect(canAny(["TECHNICAL_REVIEWER", "COMPLIANCE_REVIEWER"], "manual:update")).toBe(false);
+    expect(canAny(["TECHNICAL_REVIEWER", "COMPLIANCE_REVIEWER"], "ea_setup:manage")).toBe(false);
+    // ...but each reviewer role still keeps its own review action.
+    expect(canAny(["TECHNICAL_REVIEWER", "COMPLIANCE_REVIEWER"], "review:technical")).toBe(true);
+    expect(canAny(["TECHNICAL_REVIEWER", "COMPLIANCE_REVIEWER"], "review:compliance")).toBe(true);
+  });
+
+  it("only ADMIN in the role set grants admin-only actions", () => {
+    expect(canAny(["DEVELOPER"], "member:manage")).toBe(false);
+    expect(canAny(["DEVELOPER", "TECHNICAL_REVIEWER"], "template:manage")).toBe(false);
+    expect(canAny(["DEVELOPER", "ADMIN"], "member:manage")).toBe(true);
   });
 
   it("assertCan throws a typed FORBIDDEN error when denied", () => {

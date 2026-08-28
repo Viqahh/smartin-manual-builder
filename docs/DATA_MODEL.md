@@ -33,7 +33,7 @@ erDiagram
 |---|---|
 | `organizations` | `id`, `name`, `slug` unique, timestamps |
 | `users` | `id` matching auth user, display name, email; no application role stored globally |
-| `memberships` | organization + user unique, role enum, active flag |
+| `memberships` | one row per `(organization, user, role)` — a user MAY hold several roles in one organisation (PRD §6); role enum, active flag. Unique `(organization_id, user_id, role)`. |
 | `ea_products` | organization, owner, name, slug unique per organization, description, archived timestamp |
 | `ea_versions` | product, semantic version string, platform `MT4/MT5`, release date, structured requirements, support details; version unique per product/platform. **Requirements JSON does not carry a single global "minimum lot"** — see `ea_version_setups.tested_minimum_lot` and the broker-symbol-spec note below. |
 | `ea_version_setups` | **ea version**, `symbol` (raw MetaTrader symbol string, broker suffixes allowed, e.g. `XAUUSD`, `XAUUSD.m`, `EURUSD.pro`), `timeframe` (controlled MT enum: `M1,M5,M15,M30,H1,H4,D1,W1,MN1`), optional `preset_ref` (preset name / reference), optional `tested_minimum_lot` (developer test data, not a broker rule), optional `notes`, `is_supported` flag, `position`; **unique `(ea_version_id, symbol, timeframe)`**. Each supported configuration is an explicit stored row — the system never infers a `symbol`×`timeframe` combination from independently listed values. |

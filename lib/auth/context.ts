@@ -7,19 +7,18 @@ import type { OrgRole } from "@/lib/permissions/actions";
 
 export type WorkspaceContext = {
   configured: boolean;
-  /** signed-in auth user, if any */
   user: { id: string; email: string; displayName: string } | null;
-  /** memberships across all orgs */
-  memberships: { organizationId: string; organizationName: string; role: MembershipRole }[];
-  /** the org the workspace currently operates in (Phase 2: first active membership) */
-  activeOrg: { id: string; name: string; role: OrgRole } | null;
+  /** memberships grouped by org — a user may hold MULTIPLE roles per org (PRD §6). */
+  memberships: { organizationId: string; organizationName: string; roles: MembershipRole[] }[];
+  /** the org the workspace currently operates in (Phase 2: first membership by created_at). */
+  activeOrg: { id: string; name: string; roles: OrgRole[] } | null;
 };
 
 /**
  * Single source of truth for "who is this and what may they do", resolved once per request.
- * - unconfigured Supabase -> configured:false (workspace shows a setup state)
- * - no session            -> user:null (workspace layout redirects to /login)
- * - session, no membership -> user set, activeOrg:null (workspace layout redirects to /no-membership)
+ * - unconfigured Supabase -> configured:false
+ * - no session            -> user:null  (workspace layout -> /login)
+ * - session, no membership -> activeOrg:null  (workspace layout -> /no-membership)
  */
 export const getWorkspaceContext = cache(async (): Promise<WorkspaceContext> => {
   if (!isSupabaseConfigured()) {
@@ -48,24 +47,29 @@ export const getWorkspaceContext = cache(async (): Promise<WorkspaceContext> => 
 
   const { data: rows } = await supabase
     .from("memberships")
-    .select("organization_id, role, organizations(name)")
+    .select("organization_id, role, created_at, organizations(name)")
     .eq("user_id", auth.user.id)
     .eq("is_active", true)
     .order("created_at", { ascending: true });
 
-  const memberships = (rows ?? []).map((r) => {
+  // Group rows -> one entry per org, roles[] preserving first-seen org order.
+  const order: string[] = [];
+  const byOrg = new Map<string, { organizationId: string; organizationName: string; roles: MembershipRole[] }>();
+  for (const r of rows ?? []) {
+    const orgId = r.organization_id as string;
     const orgRel = r.organizations as unknown as { name?: string } | { name?: string }[] | null;
-    const name = Array.isArray(orgRel) ? orgRel[0]?.name : orgRel?.name;
-    return {
-      organizationId: r.organization_id as string,
-      organizationName: name ?? "Organisasi",
-      role: r.role as MembershipRole,
-    };
-  });
+    const name = (Array.isArray(orgRel) ? orgRel[0]?.name : orgRel?.name) ?? "Organisasi";
+    if (!byOrg.has(orgId)) {
+      byOrg.set(orgId, { organizationId: orgId, organizationName: name, roles: [] });
+      order.push(orgId);
+    }
+    byOrg.get(orgId)!.roles.push(r.role as MembershipRole);
+  }
+  const memberships = order.map((id) => byOrg.get(id)!);
 
   const first = memberships[0];
   const activeOrg = first
-    ? { id: first.organizationId, name: first.organizationName, role: first.role as OrgRole }
+    ? { id: first.organizationId, name: first.organizationName, roles: first.roles as OrgRole[] }
     : null;
 
   return { configured: true, user, memberships, activeOrg };
@@ -84,11 +88,11 @@ export class AuthError extends Error {
 export async function requireActiveOrg(): Promise<{
   userId: string;
   orgId: string;
-  role: OrgRole;
+  roles: OrgRole[];
 }> {
   const ctx = await getWorkspaceContext();
   if (!ctx.configured) throw new AuthError("NOT_CONFIGURED", "Supabase belum dikonfigurasi.");
   if (!ctx.user) throw new AuthError("UNAUTHENTICATED", "Sesi tidak ditemukan.");
   if (!ctx.activeOrg) throw new AuthError("NO_MEMBERSHIP", "Anda belum tergabung dalam organisasi.");
-  return { userId: ctx.user.id, orgId: ctx.activeOrg.id, role: ctx.activeOrg.role };
+  return { userId: ctx.user.id, orgId: ctx.activeOrg.id, roles: ctx.activeOrg.roles };
 }

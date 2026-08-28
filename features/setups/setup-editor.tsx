@@ -1,7 +1,7 @@
 "use client";
 
-import { useId, useState, useTransition } from "react";
-import { ArrowDown, ArrowUp, Info, Plus, Trash2 } from "lucide-react";
+import { useId, useRef, useState, useTransition } from "react";
+import { ArrowDown, ArrowUp, GripVertical, Info, Plus, Trash2 } from "lucide-react";
 import { MT_TIMEFRAMES, MT_TIMEFRAME_LABELS, type MtTimeframe } from "@/lib/domain/timeframes";
 import { SYMBOL_PATTERN, normalizeSymbol, setupDedupeKey } from "@/lib/domain/symbol";
 import { BROKER_MIN_LOT_NOTE_ID } from "@/lib/domain/setups";
@@ -34,6 +34,8 @@ export function SupportedConfigurationEditor({
   const [formError, setFormError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [pending, startTransition] = useTransition();
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const dragFrom = useRef<number | null>(null);
   const groupId = useId();
 
   function patch(index: number, next: Partial<SetupRow>) {
@@ -48,15 +50,18 @@ export function SupportedConfigurationEditor({
     setSaved(false);
     setRows((prev) => (prev.length === 1 ? [blankRow()] : prev.filter((_, i) => i !== index)));
   }
-  function move(index: number, dir: -1 | 1) {
-    const target = index + dir;
-    if (target < 0 || target >= rows.length) return;
+  function reorder(from: number, to: number) {
+    if (from === to || to < 0 || to >= rows.length) return;
     setSaved(false);
     setRows((prev) => {
       const copy = [...prev];
-      [copy[index], copy[target]] = [copy[target], copy[index]];
+      const [moved] = copy.splice(from, 1);
+      copy.splice(to, 0, moved);
       return copy;
     });
+  }
+  function move(index: number, dir: -1 | 1) {
+    reorder(index, index + dir); // keyboard / button reorder
   }
 
   function validate(): boolean {
@@ -126,7 +131,43 @@ export function SupportedConfigurationEditor({
     <div className="setup-editor" aria-describedby={groupId}>
       <ol className="setup-rows">
         {rows.map((row, index) => (
-          <li key={index} className="setup-row" data-error={Boolean(errors[index])}>
+          <li
+            key={index}
+            className="setup-row"
+            data-error={Boolean(errors[index])}
+            data-dragover={dragIndex === index}
+            onDragOver={(e) => {
+              if (readOnly || dragFrom.current === null) return;
+              e.preventDefault();
+              setDragIndex(index);
+            }}
+            onDrop={(e) => {
+              if (readOnly || dragFrom.current === null) return;
+              e.preventDefault();
+              reorder(dragFrom.current, index);
+              dragFrom.current = null;
+              setDragIndex(null);
+            }}
+          >
+            {!readOnly && (
+              <button
+                type="button"
+                className="setup-drag-handle"
+                aria-label={`Seret untuk mengurutkan baris ${index + 1}`}
+                draggable
+                onDragStart={(e) => {
+                  dragFrom.current = index;
+                  setDragIndex(index);
+                  e.dataTransfer.effectAllowed = "move";
+                }}
+                onDragEnd={() => {
+                  dragFrom.current = null;
+                  setDragIndex(null);
+                }}
+              >
+                <GripVertical aria-hidden="true" size={15} />
+              </button>
+            )}
             <div className="setup-grid">
               <label className="setup-field">
                 <span>Symbol</span>

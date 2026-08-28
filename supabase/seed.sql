@@ -31,19 +31,17 @@ insert into organizations (id, name, slug) values
   ('b0000000-0000-4000-8000-00000000000b', 'Organisasi Lain (DEMO)',           'org-lain-demo')
 on conflict (id) do nothing;
 
+-- One row per (org, user, role) — multi-role model (PRD §6). "developer+" also gets a
+-- TECHNICAL_REVIEWER role to exercise the multi-role authoring path.
 insert into memberships (organization_id, user_id, role) values
   ('a0000000-0000-4000-8000-00000000000a', '11111111-1111-4111-8111-111111111111', 'DEVELOPER'),
   ('a0000000-0000-4000-8000-00000000000a', '22222222-2222-4222-8222-222222222222', 'ADMIN'),
   ('a0000000-0000-4000-8000-00000000000a', '33333333-3333-4333-8333-333333333333', 'TECHNICAL_REVIEWER'),
   ('b0000000-0000-4000-8000-00000000000b', '44444444-4444-4444-8444-444444444444', 'ADMIN')
-on conflict (organization_id, user_id) do nothing;
+on conflict (organization_id, user_id, role) do nothing;
 
--- ---------------------------------------------------------------------------
--- System manual template (versioned) — AC-P2-26
--- ---------------------------------------------------------------------------
-insert into manual_templates (id, organization_id, key, version, title, is_active)
-values ('c0000000-0000-4000-8000-00000000000c', null, 'smartin-ea-manual', 1, 'Template Manual EA Standar (DEMO)', true)
-on conflict do nothing;
+-- The canonical system manual template + its 18 sections are installed by
+-- 20260901000350_system_template.sql (structural, not demo seed).
 
 -- ---------------------------------------------------------------------------
 -- VMax EA — SAMPLE / DEMO
@@ -87,13 +85,16 @@ values
   ('a0000000-0000-4000-8000-00000000000a', 'f0000000-0000-4000-8000-00000000000f', 'Magic Number',   'MagicNumber', 'int',     '40021','Unik per chart', 'DEMO — pengelompokan order EA.',            'Membedakan order EA ini dari EA lain.',        'before_start', true,  2)
 on conflict (parameter_group_id, technical_name) do nothing;
 
--- Manual + first Manual Version + canonical sections
+-- Manual + first Manual Version + canonical sections (from the system template, version 1).
 insert into manuals (id, organization_id, ea_product_id, template_id, locale)
-values ('10000000-0000-4000-8000-000000000010', 'a0000000-0000-4000-8000-00000000000a', 'd0000000-0000-4000-8000-00000000000d', 'c0000000-0000-4000-8000-00000000000c', 'id')
+values ('10000000-0000-4000-8000-000000000010', 'a0000000-0000-4000-8000-00000000000a', 'd0000000-0000-4000-8000-00000000000d',
+        'a1a1a1a1-1111-4111-8111-000000000001', 'id')
 on conflict do nothing;
 
 insert into manual_versions (id, organization_id, manual_id, ea_version_id, version, status, template_version)
 values ('20000000-0000-4000-8000-000000000020', 'a0000000-0000-4000-8000-00000000000a', '10000000-0000-4000-8000-000000000010', 'e0000000-0000-4000-8000-00000000000e', '1.0.0', 'DRAFT', 1)
 on conflict do nothing;
 
-select app.instantiate_manual_sections('20000000-0000-4000-8000-000000000020');
+select app.instantiate_sections_from_template(
+  '20000000-0000-4000-8000-000000000020', 'a1a1a1a1-1111-4111-8111-000000000001'
+);

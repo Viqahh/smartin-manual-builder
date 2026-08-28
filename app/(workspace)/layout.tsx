@@ -22,7 +22,7 @@ export default async function WorkspaceLayout({ children }: { children: React.Re
 
   return (
     <AppShell
-      user={{ displayName: ctx.user.displayName, role: ctx.activeOrg.role }}
+      user={{ displayName: ctx.user.displayName, roles: ctx.activeOrg.roles }}
       orgName={ctx.activeOrg.name}
     >
       {children}

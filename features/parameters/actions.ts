@@ -6,7 +6,17 @@ import { requireActiveOrg, AuthError } from "@/lib/auth/context";
 import { assertCan, AuthorizationError } from "@/lib/permissions/actions";
 import { ok, fail, validationFail, type ActionResult } from "@/lib/errors";
 import { writeAudit } from "@/features/audit/write";
-import { createGroupSchema, createParameterSchema, updateParameterSchema } from "./schema";
+import { nextPosition, validateReorder } from "@/lib/domain/positions";
+import {
+  createGroupSchema,
+  createParameterSchema,
+  updateParameterSchema,
+  updateGroupSchema,
+  reorderGroupsSchema,
+  groupIdSchema,
+  parameterIdSchema,
+  reorderParametersSchema,
+} from "./schema";
 
 function authFail(e: unknown): ActionResult<never> | null {
   if (e instanceof AuthError) return fail(e.code, e.message);
@@ -16,20 +26,29 @@ function authFail(e: unknown): ActionResult<never> | null {
 
 export async function createParameterGroup(input: unknown): Promise<ActionResult<{ id: string }>> {
   try {
-    const { orgId, userId, role } = await requireActiveOrg();
-    assertCan(role, "ea_parameter:manage");
+    const { orgId, userId, roles } = await requireActiveOrg();
+    assertCan(roles, "ea_parameter:manage");
     const parsed = createGroupSchema.safeParse(input);
     if (!parsed.success) {
       return validationFail(parsed.error.issues.map((i) => ({ path: i.path.join("."), message: i.message })));
     }
     const supabase = await createSupabaseServerClient();
+    let position = parsed.data.position;
+    if (position === undefined) {
+      const { data: rows } = await supabase
+        .from("parameter_groups")
+        .select("position")
+        .eq("organization_id", orgId)
+        .eq("ea_version_id", parsed.data.eaVersionId);
+      position = nextPosition((rows ?? []).map((r) => Number(r.position)));
+    }
     const { data, error } = await supabase
       .from("parameter_groups")
       .insert({
         organization_id: orgId,
         ea_version_id: parsed.data.eaVersionId,
         name: parsed.data.name,
-        position: parsed.data.position,
+        position,
       })
       .select("id")
       .single();
@@ -47,14 +66,23 @@ export async function createParameterGroup(input: unknown): Promise<ActionResult
 
 export async function createParameter(input: unknown): Promise<ActionResult<{ id: string }>> {
   try {
-    const { orgId, userId, role } = await requireActiveOrg();
-    assertCan(role, "ea_parameter:manage");
+    const { orgId, userId, roles } = await requireActiveOrg();
+    assertCan(roles, "ea_parameter:manage");
     const parsed = createParameterSchema.safeParse(input);
     if (!parsed.success) {
       return validationFail(parsed.error.issues.map((i) => ({ path: i.path.join("."), message: i.message })));
     }
     const d = parsed.data;
     const supabase = await createSupabaseServerClient();
+    let position = d.position;
+    if (position === undefined) {
+      const { data: rows } = await supabase
+        .from("ea_parameters")
+        .select("position")
+        .eq("organization_id", orgId)
+        .eq("parameter_group_id", d.parameterGroupId);
+      position = nextPosition((rows ?? []).map((r) => Number(r.position)));
+    }
     const { data, error } = await supabase
       .from("ea_parameters")
       .insert({
@@ -74,7 +102,7 @@ export async function createParameter(input: unknown): Promise<ActionResult<{ id
         mutability: d.mutability,
         notes: d.notes,
         required: d.required,
-        position: d.position,
+        position,
       })
       .select("id")
       .single();
@@ -97,8 +125,8 @@ export async function createParameter(input: unknown): Promise<ActionResult<{ id
 
 export async function updateParameter(input: unknown): Promise<ActionResult<{ id: string }>> {
   try {
-    const { orgId, userId, role } = await requireActiveOrg();
-    assertCan(role, "ea_parameter:manage");
+    const { orgId, userId, roles } = await requireActiveOrg();
+    assertCan(roles, "ea_parameter:manage");
     const parsed = updateParameterSchema.safeParse(input);
     if (!parsed.success) {
       return validationFail(parsed.error.issues.map((i) => ({ path: i.path.join("."), message: i.message })));
@@ -133,3 +161,145 @@ export async function updateParameter(input: unknown): Promise<ActionResult<{ id
     return authFail(e) ?? fail("INTERNAL", "Gagal memperbarui parameter.");
   }
 }
+
+// ---------------------------------------------------------------------------
+// Parameter Group: rename, reorder, delete
+// ---------------------------------------------------------------------------
+export async function updateParameterGroup(input: unknown): Promise<ActionResult<{ id: string }>> {
+  try {
+    const { orgId, userId, roles } = await requireActiveOrg();
+    assertCan(roles, "ea_parameter:manage");
+    const parsed = updateGroupSchema.safeParse(input);
+    if (!parsed.success) {
+      return validationFail(parsed.error.issues.map((i) => ({ path: i.path.join("."), message: i.message })));
+    }
+    if (parsed.data.name === undefined) return ok({ id: parsed.data.id });
+    const supabase = await createSupabaseServerClient();
+    const { error } = await supabase
+      .from("parameter_groups")
+      .update({ name: parsed.data.name })
+      .eq("organization_id", orgId)
+      .eq("id", parsed.data.id);
+    if (error) {
+      return mapPostgrestError(error, {
+        unique: { parameter_groups_ea_version_id_name_key: { path: "name", message: "Nama grup sudah dipakai." } },
+      });
+    }
+    await writeAudit(orgId, userId, "ea_parameter:manage", "parameter_group", parsed.data.id, { op: "rename" });
+    return ok({ id: parsed.data.id });
+  } catch (e) {
+    return authFail(e) ?? fail("INTERNAL", "Gagal memperbarui grup parameter.");
+  }
+}
+
+export async function deleteParameterGroup(input: unknown): Promise<ActionResult<{ id: string }>> {
+  try {
+    const { orgId, userId, roles } = await requireActiveOrg();
+    assertCan(roles, "ea_parameter:manage");
+    const parsed = groupIdSchema.safeParse(input);
+    if (!parsed.success) return validationFail([{ path: "id", message: "ID grup tidak valid." }]);
+    const supabase = await createSupabaseServerClient();
+    // Refuse if a parameterTable block still references this group (keeps GI-11 references valid).
+    const { count } = await supabase
+      .from("manual_blocks")
+      .select("id", { count: "exact", head: true })
+      .eq("organization_id", orgId)
+      .is("deleted_at", null)
+      .contains("parameter_group_ids", [parsed.data.id]);
+    if ((count ?? 0) > 0) {
+      return fail("CONFLICT", "Grup masih dipakai oleh tabel parameter di sebuah manual.");
+    }
+    const { error } = await supabase
+      .from("parameter_groups")
+      .delete()
+      .eq("organization_id", orgId)
+      .eq("id", parsed.data.id);
+    if (error) return mapPostgrestError(error);
+    await writeAudit(orgId, userId, "ea_parameter:manage", "parameter_group", parsed.data.id, { op: "delete" });
+    return ok({ id: parsed.data.id });
+  } catch (e) {
+    return authFail(e) ?? fail("INTERNAL", "Gagal menghapus grup parameter.");
+  }
+}
+
+export async function reorderParameterGroups(input: unknown): Promise<ActionResult<{ count: number }>> {
+  try {
+    const { orgId, userId, roles } = await requireActiveOrg();
+    assertCan(roles, "ea_parameter:manage");
+    const parsed = reorderGroupsSchema.safeParse(input);
+    if (!parsed.success) {
+      return validationFail(parsed.error.issues.map((i) => ({ path: i.path.join("."), message: i.message })));
+    }
+    const supabase = await createSupabaseServerClient();
+    const { data: rows } = await supabase
+      .from("parameter_groups")
+      .select("id")
+      .eq("organization_id", orgId)
+      .eq("ea_version_id", parsed.data.eaVersionId);
+    const check = validateReorder((rows ?? []).map((r) => r.id as string), parsed.data.orderedIds);
+    if (!check.ok) return validationFail([{ path: "orderedIds", message: "Daftar urutan tidak cocok." }]);
+
+    const { error } = await supabase.rpc("reorder_parameter_groups", {
+      p_ea_version_id: parsed.data.eaVersionId,
+      p_ordered_ids: parsed.data.orderedIds,
+    });
+    if (error) return mapPostgrestError(error);
+    await writeAudit(orgId, userId, "ea_parameter:manage", "ea_version", parsed.data.eaVersionId, { op: "reorder_groups" });
+    return ok({ count: parsed.data.orderedIds.length });
+  } catch (e) {
+    return authFail(e) ?? fail("INTERNAL", "Gagal mengatur ulang grup.");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// EA Parameter: reorder, delete
+// ---------------------------------------------------------------------------
+export async function deleteParameter(input: unknown): Promise<ActionResult<{ id: string }>> {
+  try {
+    const { orgId, userId, roles } = await requireActiveOrg();
+    assertCan(roles, "ea_parameter:manage");
+    const parsed = parameterIdSchema.safeParse(input);
+    if (!parsed.success) return validationFail([{ path: "id", message: "ID parameter tidak valid." }]);
+    const supabase = await createSupabaseServerClient();
+    const { error } = await supabase
+      .from("ea_parameters")
+      .delete()
+      .eq("organization_id", orgId)
+      .eq("id", parsed.data.id);
+    if (error) return mapPostgrestError(error);
+    await writeAudit(orgId, userId, "ea_parameter:manage", "ea_parameter", parsed.data.id, { op: "delete" });
+    return ok({ id: parsed.data.id });
+  } catch (e) {
+    return authFail(e) ?? fail("INTERNAL", "Gagal menghapus parameter.");
+  }
+}
+
+export async function reorderParameters(input: unknown): Promise<ActionResult<{ count: number }>> {
+  try {
+    const { orgId, userId, roles } = await requireActiveOrg();
+    assertCan(roles, "ea_parameter:manage");
+    const parsed = reorderParametersSchema.safeParse(input);
+    if (!parsed.success) {
+      return validationFail(parsed.error.issues.map((i) => ({ path: i.path.join("."), message: i.message })));
+    }
+    const supabase = await createSupabaseServerClient();
+    const { data: rows } = await supabase
+      .from("ea_parameters")
+      .select("id")
+      .eq("organization_id", orgId)
+      .eq("parameter_group_id", parsed.data.parameterGroupId);
+    const check = validateReorder((rows ?? []).map((r) => r.id as string), parsed.data.orderedIds);
+    if (!check.ok) return validationFail([{ path: "orderedIds", message: "Daftar urutan tidak cocok." }]);
+
+    const { error } = await supabase.rpc("reorder_ea_parameters", {
+      p_group_id: parsed.data.parameterGroupId,
+      p_ordered_ids: parsed.data.orderedIds,
+    });
+    if (error) return mapPostgrestError(error);
+    await writeAudit(orgId, userId, "ea_parameter:manage", "parameter_group", parsed.data.parameterGroupId, { op: "reorder_parameters" });
+    return ok({ count: parsed.data.orderedIds.length });
+  } catch (e) {
+    return authFail(e) ?? fail("INTERNAL", "Gagal mengatur ulang parameter.");
+  }
+}
+

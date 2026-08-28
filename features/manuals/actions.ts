@@ -26,8 +26,8 @@ const SETUP_UNIQUE_HINT = {
 
 export async function createManual(input: unknown): Promise<ActionResult<{ manualId: string }>> {
   try {
-    const { orgId, userId, role } = await requireActiveOrg();
-    assertCan(role, "manual:create");
+    const { orgId, userId, roles } = await requireActiveOrg();
+    assertCan(roles, "manual:create");
 
     const parsed = createManualSchema.safeParse(input);
     if (!parsed.success) {
@@ -43,19 +43,22 @@ export async function createManual(input: unknown): Promise<ActionResult<{ manua
         p_ea_version_id: parsed.data.eaVersionId,
         p_manual_version: parsed.data.manualVersion,
         p_template_id: null,
-        p_template_version: 1,
         p_locale: parsed.data.locale,
       });
       if (error) return mapPostgrestError(error, { unique: SETUP_UNIQUE_HINT });
       const row = Array.isArray(data) ? data[0] : data;
-      const manualId = (row as { manual_id: string }).manual_id;
-      await writeAudit(orgId, userId, "manual:create", "manual", manualId, { mode: "existing" });
+      const created = row as { manual_id: string; template_version: number | null };
+      const manualId = created.manual_id;
+      await writeAudit(orgId, userId, "manual:create", "manual", manualId, {
+        mode: "existing",
+        templateVersion: created.template_version,
+      });
       revalidatePath("/manuals");
       return ok({ manualId });
     }
 
     // new-EA path — atomic (product + version + setups + manual + sections)
-    assertCan(role, "ea_product:create");
+    assertCan(roles, "ea_product:create");
     const setupCheck = setupListInput.safeParse(parsed.data.version.setups);
     if (!setupCheck.success) {
       return validationFail(
@@ -86,8 +89,6 @@ export async function createManual(input: unknown): Promise<ActionResult<{ manua
         position: index,
       })),
       p_manual_version: parsed.data.manualVersion,
-      p_template_id: null,
-      p_template_version: 1,
       p_locale: parsed.data.locale,
     });
     if (error) return mapPostgrestError(error, { unique: SETUP_UNIQUE_HINT });

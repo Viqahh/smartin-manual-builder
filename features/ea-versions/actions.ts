@@ -18,8 +18,8 @@ function authFail(e: unknown): ActionResult<never> | null {
 
 export async function createEaVersion(input: unknown): Promise<ActionResult<{ id: string }>> {
   try {
-    const { orgId, userId, role } = await requireActiveOrg();
-    assertCan(role, "ea_version:create");
+    const { orgId, userId, roles } = await requireActiveOrg();
+    assertCan(roles, "ea_version:create");
 
     const parsed = eaVersionCreateSchema.safeParse(input);
     if (!parsed.success) {

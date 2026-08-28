@@ -36,7 +36,11 @@ export default async function SettingsPage() {
           </div>
           <div>
             <dt>Peran</dt>
-            <dd>{ctx.activeOrg ? ROLE_LABEL[ctx.activeOrg.role] ?? ctx.activeOrg.role : "-"}</dd>
+            <dd>
+              {ctx.activeOrg && ctx.activeOrg.roles.length
+                ? ctx.activeOrg.roles.map((r) => ROLE_LABEL[r] ?? r).join(" · ")
+                : "-"}
+            </dd>
           </div>
         </dl>
       </section>
@@ -53,7 +57,7 @@ export default async function SettingsPage() {
             {ctx.memberships.map((m) => (
               <li key={m.organizationId}>
                 <strong>{m.organizationName}</strong>
-                <span>{ROLE_LABEL[m.role] ?? m.role}</span>
+                <span>{m.roles.map((r) => ROLE_LABEL[r] ?? r).join(" · ")}</span>
               </li>
             ))}
           </ul>

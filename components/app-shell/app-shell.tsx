@@ -29,7 +29,7 @@ const ROLE_LABEL: Record<string, string> = {
   ADMIN: "Admin",
 };
 
-export type ShellUser = { displayName: string; role: string } | null;
+export type ShellUser = { displayName: string; roles: string[] } | null;
 
 const navGroups = [
   {
@@ -119,7 +119,7 @@ function Sidebar({
             <span className="avatar">{initials || "S"}</span>
             <span>
               <strong>{user.displayName}</strong>
-              <small>{ROLE_LABEL[user.role] ?? user.role}</small>
+              <small>{user.roles.map((r) => ROLE_LABEL[r] ?? r).join(" · ")}</small>
             </span>
             <SignOutButton className="icon-button" />
           </div>

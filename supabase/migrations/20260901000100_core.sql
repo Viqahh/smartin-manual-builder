@@ -87,7 +87,8 @@ create trigger on_auth_user_created
   for each row execute function app.handle_new_auth_user();
 
 -- ---------------------------------------------------------------------------
--- memberships  (organisation-scoped role; one role per (org, user) — DATA_MODEL)
+-- memberships  (organisation-scoped roles; a user MAY hold more than one role
+-- in one organisation — PRD §6. Normalised: one row per (org, user, role).)
 -- ---------------------------------------------------------------------------
 create table memberships (
   id              uuid primary key default gen_random_uuid(),
@@ -97,7 +98,7 @@ create table memberships (
   is_active       boolean not null default true,
   created_at      timestamptz not null default now(),
   updated_at      timestamptz not null default now(),
-  unique (organization_id, user_id)
+  unique (organization_id, user_id, role)
 );
 create index memberships_user_idx on memberships (user_id) where is_active;
 create index memberships_org_idx on memberships (organization_id) where is_active;
@@ -132,8 +133,9 @@ as $$
   )
 $$;
 
-create or replace function app.member_role(p_org uuid, p_user uuid default auth.uid())
-returns membership_role
+-- Every role the user holds in an organisation (a user may hold several — PRD §6).
+create or replace function app.member_roles(p_org uuid, p_user uuid default auth.uid())
+returns setof membership_role
 language sql
 stable
 security definer
@@ -141,7 +143,41 @@ set search_path = public
 as $$
   select role from memberships
   where organization_id = p_org and user_id = p_user and is_active
-  limit 1
+$$;
+
+create or replace function app.has_role(p_org uuid, p_role membership_role, p_user uuid default auth.uid())
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1 from memberships
+    where organization_id = p_org and user_id = p_user and role = p_role and is_active
+  )
+$$;
+
+-- Authoring capability = DEVELOPER or ADMIN (mirrors lib/permissions ROLE_ACTIONS;
+-- TECHNICAL_REVIEWER / COMPLIANCE_REVIEWER are read-only for EA/manual content in Phase 2).
+create or replace function app.can_author(p_org uuid, p_user uuid default auth.uid())
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select app.has_role(p_org, 'DEVELOPER', p_user) or app.has_role(p_org, 'ADMIN', p_user)
+$$;
+
+create or replace function app.is_admin(p_org uuid, p_user uuid default auth.uid())
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select app.has_role(p_org, 'ADMIN', p_user)
 $$;
 
 -- ---------------------------------------------------------------------------

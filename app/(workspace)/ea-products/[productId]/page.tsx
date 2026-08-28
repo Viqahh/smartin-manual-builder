@@ -6,6 +6,8 @@ import { getEaProduct } from "@/features/ea-products/queries";
 import { listEaVersions, getEaVersionWithSetups } from "@/features/ea-versions/queries";
 import { VersionCreateForm } from "@/features/ea-versions/version-create-form";
 import { SupportedConfigurationEditor, type SetupRow } from "@/features/setups/setup-editor";
+import { ParameterManager } from "@/features/parameters/parameter-manager";
+import { listParameterGroups } from "@/features/parameters/queries";
 import type { MtTimeframe } from "@/lib/domain/timeframes";
 
 export const dynamic = "force-dynamic";
@@ -24,7 +26,11 @@ export default async function EAProductDetailPage({
 
   const versions = await listEaVersions(orgId, productId);
   const versionsWithSetups = await Promise.all(
-    versions.map(async (v) => ({ meta: v, detail: await getEaVersionWithSetups(orgId, v.id) })),
+    versions.map(async (v) => ({
+      meta: v,
+      detail: await getEaVersionWithSetups(orgId, v.id),
+      parameterGroups: await listParameterGroups(orgId, v.id),
+    })),
   );
 
   return (
@@ -75,7 +81,7 @@ export default async function EAProductDetailPage({
           </div>
         ) : (
           <ul className="version-list">
-            {versionsWithSetups.map(({ meta, detail }) => (
+            {versionsWithSetups.map(({ meta, detail, parameterGroups }) => (
               <li key={meta.id} className="version-item">
                 <div className="version-head">
                   <strong className="mono">{meta.version}</strong>
@@ -85,21 +91,26 @@ export default async function EAProductDetailPage({
                   </span>
                 </div>
                 {detail && (
-                  <SupportedConfigurationEditor
-                    eaVersionId={meta.id}
-                    initial={detail.setups
-                      .sort((a, b) => a.position - b.position)
-                      .map(
-                        (s): SetupRow => ({
-                          symbol: s.symbol,
-                          timeframe: s.timeframe as MtTimeframe,
-                          presetRef: s.preset_ref ?? "",
-                          testedMinimumLot: s.tested_minimum_lot === null ? "" : String(s.tested_minimum_lot),
-                          notes: s.notes ?? "",
-                          isSupported: s.is_supported,
-                        }),
-                      )}
-                  />
+                  <>
+                    <h4 className="version-subhead">Konfigurasi yang didukung</h4>
+                    <SupportedConfigurationEditor
+                      eaVersionId={meta.id}
+                      initial={detail.setups
+                        .sort((a, b) => a.position - b.position)
+                        .map(
+                          (s): SetupRow => ({
+                            symbol: s.symbol,
+                            timeframe: s.timeframe as MtTimeframe,
+                            presetRef: s.preset_ref ?? "",
+                            testedMinimumLot: s.tested_minimum_lot === null ? "" : String(s.tested_minimum_lot),
+                            notes: s.notes ?? "",
+                            isSupported: s.is_supported,
+                          }),
+                        )}
+                    />
+                    <h4 className="version-subhead">Parameter EA</h4>
+                    <ParameterManager eaVersionId={meta.id} initialGroups={parameterGroups} />
+                  </>
                 )}
               </li>
             ))}

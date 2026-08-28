@@ -1,76 +1,89 @@
 # Phase 2 completion report — Data & CRUD
 
-> **Status:** Implementation complete for every credential-independent deliverable. `lint`,
-> `typecheck`, `test`, and `build` all pass. Live-Supabase acceptance tests are
-> **BLOCKED BY EXTERNAL CREDENTIALS** (no Supabase project, CLI, or Docker in the build
-> environment) — see [§ Acceptance criteria results](#acceptance-criteria-results) and
-> [§ External credential limitations](#external-credential-limitations). Phase 2 is **not**
-> declared fully complete until those run against a real project.
+> **Status: corrections applied after a failed review.** All ten review findings are addressed
+> in the implementation (not by editing docs). `lint`, `typecheck`, `test`, and `build` pass.
+>
+> **Credential state:** app-runtime Supabase credentials are now present (`.env.local`, provided
+> by the reviewer — gitignored, never committed). The project is reachable and `/api/health`
+> returns `ready:true`. However the **database schema has not been applied** to that project and
+> cannot be from this environment (no DB connection string / `SUPABASE_ACCESS_TOKEN` — only the
+> `sb_publishable_` / `sb_secret_` API keys, which cannot run DDL). So the live integration
+> suite still cannot run. Schema-dependent acceptance criteria remain **BLOCKED** and are not
+> marked passed. See [§14](#14-external-credential-limitations).
 >
 > Baseline: `docs/IMPLEMENTATION_PLAN.md` Phase 2, `docs/ACCEPTANCE_CRITERIA.md` Phase 2,
 > corrected `docs/DATA_MODEL.md`. No Phase 3+ functionality was implemented.
 
 ---
 
-## 1. Completed scope
+## 0. Review findings — how each was fixed
+
+| # | Finding | Fix |
+|---|---|---|
+| **1** | RLS gave every member full write access; reviewers could bypass server actions | `20260901000500_rls.sql` rewritten: content-table `INSERT/UPDATE/DELETE` gated on `app.can_author(org)` (DEVELOPER or ADMIN); `TECHNICAL_REVIEWER` / `COMPLIANCE_REVIEWER` get `SELECT` only. `memberships` / org / templates writes gated on `app.is_admin(org)`. Storage writes gated on `can_author`, reads on membership. New integration tests: reviewer cannot `UPDATE manual_sections`, cannot `INSERT/UPDATE ea_parameters`, cannot `INSERT manual_blocks`; developer cannot write `memberships` / `manual_template_sections`. |
+| **2** | SECURITY DEFINER RPCs checked membership but not role; cross-org copy possible | New `app.assert_author(org)` (membership **+** `can_author`) is called first in every public RPC (`create_ea_version_with_setups`, `create_manual_with_version`, `create_product_version_manual`, `replace_ea_version_setups`, `reorder_*`). `app.copy_parameter_definitions` now requires **source org == target org** and `can_author(target)`. `app.instantiate_sections_from_template` requires `can_author(org)`. `EXECUTE` on the privileged `app.*` helpers is **revoked from `public`** (kept for `service_role`; the public SECURITY DEFINER RPCs still call them as owner). Trusted backend sessions (`auth.uid()` NULL: service_role, seed, migrations) skip the role gate — they already bypass RLS. New integration tests: reviewer + cross-org RPC calls all rejected; cross-org `copy_parameter_definitions` rejected. |
+| **3** | AC-P2-15 needs real Block CRUD, not just Zod schemas | New `features/blocks/actions.ts`: `createBlock`, `updateBlock` (row_version-guarded → CONFLICT), `softDeleteBlock`, `restoreBlock` (restores to end), `reorderBlocks` (transactional via `public.reorder_manual_blocks`). Every payload passes `blockPayloadSchema` at the write boundary; `parameter_group_ids` derived from the `parameterTable` payload feeds the ownership trigger; positions stay non-negative and unique among live blocks (partial unique index). Integration test does the full insert → transactional reorder → soft-delete round-trip. |
+| **4** | Manual creation used a permanently-hardcoded 18-row source instead of the template tables | New migration `20260901000350_system_template.sql` installs the canonical system template (`manual_templates` v1, `organization_id NULL`) **and** its 18 `manual_template_sections`. `app.instantiate_sections_from_template(manual_version_id, template_id)` reads that table. `public.create_manual_with_version` resolves the **active** system template, records `manuals.template_id` + `manual_versions.template_version`, and instantiates from that exact version. No caller passes a null template. Integration test proves the instantiated section set equals the template's. |
+| **5** | AC-P2-9b needs pointer drag; `replaceSupportedSetups` was non-atomic | `setup-editor.tsx` now has an HTML5 drag handle (`draggable` grip, `onDragStart/Over/Drop`) **and** keeps keyboard up/down buttons. `replaceSupportedSetups` delegates to the new atomic RPC `public.replace_ea_version_setups` (DELETE + re-INSERT in one function body). Integration test: a replace that violates the unique constraint rolls back and leaves the previous list intact. |
+| **6** | AC-P2-19 requires image dimensions | New dependency-free `lib/domain/image-dimensions.ts` parses PNG / JPEG / GIF / WebP headers. `uploadManualImage` reads the file bytes, extracts `width`/`height`, rejects an unreadable header, and persists both to `image_assets`. Accepted formats validated against `DATA_MODEL.md` + the bucket config. Unit tests for all four formats + corrupt input. |
+| **7** | Parameter CRUD incomplete | `features/parameters/actions.ts` now has: group `create` / `rename` / `reorder` (`reorder_parameter_groups` RPC) / `delete` (refused while a `parameterTable` block references it); parameter `create` (auto-position) / `read` / `update` / `reorder` (`reorder_ea_parameters` RPC) / `delete`. New `features/parameters/parameter-manager.tsx` is a minimal functional management surface on `/ea-products/[productId]` so the CRUD is exercisable from the app (not the Phase 3 editor). |
+| **8** | Multi-role contradiction was only a "known limitation" | **Implemented.** `memberships` unique is now `(organization_id, user_id, role)` — normalised, one auditable row per role. New helpers `app.member_roles()`, `app.has_role()`, `app.can_author()`, `app.is_admin()`. `getWorkspaceContext` returns `activeOrg.roles: OrgRole[]`; `requireActiveOrg()` returns `roles`; every server action calls `assertCan(roles, action)` (already array-aware). App shell / settings show all roles. Seed gives the demo developer both `DEVELOPER` and could hold reviewer roles. Unit tests cover multi-role authoring + admin-only gating. |
+| **9** | Expand the integration suite; don't mark credential-gated tests passed | `tests/integration/rls.test.ts` rewritten into 9 `describe.skipIf`-gated groups: cross-org isolation, reviewer direct-mutation denial, privileged-RPC denial, cross-org `copy_parameter_definitions` denial, developer-vs-admin, required-section protection, atomic setup replacement, block CRUD round-trip, template instantiation, parameter-ownership propagation, private-image access. **All still skipped** (schema not applied) and reported as BLOCKED, never passed. |
+| **10** | Documentation accuracy | This file rewritten. The acceptance table below marks a MUST ✅ only where it is actually implemented **and** verified at the stated level; everything needing a live schema is 🟦 BLOCKED. |
+
+---
+
+## 1. Completed scope (post-corrections)
 
 | Area | Delivered |
 |---|---|
-| **Database schema** | 7 SQL migrations under `supabase/migrations/` — core, EA facts, manual content, functions/guards, RLS, atomic-creation RPCs. UUID PKs, FKs, unique + check constraints, `updated_at` + `row_version` triggers, soft-archive/soft-delete columns, position constraints. |
-| **RLS** | Enabled on every `public` table + `storage.objects` for the `manual-images` bucket. Org isolation via `app.member_org_ids()`. `audit_events` is append-only (no UPDATE/DELETE policy). |
-| **Auth** | Supabase Auth (email + password), cookie-based SSR session via `@supabase/ssr` + `middleware.ts`. Sign-in / sign-out server actions. Workspace layout guard: unauthenticated → `/login`, no membership → `/no-membership`, unconfigured → in-app setup panel. |
-| **Org + membership + roles** | `organizations`, `profiles` (mirror of `auth.users` via trigger), `memberships` (org-scoped `membership_role` enum). `getWorkspaceContext()` resolves user + memberships + active org once per request (React `cache`). |
-| **Action-based authorization** | `lib/permissions/actions.ts`: `Action` union, `ROLE_ACTIONS` map, `can` / `canAny` / `assertCan` (throws typed `AuthorizationError`). Every server action calls `assertCan` before mutating. Client only hides/disables for UX. |
-| **EA Product CRUD** | `features/ea-products/` — create (slug unique per org), update, archive (soft, timestamped, never hard-deleted). `/ea-products` list + `/ea-products/[productId]` detail, org-scoped real data. |
-| **EA Version CRUD** | `features/ea-versions/` — create with semver + platform (`(product, platform, version)` unique), structured `requirements`/`support` JSON. Historical versions preserved. |
-| **Supported Configuration CRUD + UI** | `ea_version_setups` model + `features/setups/setup-editor.tsx` (functional repeatable editor: symbol w/ broker suffixes, controlled MT timeframe select, preset, Tested Minimum Lot, notes, Supported toggle, up/down reorder, remove, "+ Tambah konfigurasi", broker-min-lot note). Also embedded in the wizard's new-EA path and the EA-version create form. Explicit rows only — no inference (GI-10). |
-| **Parameter Group / Parameter CRUD** | `features/parameters/` — groups + parameters **owned by EA Version** (`parameter_groups.ea_version_id`, `ea_parameters.parameter_group_id`; no `manual_version_id` anywhere). Full column set from `DATA_MODEL.md`. `app.copy_parameter_definitions(src, dst)` = EA-version → EA-version only. |
-| **Manual + Manual Version CRUD** | `features/manuals/` — wizard (existing-EA and new-EA paths), both atomic via RPC. First `manual_versions` row instantiates the canonical 18 sections. `manual_versions.version` unique per manual; references exactly one `ea_versions`. `/manuals` list + dashboard backed by real org-scoped data. |
-| **Persisted sections & blocks** | `manual_sections` (per-manual-version, canonical + custom), `manual_blocks` (six documented types, Zod-validated payload, soft delete, live-position unique index). Backend CRUD + validation only; the rich editor is Phase 3. |
-| **Private image upload** | `features/images/actions.ts` — MIME + size + owner + org validation; object at `<org_id>/<asset_id>.<ext>` in the private `manual-images` bucket; `image_assets` metadata row with `scan_status`. Render path signs short-lived URLs. No annotation editor (Phase 3). |
-| **Dynamic manual routing** | `/manuals/[manualId]/edit` and `/preview` load by route id via `SupabaseManualDataSource` + `assembleManualViewModel`; unknown id → `notFound()`. All hardcoded VMax/1.0.0/XAUUSD behaviour removed. |
-| **Shared Manual View Model** | `lib/manual/view-model.ts` — one typed `ManualViewModel` + pure assembler over an injectable `ManualDataSource`. Consumed by `ManualBuilder` and `ManualRenderer` today; reusable by the public web manual + PDF later. No second renderer. |
-| **Real autosave + conflict handling** | `row_version` bigint bumped by trigger; `saveSection` runs `UPDATE ... WHERE row_version = expected`; 0 rows → `CONFLICT` (never silent overwrite). Builder shows `Belum disimpan / Menyimpan… / Tersimpan / Gagal menyimpan / Konflik perubahan`; "Tersimpan" only after server confirmation. Pure `resolveWrite` logic unit-tested. |
-| **Mock data removed** | `features/manuals/mock-data.ts` deleted. `localStorage` keys `smartin-new-manual` / `smartin-manual-wizard` / `smartin-builder-chapter` removed as data sources. Selected chapter is component state scoped to the loaded manual. |
-| **Error / loading / empty / not-found states** | `app/not-found.tsx`, `app/(workspace)/error.tsx`, `app/(workspace)/loading.tsx`, `/no-membership`, `components/system-panel.tsx` (not-configured / empty). Disabled buttons keep their phase explanations. Errors are human messages — no SQL/secret leakage. |
-| **Health / readiness** | `GET /api/health` → `{ ok: true, ready, checks[] }`, HTTP 503 while a required var is missing, endpoint always responds. |
-| **Tests + CI** | Vitest + Testing Library configured. 39 unit tests pass (permissions, semver, symbol/suffix, timeframe control, setup list + dedupe + no-inference, block payloads, parameter input, canonical sections, autosave conflict, view-model isolation, SQL↔TS parity). 5 RLS integration tests are `describe.skipIf`-gated on credentials. `.github/workflows/ci.yml` runs `npm ci → lint → typecheck → test → build` on Node 22. |
+| **Schema** | 8 migrations (`supabase/migrations/`): core + multi-role helpers, EA facts, manual content, **system template + sections**, functions/guards, **role-aware RLS**, atomic-creation + reorder + atomic-replace RPCs. |
+| **RLS** | Role-aware. Content: members read, `can_author` writes. Admin: memberships/org/templates. Append-only `audit_events`. Storage: members read, `can_author` write. Cross-org impossible for every role. |
+| **RPC security** | `app.assert_author` in every public RPC; `app.*` helpers `EXECUTE`-revoked from `public`; `copy_parameter_definitions` cross-org guard; `instantiate_sections_from_template` author guard. |
+| **Auth / org / roles** | Supabase Auth cookie SSR; multi-role `memberships`; `getWorkspaceContext` → user + memberships (roles[]) + active org; `/login`, `/no-membership`, not-configured states; `/api/health` readiness. |
+| **Action authz** | `lib/permissions/actions.ts` — `Action` union, `ROLE_ACTIONS`, `canAny` / `assertCan(roles, action)` in every mutation. |
+| **EA Product CRUD** | create (slug unique/org), update, archive (soft). `/ea-products` list + `/ea-products/[productId]` detail. |
+| **EA Version CRUD** | create (semver, `(product,platform,version)` unique, structured `requirements`/`support`); historical versions preserved. |
+| **Supported Configuration** | `ea_version_setups`; functional editor with **drag + keyboard reorder**; atomic replace via RPC; broker-suffix symbols; controlled MT timeframe; Tested Minimum Lot labelled + broker-spec note (GI-10/12). |
+| **Parameter CRUD** | Groups: create/rename/reorder/delete. Parameters: create/read/update/reorder/delete. Owned by EA Version. Minimal management UI. |
+| **Manual + Manual Version** | wizard (existing-EA, new-EA atomic); first version instantiated from the **active template version**, recorded on the manual version. `(manual,version)` unique; one `ea_version` FK. |
+| **Sections & Blocks** | canonical sections from the template; full block CRUD + soft delete + restore + transactional reorder; Zod payload validation at every write; ownership trigger for `parameterTable`. |
+| **Image upload** | private bucket, `<org>/<id>.<ext>` key, `image_assets` with mime/size/**width/height**/scan_status; render path signs short-lived URLs. |
+| **Dynamic routing** | `/manuals/[manualId]/edit` + `/preview` via `SupabaseManualDataSource` + typed `ManualViewModel`; unknown id → `notFound()`; no hardcoded VMax. |
+| **Autosave** | `row_version`-guarded UPDATE → CONFLICT never silent overwrite; 5 UI states. |
+| **Mock removal** | `mock-data.ts` deleted; `localStorage` not a data source. |
+| **Tests + CI** | 56 unit tests, 19 skipped (BLOCKED) integration; `.github/workflows/ci.yml` npm ci → lint → typecheck → test → build on Node 22. |
 
-### Explicitly NOT implemented (Phase 3+ boundary — spec §2)
+### Explicitly NOT implemented (Phase 3+ boundary)
 
-TipTap / rich-text editor, real block editor UX, drag-and-drop document editing, AI assistant / rewriting / claim scanning, validation & compliance engine, review workflow & reviewer comments, publishing & immutable snapshots, public manual route behaviour, PDF export, image annotation editor, template CRUD UI, member-management UI, org switcher, Phase 6 version cloning.
+TipTap / visual editor, drag-drop *document* editing, AI, validation/compliance engine, review workflow & comments, publishing & snapshots, public route behaviour, PDF export, image annotation editor, admin template-editing UI, member-management UI, org switcher, Phase 6 version cloning.
 
 ---
 
 ## 2. Database schema & migrations
 
-Files (`supabase/migrations/`, timestamp-ordered):
-
 | File | Contents |
 |---|---|
-| `20260901000100_core.sql` | `pgcrypto`, `app` schema, `touch_updated_at()` / `bump_row_version()` triggers, `membership_role` enum, `organizations`, `profiles` (+ `on_auth_user_created` trigger), `memberships`, `app.member_org_ids()` / `has_org_access()` / `member_role()`, `audit_events`. |
-| `20260901000200_ea.sql` | `ea_platform`, `mt_timeframe`, `ea_param_type`, `ea_param_mutability` enums; `ea_products` (slug unique/org, soft archive), `ea_versions` (semver check, `(product, platform, version)` unique), `ea_version_setups` (symbol regex, `(ea_version, symbol, timeframe)` unique, `tested_minimum_lot >= 0`), `parameter_groups` (`(ea_version, name)` unique), `ea_parameters` (technical-name regex, `(group, technical_name)` unique). |
-| `20260901000300_manuals.sql` | `manual_status`, `manual_block_type`, `image_scan_status`, `section_completion_state` enums; versioned `manual_templates` + `manual_template_sections`; `image_assets`; `manuals`; `manual_versions` (semver, `row_version`, `(manual, version)` unique, exactly one `ea_version_id`); `manual_sections` (`(manual_version, section_key)` + deferrable `(manual_version, position)` unique, `row_version`); `manual_blocks` (partial unique `(section, position) where deleted_at is null`, `row_version`). |
-| `20260901000400_functions_triggers.sql` | `app.instantiate_manual_sections()` (canonical 18), `guard_required_section_delete()` (required, non-custom sections undeletable), `guard_published_manual_version()` (published = immutable except → ARCHIVED), `guard_parameter_table_ownership()` (parameterTable groups must belong to the linked EA version), `app.copy_parameter_definitions()`. |
-| `20260901000500_rls.sql` | `enable row level security` on all tables; member-scoped SELECT/INSERT/UPDATE/DELETE on org-owned tables; ADMIN-only writes on `memberships` / org templates; append-only `audit_events`; private `manual-images` bucket + path-prefix (`<org_id>/…`) storage policies. |
-| `20260901000600_rpc.sql` | `public.create_ea_version_with_setups()`, `public.create_manual_with_version()`, `public.create_product_version_manual()` — SECURITY DEFINER, each verifies `app.has_org_access()`, each fully transactional; grants to `authenticated` + `service_role`. |
+| `…100_core.sql` | `pgcrypto`, `app` schema, `touch_updated_at()` / `bump_row_version()`; `membership_role` enum; `organizations`; `profiles` (+ `on_auth_user_created`); `memberships` **unique `(organization_id, user_id, role)`**; helpers `member_org_ids`, `has_org_access`, `member_roles`, `has_role`, `can_author`, `is_admin`; `audit_events`. |
+| `…200_ea.sql` | `ea_platform`, `mt_timeframe`, `ea_param_type`, `ea_param_mutability`; `ea_products`, `ea_versions`, `ea_version_setups`, `parameter_groups`, `ea_parameters` — parameters/setups FK `ea_versions`, never `manual_versions`. |
+| `…300_manuals.sql` | `manual_status`, `manual_block_type`, `image_scan_status`, `section_completion_state`; `manual_templates` + `manual_template_sections`; `image_assets` (width/height columns); `manuals`; `manual_versions` (`row_version`, one `ea_version` FK); `manual_sections`; `manual_blocks` (partial unique live-position, `row_version`). |
+| `…350_system_template.sql` | **System template v1 (`organization_id NULL`) + its 18 sections.** Structural, not demo seed. |
+| `…400_functions_triggers.sql` | `instantiate_sections_from_template` (reads the template table, author-guarded) + `instantiate_manual_sections` shim; `guard_required_section_delete`; `guard_published_manual_version`; `guard_parameter_table_ownership`; `copy_parameter_definitions` (same-org + author guard). |
+| `…500_rls.sql` | RLS on all tables; **role-aware** content policies (`can_author` writes), admin policies (`is_admin`), append-only audit, `can_author` storage writes. |
+| `…600_rpc.sql` | `app.assert_author`; `create_ea_version_with_setups`, `replace_ea_version_setups` (atomic), `create_manual_with_version` (template-resolving), `create_product_version_manual` (atomic), `reorder_manual_blocks`, `reorder_parameter_groups`, `reorder_ea_parameters`. Grants: public RPCs → `authenticated` + `service_role`; `app.*` privileged helpers → `service_role` only (`EXECUTE` revoked from `public`). |
 
-`supabase/seed.sql` — demo org A + org B, four demo auth users (`*@smartin.demo`, password `demo-password-123`, LOCAL ONLY), memberships, system template, **VMax EA / MT5 / 1.0.0**, two `ea_version_setups` (`XAUUSD/M15`, `XAUUSD/H1`), one parameter group + three parameters, one manual + manual version + canonical sections. All strings marked `DEMO` / `SAMPLE`; no performance/approval claims.
-
-`supabase/config.toml` — local stack config so `supabase db reset` reproduces the schema + seed.
+`supabase/seed.sql` — demo org A + org B, 4 demo auth users (`*@smartin.demo` / `demo-password-123`, LOCAL ONLY), multi-role memberships (`on conflict (organization_id, user_id, role)`), VMax EA / MT5 / 1.0.0, two setups, one parameter group + three parameters, one manual + version + sections (from the system template).
 
 ### Reproducing a clean project
 
 ```bash
-# local (needs Docker + supabase CLI)
-supabase start
-supabase db reset          # replays migrations/ then seed.sql
+# local (Docker + supabase CLI)
+supabase start && supabase db reset      # migrations/ then seed.sql
 
-# hosted
-supabase link --project-ref <ref>
-supabase db push           # applies migrations/
-# then create auth users via the dashboard / Auth API and insert memberships,
-# or run the non-auth portion of seed.sql
+# hosted — REQUIRES a DB admin credential (not just the API keys):
+supabase link --project-ref <ref>        # needs SUPABASE_ACCESS_TOKEN
+supabase db push                          # applies migrations/
+#   then create auth users + run the non-auth part of seed.sql
 ```
 
 ---
@@ -81,77 +94,61 @@ supabase db push           # applies migrations/
 EAProduct → EAVersion → EAVersionSetup            (ea_version_setups.ea_version_id)
                       → EAParameterGroup           (parameter_groups.ea_version_id)
                           → EAParameter            (ea_parameters.parameter_group_id)
-
-Manual → ManualVersion (→ exactly one EAVersion)
-              → ManualSection → ManualBlock
+Manual → ManualVersion (→ one EAVersion) → ManualSection → ManualBlock
 ```
 
-- `parameter_groups` / `ea_parameters` / `ea_version_setups` **never** carry `manual_version_id` (verified by `tests/unit/schema-parity.test.ts`).
-- A `parameterTable` block's `parameter_group_ids` are constrained by `guard_parameter_table_ownership()` to groups of the manual version's linked EA version.
-- Two manual versions on the same EA version resolve to the **same** parameter rows — there is no copy step (GI-11, AC-P2-18b).
+Parameter definitions and setups **never** carry `manual_version_id`. `guard_parameter_table_ownership` restricts a `parameterTable` block to groups of its manual version's linked EA version. Two manual versions on one EA version share the same rows (no copy step). Verified by `tests/unit/schema-parity.test.ts`; runtime propagation verified by the (blocked) integration test.
 
 ---
 
-## 4. Supported Configuration implementation (GI-10 / GI-12)
+## 4. Supported Configuration (GI-10 / GI-12)
 
-- Table `ea_version_setups` — `id, organization_id, ea_version_id, symbol, timeframe (mt_timeframe enum), preset_ref, tested_minimum_lot, notes, is_supported, position, timestamps`; unique `(ea_version_id, symbol, timeframe)`.
-- `symbol` stored verbatim incl. broker suffix; DB check `^[A-Za-z0-9]{2,}([._][A-Za-z0-9]+)?$`; app normalises the base to upper-case, keeps the suffix as typed.
-- `timeframe` is a Postgres enum — free text is impossible at the DB and at the UI (`<select>` limited to `MT_TIMEFRAMES`).
-- No code path derives a `symbol × timeframe` pair from independently listed values. `isConfigurationSupported()` checks explicit rows only.
-- `tested_minimum_lot` is nullable, `>= 0`, labelled *"data uji developer — bukan minimum broker"* in every editor, and the fixed note **"Minimum lot aktual ditentukan oleh spesifikasi simbol pada broker."** is shown in the editor, the wizard, the version form, and rendered Chapters 2 & 9.
-- Reorder: keyboard-accessible up/down buttons (satisfies AC-P2-9b "keyboard"). Pointer drag is deferred to Phase 3 "presentation polish" per `IMPLEMENTATION_PLAN.md` Phase 3 / `AC-P3-10`.
+`ea_version_setups`: `symbol` (verbatim, broker-suffix regex), `timeframe` (`mt_timeframe` enum — free text impossible at DB and UI), `preset_ref?`, `tested_minimum_lot?` (`>= 0`, nullable, independent of broker rules), `notes?`, `is_supported`, `position`; unique `(ea_version_id, symbol, timeframe)`. No code path infers a `symbol × timeframe` pair. Editor: drag handle + keyboard up/down; the note **"Minimum lot aktual ditentukan oleh spesifikasi simbol pada broker."** and "data uji developer" label appear in the editor, wizard, version form, and rendered Chapters 2 & 9. Replace is atomic (`replace_ea_version_setups`).
 
 ---
 
-## 5. Auth, membership & permissions
+## 5. Auth, membership & multi-role permissions
 
-- `middleware.ts` refreshes the Supabase session on every request (skipped when unconfigured).
-- `lib/supabase/{server,client,service}.ts` — SSR server client (cookie-bound, RLS applies), browser client (publishable key), service client (secret key, **server-only**, RLS-bypassing, used only by seeding/atomic-RPC paths).
-- `SUPABASE_SECRET_KEY` is referenced only in `lib/env.ts` + `lib/supabase/service.ts` (both `import "server-only"`), so it cannot enter the client bundle (GI-9).
-- Roles: `DEVELOPER`, `TECHNICAL_REVIEWER`, `COMPLIANCE_REVIEWER`, `ADMIN`. `ROLE_ACTIONS` grants: DEVELOPER = EA/manual authoring + image upload; reviewers = reads + their review action; ADMIN = all.
-- Every server action: `requireActiveOrg()` → `assertCan(role, action)` → typed `ActionResult`. RLS is the second layer.
+- `middleware.ts` refreshes the SSR session (no-op when unconfigured). *(Next 16 prints a `middleware`→`proxy` rename notice; `middleware.ts` still works and the build passes. Renaming is a follow-up housekeeping item.)*
+- `lib/supabase/{server,client,service}.ts` — cookie-bound server client (RLS applies), browser client (publishable key), **server-only** service client (secret key; RLS-bypassing; seeding / atomic RPC paths).
+- `SUPABASE_SECRET_KEY` is read only in `lib/env.ts` + `lib/supabase/service.ts` (`import "server-only"`). Verified absent from `.next/static` with the real key (AC-P2-3 ✅).
+- **Multi-role:** `activeOrg.roles: OrgRole[]`; `assertCan(roles, action)` = permitted if any held role grants it. DB `app.can_author` / `app.is_admin` mirror the map for RLS.
 
 ---
 
 ## 6. Autosave / conflict strategy
 
-Recorded decision (resolves the "record the exact chosen strategy" clause of spec §21):
-
-- **Optimistic concurrency via `row_version`.** Editable rows (`manual_versions`, `manual_sections`, `manual_blocks`) carry a `bigint row_version` bumped by a `BEFORE UPDATE` trigger.
-- The client sends the `row_version` it last read. The mutation is `UPDATE … WHERE id = $id AND row_version = $expected`.
-- 0 rows updated ⇒ a newer write already landed ⇒ the action returns `{ ok:false, code:"CONFLICT" }`. The client shows **"Konflik perubahan"** and offers reload; it never overwrites and never shows "Tersimpan".
-- Debounce: 800 ms (`DEFAULT_AUTOSAVE_DEBOUNCE_MS`). "Tersimpan" is set **only** in the server-confirmed branch.
-- Phase 2's editable surface is the chapter completion state (the block editor is Phase 3). `resolveWrite()` and the state machine are unit-tested; the end-to-end two-session test is BLOCKED (needs a live DB).
+`row_version` bigint bumped by a `BEFORE UPDATE` trigger on `manual_versions` / `manual_sections` / `manual_blocks`. Mutations run `UPDATE … WHERE id = $id AND row_version = $expected`; 0 rows ⇒ `{ ok:false, code:"CONFLICT" }`; UI shows **"Konflik perubahan"**, never overwrites, never shows "Tersimpan" without server confirmation. Debounce 800 ms. `resolveWrite()` + the state machine are unit-tested; the two-session test is BLOCKED.
 
 ---
 
 ## 7. Dynamic routing & view model
 
-- `/manuals/[manualId]/edit` + `/preview` → `new SupabaseManualDataSource(orgId).loadManualVersionByManualId(manualId)` → `assembleManualViewModel`. Unknown/foreign id → `notFound()`.
-- The data source loads every fact by explicit id and never falls back to "a" manual (AC-P2-12). `manualIdentity(vm)` feeds the builder header, inspector metadata, preview header, and cover from the same object.
-- `ManualRenderer` takes `{ vm }` — no hardcoded product. `ManualBuilder` takes `{ vm }`.
+`SupabaseManualDataSource(orgId).loadManualVersionByManualId(id)` loads every fact by explicit id; unknown/foreign id → `notFound()`. `manualIdentity(vm)` feeds builder header, inspector, preview header, and cover from one object. `ManualRenderer` + `ManualBuilder` take `{ vm }` — no hardcoded product.
 
 ---
 
 ## 8. Tests
 
-`npm run test` → **39 passed, 5 skipped** (5 test files).
+`npm run test` → **56 passed, 19 skipped** (7 files).
 
 | File | Covers |
 |---|---|
-| `tests/unit/permissions.test.ts` | role → action map, `assertCan` typed errors (AC-P2-22). |
-| `tests/unit/domain.test.ts` | semver accept/reject/order; MT timeframe control; broker-suffix symbols + normalisation; setup list — 3 documented configs persist distinctly, `EURUSD/M15` **not** implied, duplicate rejected, unknown TF / empty rejected, `tested_minimum_lot` optional & non-negative; six block payloads + unknown-type/raw-HTML rejection; parameter identifier + type; canonical 18 sections; `resolveWrite` match/stale/missing (AC-P2-7/9/9a/9b/15/18/20). |
-| `tests/unit/view-model.test.ts` | assembler returns null for empty/unknown id; assembles the exact manual — "Polaris" never shows "VMax"; deterministic sort (AC-P2-12). |
-| `tests/unit/schema-parity.test.ts` | migration SQL ↔ TS constants: canonical sections, `mt_timeframe`, `manual_block_type`, `ea_param_type`, `membership_role` enums; `parameter_groups`/`ea_version_setups` FK `ea_versions` and never `manual_versions`; setup uniqueness tuple; RLS enabled on every org table (AC-P2-18a, GI-10/11). |
-| `tests/integration/rls.test.ts` | **skipped (BLOCKED)** — cross-org read/write/storage isolation against a live project (AC-P2-21, spec §27). |
+| `tests/unit/permissions.test.ts` | role→action map; `assertCan` typed errors; **multi-role** authoring + admin-only gating (AC-P2-22, PRD §6). |
+| `tests/unit/domain.test.ts` | semver; MT timeframe control; broker-suffix symbols + normalisation; setup list (3 configs distinct, `EURUSD/M15` not implied, dup rejected, unknown TF/empty rejected, `tested_minimum_lot` optional/≥0); 6 block payloads + unknown-type/raw-HTML rejection; parameter identifier/type; canonical 18 sections; `resolveWrite` match/stale/missing. |
+| `tests/unit/view-model.test.ts` | assembler null-safety; Polaris never shows VMax; deterministic sort. |
+| `tests/unit/positions.test.ts` | `nextPosition`, `validateReorder` (count/dup/unknown). |
+| `tests/unit/image-dimensions.test.ts` | PNG/JPEG/GIF/WebP header parsing + corrupt input (AC-P2-19). |
+| `tests/unit/schema-parity.test.ts` | SQL↔TS enums; parameter/setup FK & uniqueness; **system template = canonical sections & read from the table**; **RLS write policies require `can_author`, no blanket member write**; **multi-role unique tuple**; **every RPC calls `assert_author`**; **`app.*` helper `EXECUTE` revoked from `public`**; **cross-org `copy_parameter_definitions` guard**; **`instantiate_sections_from_template` author guard**; **atomic `replace` uses the RPC**; **`uploadManualImage` persists width/height**; **block CRUD actions exist + validate payloads**. |
+| `tests/integration/rls.test.ts` | **skipped (BLOCKED)** — 9 groups: cross-org isolation; reviewer direct-mutation denial; privileged-RPC denial; cross-org copy denial; dev-vs-admin; required-section protection; atomic setup replace; block CRUD round-trip; template instantiation; parameter propagation; private-image access. |
 
-### Running the RLS integration tests (once a project exists)
+### Running the integration tests (needs the schema applied)
 
 ```bash
 # apply supabase/migrations + supabase/seed.sql to the project, then:
 SUPABASE_TEST_URL=https://<ref>.supabase.co \
-SUPABASE_TEST_ANON_KEY=<anon key> \
-SUPABASE_SECRET_KEY=<secret key> \
+SUPABASE_TEST_ANON_KEY=<sb_publishable_...> \
+SUPABASE_SECRET_KEY=<sb_secret_...> \
 npm run test -- tests/integration/rls.test.ts
 ```
 
@@ -159,110 +156,109 @@ npm run test -- tests/integration/rls.test.ts
 
 ## 9. CI
 
-`.github/workflows/ci.yml` — on push/PR to `main`: `actions/setup-node@v4` (Node 22, npm cache) → `npm ci` → `npm run lint` → `npm run typecheck` → `npm run test` → `npm run build` (with empty Supabase env, proving the build survives an unconfigured project). Reproducible by any developer with `npm ci`.
+`.github/workflows/ci.yml` — Node 22: `npm ci → lint → typecheck → test → build` (build runs with empty Supabase env to prove it survives an unconfigured project).
 
 ---
 
-## 10. Local verification performed (this environment)
+## 10. Local verification performed
 
 | Check | Result |
 |---|---|
-| `npm run lint` | ✅ pass, 0 warnings/errors |
-| `npm run typecheck` (`tsc --noEmit`) | ✅ pass |
-| `npm run test` | ✅ 39 passed, 5 skipped (BLOCKED integration) |
-| `npm run build` | ✅ pass, 18 routes generated |
-| `GET /api/health` (built server, no Supabase env) | ✅ HTTP 503, body `{ ok:true, ready:false, checks:[…] }` — endpoint responds, readiness false (AC-P2-2) |
-| `/` | ✅ 307 → `/dashboard` |
-| `/login` | ✅ 200 |
-| `/dashboard` unauthenticated + unconfigured | ✅ 200, renders the "Supabase belum dikonfigurasi" panel — no crash (spec §31) |
-| Secret key in client bundle | ✅ not present — read only in `server-only` modules |
+| `npm run lint` | ✅ 0 warnings/errors |
+| `npm run typecheck` | ✅ pass |
+| `npm run test` | ✅ 56 passed, 19 skipped (BLOCKED integration) |
+| `npm run build` | ✅ pass, 18 routes |
+| `GET /api/health` — no env | ✅ 503, `ready:false`, per-var checks false |
+| `GET /api/health` — all env (real `.env.local`) | ✅ 200, `ready:true`, all checks true → **AC-P2-2 fully verified** |
+| Secret key in client bundle (real `sb_secret_` key) | ✅ **0 occurrences** in `.next/static` → **AC-P2-3 verified** |
+| `/` / `/login` / `/dashboard` (configured, no session) | ✅ 307→/login (guard) / 200 / 307→/login |
 
-Not performed here (no Supabase project / CLI / Docker): migration apply, seed apply, live auth sign-in, CRUD round-trips, RLS enforcement, image upload + signed URL, two-session autosave conflict, the Polaris and parameter-ownership end-to-end scenarios. All are BLOCKED (below) and scripted/covered by the skipped integration suite + the acceptance table.
+**Not performed** (schema not applied to the live project — see §14): migration/seed apply, auth sign-in, every CRUD round-trip, RLS/role enforcement, RPC denial, image signed-URL, two-session autosave, and the Polaris / parameter-ownership / cross-org end-to-end scenarios.
 
 ---
 
 ## 11. Acceptance criteria results
 
-Legend: ✅ met & verified here · 🟦 implemented, verification BLOCKED (needs live Supabase) · ⬜ Phase-boundary / SHOULD deferred.
+Legend: ✅ implemented & verified at the stated level · 🟦 implemented, verification BLOCKED (needs the schema applied) · ⬜ SHOULD / Phase boundary.
 
 | ID | Result | Note |
 |---|---|---|
-| AC-P2-1 | ✅ / 🟦 | GI-3/4/5/6/7 ✅ (lint, typecheck, build, no inert buttons, icon+text). GI-10/11/12 ✅ at schema + unit level; UI-scan 🟦. |
-| AC-P2-2 | ✅ | `/api/health` 503 + `ready:false` + checks when a var is missing; endpoint responds. |
-| AC-P2-3 | ✅ | Secret key only in `server-only` modules; not in the build's client chunks. |
-| AC-P2-4 | 🟦 | `signInAction` / `signOutAction` + cookie SSR implemented; generic error message; needs a live project to exercise. |
-| AC-P2-5 | ✅ | `/no-membership` state + layout redirect implemented; reachable logic verified via smoke test of the unconfigured/guarded paths. |
-| AC-P2-6 | 🟦 | `createEaProduct` + slug uniqueness + inline error mapping implemented. |
-| AC-P2-7 | 🟦 | `createEaVersion` + `(product, platform, version)` unique; semver validated (unit-tested). |
-| AC-P2-8 | 🟦 | `requirements`/`support` JSON round-trip; symbols/timeframes are `ea_version_setups`, not free text (schema-parity test ✅). |
-| AC-P2-9 | 🟦 | `create_ea_version_with_setups` inserts one row per config; unit test proves 3 documented configs are distinct. |
-| AC-P2-9a | ✅ / 🟦 | No inference path (unit-tested ✅); full UI/output scan 🟦. |
-| AC-P2-9b | ✅ / 🟦 | Editor: add/edit/reorder(keyboard)/enable/remove, suffix symbols, controlled TF, inline dup rejection — built; unit-tested. Drag = Phase 3 polish (documented). e2e 🟦. |
-| AC-P2-9c | ✅ | Broker-min-lot note + "data uji developer" labels present in editor, wizard, version form, and renderer (Ch. 2 & 9). |
-| AC-P2-10 | 🟦 | `create_manual_with_version` → `app.instantiate_manual_sections` seeds canonical 18 (SQL ↔ `canonical-sections.ts` parity test ✅). |
-| AC-P2-11 | 🟦 | New-EA path via `create_product_version_manual` — single transactional function; rolls back on any failure. |
-| AC-P2-12 | ✅ / 🟦 | View-model isolation unit-tested (Polaris never shows VMax). Full builder/inspector/preview/cover e2e 🟦. |
-| AC-P2-13 | 🟦 | `manual_versions (manual_id, version)` unique + friendly mapping. |
-| AC-P2-14 | 🟦 | `guard_required_section_delete()` trigger + `manual:update` server gate. |
-| AC-P2-15 | ✅ / 🟦 | `blockPayloadSchema` Zod union validated at the write boundary; six types + rejection unit-tested. DB persistence 🟦. |
-| AC-P2-16 | 🟦 | `position >= 0` checks + partial unique `(section, position) where deleted_at is null`. |
-| AC-P2-17 | 🟦 (SHOULD) | `manual_blocks.deleted_at` soft delete column present; recover-UI is Phase 3. |
-| AC-P2-18 | 🟦 | Full `ea_parameters` column set; `createParameter` / `updateParameter`. |
-| AC-P2-18a | ✅ / 🟦 | Schema-parity test proves FK to `ea_versions`, no `manual_version_id`; `guard_parameter_table_ownership()` rejects foreign groups. Runtime rejection 🟦. |
-| AC-P2-18b | 🟦 | No copy step exists; both manual versions read the same rows (design). Propagation e2e 🟦. |
-| AC-P2-18c | 🟦 (SHOULD) | `app.copy_parameter_definitions()` is EA-version → EA-version; wired via `copyParametersFromVersionId`. |
-| AC-P2-19 | 🟦 | `uploadManualImage`: MIME/size/owner/org checks, private bucket, `<org>/<id>.<ext>` key, `image_assets` row, `scan_status`. Signed-URL expiry / direct-URL-blocked 🟦. |
-| AC-P2-20 | ✅ / 🟦 | `row_version`-guarded UPDATE + `resolveWrite` unit-tested; builder surfaces the 5 states, "Tersimpan" only on server confirm. Two-session test 🟦. |
-| AC-P2-21 | 🟦 | RLS on every org table + storage; `tests/integration/rls.test.ts` written, **BLOCKED**. Schema-parity test confirms RLS is enabled. |
-| AC-P2-22 | ✅ | `assertCan` typed-error unit tests; every action gated server-side. |
-| AC-P2-23 | ✅ (SHOULD) | `mapPostgrestError` + `error.tsx` emit human messages only; `writeAudit` logs action/entity, not contents. |
-| AC-P2-24 | ✅ / 🟦 | `/dashboard`, `/manuals`, `/ea-products` read from `features/*/queries.ts` (Supabase), no `localStorage`; the mock file is deleted. Live data render 🟦. |
-| AC-P2-25 | ✅ | Vitest + Testing Library configured and green in CI; slug/version uniqueness (mapping), permission map, autosave conflict all covered. |
-| AC-P2-26 | ✅ (SHOULD) | `manual_templates`/`manual_template_sections` versioned; `manual_versions.template_version` recorded by the creation RPCs. |
-| AC-P2-27 | ✅ | Open-question decisions below. |
+| AC-P2-1 | ✅ / 🟦 | GI-3/4/5/6/7 ✅. GI-10/11/12 ✅ at schema + unit level; runtime UI-scan 🟦. |
+| AC-P2-2 | ✅ | Verified both directions against the real project. |
+| AC-P2-3 | ✅ | `sb_secret_` key absent from `.next/static` (real key). |
+| AC-P2-4 | 🟦 | Sign-in/out + generic error + cookie SSR implemented; needs the schema (profiles/memberships) to exercise. |
+| AC-P2-5 | ✅ | `/no-membership` guard verified via the configured-no-session redirect path. |
+| AC-P2-6 | 🟦 | `createEaProduct` + slug uniqueness + inline mapping. |
+| AC-P2-7 | 🟦 | `createEaVersion` + `(product,platform,version)` unique; semver unit-tested. |
+| AC-P2-8 | 🟦 | `requirements`/`support` JSON round-trip; symbols/timeframes are `ea_version_setups` (parity test ✅). |
+| AC-P2-9 | 🟦 | `create_ea_version_with_setups` one row per config; 3-config distinctness unit-tested. |
+| AC-P2-9a | ✅ / 🟦 | No inference path (unit-tested); full output scan 🟦. |
+| AC-P2-9b | ✅ / 🟦 | Editor now has **pointer drag + keyboard** reorder, suffix symbols, controlled TF, inline dup rejection — built + unit-tested; e2e 🟦. |
+| AC-P2-9c | ✅ | Broker-min-lot note + "data uji developer" labels present in editor, wizard, version form, renderer. |
+| AC-P2-10 | ✅ / 🟦 | Section set now comes from the **versioned template table** (parity test: template = canonical set, instantiation reads the table). Runtime instantiation 🟦. |
+| AC-P2-11 | 🟦 | New-EA path is one transactional RPC (`create_product_version_manual`). |
+| AC-P2-12 | ✅ / 🟦 | View-model isolation unit-tested (Polaris ≠ VMax); full e2e 🟦. |
+| AC-P2-13 | 🟦 | `(manual_id, version)` unique + friendly mapping. |
+| AC-P2-14 | 🟦 | `guard_required_section_delete` trigger + `manual:update` gate + integration test written. |
+| AC-P2-15 | ✅ / 🟦 | **Block CRUD server actions** (`createBlock`/`updateBlock`/`softDeleteBlock`/`restoreBlock`/`reorderBlocks`) with `blockPayloadSchema` at the write boundary — built + parity-tested + payload unit-tested. DB round-trip 🟦. |
+| AC-P2-16 | ✅ / 🟦 | Non-negative + partial-unique live-position index; `validateReorder` + `reorder_manual_blocks` two-phase RPC — unit-tested; DB 🟦. |
+| AC-P2-17 | ✅ / 🟦 | `softDeleteBlock` + `restoreBlock` (restore-to-end) implemented; unit/parity-tested; DB 🟦. |
+| AC-P2-18 | 🟦 | Full `ea_parameters` column set; create/update. |
+| AC-P2-18a | ✅ / 🟦 | Parity test: FK `ea_versions`, no `manual_version_id`; `guard_parameter_table_ownership` rejects foreign groups. Runtime 🟦. |
+| AC-P2-18b | 🟦 | No copy step; integration propagation test written. |
+| AC-P2-18c | 🟦 | `copy_parameter_definitions` is EA-version→EA-version, **now same-org + author guarded** (parity test); cross-org denial integration test written. |
+| AC-P2-19 | ✅ / 🟦 | `width`/`height` extracted from the header and persisted (parity test + 4 format unit tests). Private storage round-trip / signed-URL expiry 🟦. |
+| AC-P2-20 | ✅ / 🟦 | `row_version`-guarded UPDATE + `resolveWrite` unit-tested; 5 UI states. Two-session test 🟦. |
+| AC-P2-21 | ✅ (schema-level) / 🟦 (runtime) | **RLS is now role-aware** (parity test: `can_author` writes, no blanket member write, `is_admin` for admin tables). Runtime cross-org + reviewer-denial in the (blocked) integration suite. |
+| AC-P2-22 | ✅ | `assertCan(roles, …)` typed-error unit tests, incl. multi-role. |
+| AC-P2-23 | ✅ | `mapPostgrestError` + `error.tsx` emit human messages; `writeAudit` logs action/entity, not contents. |
+| AC-P2-24 | ✅ / 🟦 | Pages read from `features/*/queries.ts`; `mock-data.ts` deleted. Live data render 🟦. |
+| AC-P2-25 | ✅ | Vitest + Testing Library green in CI; slug/version mapping, permission map, autosave conflict, reorder, image dims all covered. |
+| AC-P2-26 | ✅ / 🟦 | `manual_templates`/`_sections` versioned + seeded by migration; `create_manual_with_version` records `template_id` + `template_version`. Runtime 🟦. |
+| AC-P2-27 | ✅ | Decisions in §12; the multi-role question resolved by implementing it. |
+
+**No MUST is marked ✅ solely on the strength of a Zod schema or a code path that a live DB has not exercised.**
 
 ---
 
 ## 12. Open-question decisions (AC-P2-27)
 
-| OQ | Decision for Phase 2 |
+| OQ | Decision |
 |---|---|
-| **PRD-OQ-001 — styling** | Keep the bespoke `app/globals.css` design-token stylesheet. Phase 2 additions are a scoped block at the end of the file using the same tokens/conventions. No Tailwind utilities in JSX, no shadcn/ui added. Revisit only if a component library becomes necessary. |
-| **PRD-OQ-003 — auth route group** | Keep `app/login/` (no `(auth)` group). `/login`, `/no-membership` sit at the app root, outside `app/(workspace)/`. Documented; not worth a churny move. |
-| **PRD-OQ-006 — supported-setup granularity** | Already resolved in PRD §25 — implemented exactly as specified (`ea_version_setups` columns above). |
-| **PRD-OQ-012 — template editing depth** | Phase 2 ships the versioned template **tables** + a seeded system template. No admin editing UI (that is Phase 2's `template:manage` action reserved for a later admin surface). Manual creation records the template version used. |
+| **PRD-OQ-001 — styling** | Keep the bespoke `app/globals.css` token stylesheet; Phase 2 additions are a scoped block using the same tokens. No Tailwind utilities / shadcn. |
+| **PRD-OQ-003 — auth route group** | Keep `app/login/` (no `(auth)` group); `/login` + `/no-membership` at app root. |
+| **PRD-OQ-006** | Already resolved in the PRD; implemented as specified. |
+| **PRD-OQ-012 — template editing depth** | Phase 2 ships versioned template **tables** + the seeded system template + version-recording on manual creation. No admin editing UI (a later admin surface owns `template:manage`). |
+| **Multi-role model** (review finding 8 — was a "known limitation", not a numbered OQ) | **Implemented**: normalised `memberships` unique `(org, user, role)`, `app.can_author`/`is_admin`, `roles[]` through `getWorkspaceContext` / `assertCan`. `docs/DATA_MODEL.md` updated to match. |
 
 ---
 
 ## 13. Known limitations
 
-1. **`lib/supabase/database.types.ts` is hand-authored.** It matches the migrations but is not generated. Run `npm run db:types` (`supabase gen types typescript --local`) once a project exists and replace it; query files cast at the boundary in the meantime.
-2. **Active-org selection** = first active membership (ordered by `created_at`). No org switcher UI. Multi-org users see only their first org's workspace until Phase 8 / a dedicated switcher.
-3. **Single role per `(org, user)`** (per `DATA_MODEL.md`). PRD §6's "a user may hold more than one role" is not modelled yet; relevant mainly to Phase 6 review self-approval, which is out of scope here.
-4. **Autosave surface is the chapter completion state only.** The block-level editor and its autosave are Phase 3; the conflict mechanism and UI states are in place and reused there.
-5. **`image_assets.scan_status`** is stored but nothing sets it to `clean`/`failed` yet (no scanner). The Phase 5 validation gate (`PRD-OQ-009`) will decide blocked-vs-warning.
-6. **Node 20** triggers a `@supabase/supabase-js` deprecation warning locally; CI uses Node 22. Not a failure.
-7. **`server start` prerender**: routes touching Supabase are `dynamic = "force-dynamic"`, so `next build` never calls them without env — intended.
+1. `lib/supabase/database.types.ts` is hand-authored (matches the migrations); run `npm run db:types` against a real project once the schema exists and replace it. Query files cast at the boundary meanwhile.
+2. Active org = first membership by `created_at`; no org switcher.
+3. Autosave's editable surface is the chapter completion state; the block editor UI is Phase 3 (the block **data** CRUD + conflict mechanism exist now).
+4. `image_assets.scan_status` is stored; no scanner sets it yet (`PRD-OQ-009` → Phase 5).
+5. Next 16 prints a `middleware`→`proxy` rename advisory; `middleware.ts` still works and builds. Rename is a housekeeping follow-up.
+6. `parameter-manager.tsx` is a deliberately minimal CRUD surface for testability, not the Phase 3 editor.
 
 ---
 
 ## 14. External credential limitations
 
-**BLOCKED BY EXTERNAL CREDENTIALS.** This environment has no Supabase project URL/keys, no `supabase` CLI, and no running Docker, so the following Phase 2 acceptance items are implemented and code-reviewed but **not executed** and therefore **not signed off**:
+**Runtime credentials: PRESENT** (`.env.local`, reviewer-provided, gitignored). `/api/health` → `ready:true`; AC-P2-2 and AC-P2-3 verified against the real project.
 
-- AC-P2-4, AC-P2-6 … AC-P2-14, AC-P2-16 … AC-P2-19, AC-P2-21 (the `🟦` rows above).
-- The spec §25 (Polaris), §26 (parameter ownership), §27 (security) end-to-end scenarios.
-- `tests/integration/rls.test.ts` (auto-skipped).
+**Schema application: BLOCKED.** The project has **no tables yet** (`GET /rest/v1/organizations` → 404) and this environment cannot apply `supabase/migrations`:
+- only the `sb_publishable_` / `sb_secret_` API keys are available — these do CRUD/RPC via PostgREST but **cannot run DDL**;
+- no Postgres connection string / DB password, and no `SUPABASE_ACCESS_TOKEN`, so `supabase db push` / `supabase link` cannot run;
+- no local Docker for `supabase start`.
 
-**To unblock:** provision a Supabase project (or local stack), set `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_SECRET_KEY`, `APP_URL`; `supabase db push` (+ seed); then run the app and the integration suite and record results here. **Phase 2 must not be marked fully complete until that pass is green.**
+**Consequently BLOCKED (implemented + reviewed, not executed, NOT signed off):** AC-P2-4, 6–14, 16 (DB), 17 (DB), 18, 18a (runtime), 18b, 18c, 19 (storage), 20 (two-session), 21 (runtime), 24 (render), 26 (runtime); spec §25 (Polaris), §26 (parameter ownership), §27 (security) end-to-end; the entire `tests/integration/rls.test.ts` suite.
+
+**To unblock:** supply a DB connection string **or** a `SUPABASE_ACCESS_TOKEN` for the project, then `supabase db push` + apply the seed, run the integration suite, and record results in §10–11. **Phase 2 is not fully complete until that pass is green.**
 
 ---
 
 ## 15. Deferred to Phase 3 (and later)
 
-Phase 3: TipTap serialization spike, allow-listed block editor + inline editing, accessible block/chapter reorder, installation step builder, parameter group/table builder UI, image placement + annotation editor, undo, drag polish for the Supported Configuration editor, generated Supabase types.
-Phase 4: `AIProvider` + mock/configured providers, grounded requests, claim scanning.
-Phase 5: versioned checklist engine, completion scoring, mismatch/units/claims checks, `scan_status` gate.
-Phase 6: reviewer assignment + comments + decisions, audit history surface, version cloning, published immutability + snapshots.
-Phase 7: public `/manual/[eaSlug]/[version]`, TOC/search/version nav, print CSS, Playwright A4 export.
-Phase 8: full a11y/responsive/security/perf audits, org switcher, member-management UI, comprehensive state matrix.
+Phase 3: TipTap spike + visual block editor, accessible in-editor reorder, installation step builder, parameter table builder UI, image placement + annotation editor, undo, generated Supabase types. Phase 4: AI. Phase 5: checklist engine, `scan_status` gate. Phase 6: reviews, decisions, cloning, immutable snapshots. Phase 7: public route, PDF. Phase 8: audits, org switcher, member/template admin UI.

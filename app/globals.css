@@ -612,3 +612,34 @@ button, a, input, select, textarea { touch-action: manipulation; }
   .setup-field-wide, .setup-checkbox { grid-column: span 1; }
   .chapter-status-buttons { grid-template-columns: 1fr; }
 }
+
+/* Supported Configuration editor — pointer drag reorder (AC-P2-9b) */
+.setup-row { display: flex; gap: 8px; align-items: flex-start; }
+.setup-row > .setup-grid { flex: 1; }
+.setup-drag-handle {
+  flex: 0 0 auto; margin-top: 18px; min-height: 32px; min-width: 24px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; cursor: grab; color: #64748b;
+}
+.setup-drag-handle:active { cursor: grabbing; }
+.setup-row[data-dragover="true"] { outline: 2px dashed #2563eb; outline-offset: 2px; }
+
+/* Parameter manager (spec §7 — minimal functional CRUD surface) */
+.version-subhead { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: #64748b; margin: 16px 0 6px; }
+.param-manager { display: flex; flex-direction: column; gap: 12px; }
+.param-add-group, .param-add { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.param-add-group input, .param-add input, .param-add select { min-height: 36px; border: 1px solid #e2e8f0; border-radius: 6px; padding: 4px 8px; font-size: 13px; }
+.param-empty { color: #94a3b8; font-size: 13px; }
+.param-group { border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px; }
+.param-group > header { display: flex; align-items: center; gap: 10px; }
+.param-group > header h4 { margin: 0; font-size: 14px; }
+.param-group > header span { color: #64748b; font-size: 12px; }
+.param-list { list-style: none; margin: 8px 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.param-row { display: flex; gap: 8px; align-items: flex-start; padding: 6px; border-radius: 6px; background: #f8fafc; }
+.param-move { display: flex; flex-direction: column; gap: 2px; }
+.param-main { flex: 1; font-size: 13px; }
+.param-main code { background: #eef2f6; padding: 0 4px; border-radius: 3px; margin: 0 3px; font-size: 12px; }
+.param-default { display: block; color: #64748b; font-size: 12px; margin-top: 2px; }
+.param-edit { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+.param-edit input, .param-edit select { min-height: 32px; border: 1px solid #e2e8f0; border-radius: 6px; padding: 2px 6px; font-size: 12px; }
+.param-actions { display: flex; gap: 4px; }

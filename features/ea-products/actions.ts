@@ -18,8 +18,8 @@ function authFail(e: unknown): ActionResult<never> | null {
 
 export async function createEaProduct(input: unknown): Promise<ActionResult<{ id: string; slug: string }>> {
   try {
-    const { orgId, userId, role } = await requireActiveOrg();
-    assertCan(role, "ea_product:create");
+    const { orgId, userId, roles } = await requireActiveOrg();
+    assertCan(roles, "ea_product:create");
 
     const parsed = eaProductCreateSchema.safeParse(input);
     if (!parsed.success) {
@@ -57,8 +57,8 @@ export async function createEaProduct(input: unknown): Promise<ActionResult<{ id
 
 export async function updateEaProduct(input: unknown): Promise<ActionResult<{ id: string }>> {
   try {
-    const { orgId, userId, role } = await requireActiveOrg();
-    assertCan(role, "ea_product:update");
+    const { orgId, userId, roles } = await requireActiveOrg();
+    assertCan(roles, "ea_product:update");
 
     const parsed = eaProductUpdateSchema.safeParse(input);
     if (!parsed.success) {
@@ -90,8 +90,8 @@ export async function updateEaProduct(input: unknown): Promise<ActionResult<{ id
 
 export async function archiveEaProduct(productId: string): Promise<ActionResult<{ id: string }>> {
   try {
-    const { orgId, userId, role } = await requireActiveOrg();
-    assertCan(role, "ea_product:archive");
+    const { orgId, userId, roles } = await requireActiveOrg();
+    assertCan(roles, "ea_product:archive");
     const supabase = await createSupabaseServerClient();
     const { error } = await supabase
       .from("ea_products")
