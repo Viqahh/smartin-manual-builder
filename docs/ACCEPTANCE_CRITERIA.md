@@ -14,6 +14,9 @@
 > - **GI-7** Status is always conveyed by icon **and** text, never colour alone; visible focus rings; 44px touch targets; `prefers-reduced-motion` respected.
 > - **GI-8** From Phase 2 on: a member of Organisation A cannot list, read, or mutate any entity of Organisation B.
 > - **GI-9** From Phase 2 on: the Supabase service/secret key is absent from the browser bundle.
+> - **GI-10** From Phase 2 on: a supported `symbol × timeframe` combination exists only as an explicit stored `ea_version_setups` row. No UI, output, validation, or AI path ever infers a combination from independently listed symbols and timeframes (e.g. `EURUSD` + `M15` present separately never yields "supports `EURUSD / M15`").
+> - **GI-11** From Phase 2 on: EA technical parameter definitions (`parameter_groups` → `ea_parameters`) are owned by `ea_versions`, never by `manual_versions`. A `parameterTable` block references groups of its manual version's single linked EA Version; two manual versions of the same EA Version resolve to identical definitions.
+> - **GI-12** From Phase 2 on: any "minimum lot" figure is labelled *Tested Minimum Lot* (developer test data) and is accompanied by the statement that the actual minimum lot comes from the broker's symbol specification. No surface presents an EA-controlled universal minimum lot.
 
 ---
 
@@ -46,15 +49,18 @@
 
 | ID | Criterion | Type | Verify |
 |---|---|---|---|
-| AC-P2-1 | GI-3, GI-4, GI-5, GI-6, GI-7 hold. | MUST | phase-gate checks. |
+| AC-P2-1 | GI-3, GI-4, GI-5, GI-6, GI-7, GI-10, GI-11, GI-12 hold. | MUST | phase-gate checks. |
 | AC-P2-2 | The app fails readiness when a required env var (`NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_SECRET_KEY`, `APP_URL`) is missing; the health endpoint still responds. (PRD-PLT-003) | MUST | remove a var; hit health + readiness. |
 | AC-P2-3 | GI-9: a production bundle analysis shows no occurrence of the secret key; only server code references it. | MUST | bundle scan. |
 | AC-P2-4 | Sign-in via Supabase Auth sets a cookie session; wrong credentials show a non-field error and keep the email value; sign-out clears the session and returns to `/login`. (PRD-PLT-001) | MUST | manual + test. |
 | AC-P2-5 | A signed-in user with no membership sees an explanatory state, not the workspace. | MUST | test. |
 | AC-P2-6 | A developer can create an EA Product; the slug is unique per organisation; a duplicate slug is rejected with an inline error. (PRD-EA-001) | MUST | test. |
 | AC-P2-7 | A developer can create an EA Version with semver + platform; `(product, platform, version)` is unique; an MT4 and MT5 `1.0.0` for the same product both succeed; a second MT5 `1.0.0` is rejected. (PRD-EA-003, PRD-EA-004) | MUST | test. |
-| AC-P2-8 | EA Version requirements (symbols, timeframes, account type, min lot, testing deposit, broker requirements, VPS/DLL/WebRequest, indicator dependencies) persist and reload unchanged. (PRD-EA-005) | MUST | round-trip test. |
-| AC-P2-9 | An EA Version stores **multiple** supported symbol/timeframe setup records; adding `XAUUSD@M15` and `XAUUSD@H1` yields two distinct rows. (PRD-EA-006 data) | MUST | test. |
+| AC-P2-8 | EA Version requirements (account type, testing deposit, broker requirements, VPS/DLL/WebRequest, indicator dependencies, optional broker/account volume constraints) persist and reload unchanged. **Symbols and timeframes are not stored here as free text** — they are `ea_version_setups` rows (AC-P2-9). (PRD-EA-005) | MUST | round-trip test. |
+| AC-P2-9 | **(Correction 4A)** A developer creates supported configurations `XAUUSD / M15`, `XAUUSD / H1`, and `EURUSD / H1`; all three persist as **separate** `ea_version_setups` rows tied to the EA Version, each with its own `position`. (PRD-EA-009, PRD-SUCC-008) | MUST | DB inspection + reload. |
+| AC-P2-9a | **(Correction 4B / GI-10)** After AC-P2-9, no UI screen, rendered Chapter 2/9 output, validation result, or AI fact bundle indicates that `EURUSD / M15` is supported; there is no code path that derives a combination from the distinct symbol and timeframe values. (PRD-EA-006, PRD-EA-009) | MUST | UI assertion + code review + fixture. |
+| AC-P2-9b | **(PRD-SUCC-011)** The Supported Configuration editor is functional in Phase 2: add, edit, reorder (drag **and** keyboard), enable/disable, and remove rows all work and persist. `symbol` accepts broker suffixes — `XAUUSD`, `XAUUSD.m`, `EURUSD.pro` all save; `timeframe` is a controlled select limited to `M1,M5,M15,M30,H1,H4,D1,W1,MN1` (free text rejected); `(symbol, timeframe)` duplicates within a version are rejected inline. Phase 3 does **not** introduce this editor. (PRD-EA-009, IMPLEMENTATION_PLAN Phase 2) | MUST | e2e test. |
+| AC-P2-9c | **(Correction 4C / GI-12)** In the editor, the version detail, and rendered Chapter 2/9, the per-configuration lot value is labelled *Tested Minimum Lot* / "tested data", and the statement "The actual minimum lot is determined by the broker's symbol specification." is visible. No surface labels it "Minimum Lot" as an EA-controlled universal value; a separately documented broker/account volume constraint does not overwrite or contradict the tested value. (PRD-EA-010) | MUST | UI + output scan. |
 | AC-P2-10 | Creating a manual via the wizard (existing-EA path) creates a `manuals` row, a first `manual_versions` row linked to the chosen EA Version, and the full canonical `manual_sections` set from the active template version. (PRD-MAN-004, PRD-MAN-006) | MUST | DB inspection. |
 | AC-P2-11 | Creating a manual via the new-EA path creates the EA Product + EA Version **and** the Manual atomically; if EA creation fails, no manual row exists. (PRD-EA-001, transactional) | MUST | fault-injection test. |
 | AC-P2-12 | **GI-2 / PRD-MAN-014:** create "Polaris EA"; the builder, inspector metadata, preview, and cover show only Polaris values — never "VMax EA". | MUST | end-to-end assertion. |
@@ -64,15 +70,18 @@
 | AC-P2-16 | Block positions remain non-negative and unique within a section after a reorder transaction. (PRD-MAN-010) | MUST | reorder test. |
 | AC-P2-17 | Deleting a block is recoverable within the editing session (soft-delete). (PRD-MAN-011) | SHOULD | test. |
 | AC-P2-18 | Parameter groups and EA parameters persist with all columns (display/technical name, type, default, unit, range, options, description, order effect, mutability, notes, required, position). (PRD-CNT-006) | MUST | round-trip test. |
+| AC-P2-18a | **(Correction 4D / GI-11)** `parameter_groups` and `ea_parameters` have a foreign key to `ea_versions`, **not** to `manual_versions`. The migration is written this way from the start — there is no `manual_version_id` on either table. A `parameterTable` block may only reference groups belonging to its manual version's linked EA Version; referencing another EA Version's group is rejected. (PRD-CNT-010) | MUST | schema inspection + test. |
+| AC-P2-18b | **(Correction 4E / GI-11)** Given EA Version `1.0.0` with Manual Version `1.0.0` and Manual Version `1.0.1` both linked to it: editing an `ea_parameter` (e.g. changing a default) is immediately reflected in the `parameterTable` output of **both** manual versions; there are no per-manual-version copies of the parameter definitions. (PRD-CNT-010, PRD-SUCC-012) | MUST | propagation test. |
+| AC-P2-18c | The optional "copy parameter definitions from version…" action on EA Version create copies groups/parameters from a **prior EA Version** into the **new EA Version** (EA-version-to-EA-version), never from or into a manual version. (PRD-EA-007, PRD-CNT-010) | SHOULD | test. |
 | AC-P2-19 | Uploading an image creates a **private** storage object with an organisation-scoped key and an `image_assets` row with MIME, dimensions, caption, alt text, annotations JSON, and `scan_status`; the object is not reachable without a signed URL; a signed URL expires. (PRD-CNT-003, PRD-CNT-004, PRD-SEC-004) | MUST | direct-URL test + expiry test. |
 | AC-P2-20 | Debounced autosave persists draft edits within ~1s; a concurrent edit from a second session produces a visible conflict notice and does **not** silently overwrite. (PRD-MAN-012) | MUST | two-session test. |
-| AC-P2-21 | **GI-8:** an Organisation A user receives no rows and cannot mutate when targeting Organisation B's products, manuals, sections, blocks, parameters, or images — enforced by both the server action check and RLS (verified with the service path disabled). (PRD-SEC-002) | MUST | role/RLS test. |
+| AC-P2-21 | **GI-8:** an Organisation A user receives no rows and cannot mutate when targeting Organisation B's products, EA versions, `ea_version_setups`, parameter groups/parameters, manuals, sections, blocks, or images — enforced by both the server action check and RLS (verified with the service path disabled). (PRD-SEC-002) | MUST | role/RLS test. |
 | AC-P2-22 | Authorisation is checked by action (`manual:update`, `template:manage`, `member:manage`, …); a role lacking the action is refused server-side with a typed error even if the client sends the request. (PRD-SEC-003) | MUST | test. |
 | AC-P2-23 | Server logs use a request id and contain no manual contents, tokens, source code, or signed URLs. (PRD-NFR-007, PRD-SEC-009) | SHOULD | log inspection on an error path. |
 | AC-P2-24 | `/dashboard`, `/manuals`, `/ea-products` render from org-scoped real data (no `localStorage` fallback in the shipped path). (PRD-PLT-007) | MUST | inspect + network. |
 | AC-P2-25 | Vitest + Testing Library are configured and run in CI; domain logic (slug uniqueness, version uniqueness, permission map, autosave conflict) has unit coverage. (PRD-NFR-009) | MUST | CI. |
 | AC-P2-26 | The manual template and checklist template are versioned; each manual version records the template version that instantiated it. (PRD-VER-008) | SHOULD | DB inspection. |
-| AC-P2-27 | Open Questions `PRD-OQ-001` (styling), `PRD-OQ-003` (auth route group), `PRD-OQ-006` (setup granularity), `PRD-OQ-012` (template editing depth) have recorded decisions before the work that depends on them lands. | MUST | decision log in the phase report. |
+| AC-P2-27 | Open Questions `PRD-OQ-001` (styling), `PRD-OQ-003` (auth route group), `PRD-OQ-012` (template editing depth) have recorded decisions before the work that depends on them lands. (`PRD-OQ-006` supported-setup granularity is already **resolved** — see PRD §25 / `PRD-EA-009`.) | MUST | decision log in the phase report. |
 
 ---
 
@@ -82,16 +91,16 @@
 
 | ID | Criterion | Type | Verify |
 |---|---|---|---|
-| AC-P3-1 | GI-1..GI-7 hold. | MUST | phase-gate. |
+| AC-P3-1 | GI-1..GI-7, GI-10, GI-11, GI-12 hold. | MUST | phase-gate. |
 | AC-P3-2 | A serialization spike is recorded (round-trips the six block types through TipTap JSON without loss or unsafe HTML). | MUST | spike doc. |
 | AC-P3-3 | The editor persists content as structured JSON; a payload containing raw `<script>` or arbitrary HTML is neither stored as HTML nor rendered — the allowlisted renderer drops/escapes it. (PRD-SEC-010) | MUST | injection test. |
 | AC-P3-4 | A developer can add, edit inline, move, duplicate, and delete each block type; an unknown/invalid block type is refused. (PRD-MAN-009) | MUST | test per type. |
 | AC-P3-5 | Chapter and block reordering work by drag **and** by keyboard/up-down controls; focus stays on the moved item; the final order is contiguous and unique. (PRD-MAN-008, PRD-MAN-010, GI-7) | MUST | keyboard + pointer test. |
 | AC-P3-6 | A developer can add a custom (non-required) chapter after the canonical set; required chapters cannot be removed. (PRD-MAN-008, PRD-MAN-007) | MUST | test. |
 | AC-P3-7 | The installation step builder produces an ordered `steps` block where each step has a title, instruction, optional menu path, and optional image reference; ≥ 5 steps render in Chapter 4. (PRD-CNT-002) | MUST | test. |
-| AC-P3-8 | The parameter builder creates groups and parameters; a `parameterTable` block references group ids and renders the group heading + columns; editing a parameter updates **every** table referencing its group (no copy drift). (PRD-CNT-006, PRD-CNT-007) | MUST | propagation test. |
+| AC-P3-8 | The parameter builder edits the **EA Version's** groups and parameters (`parameter_groups`/`ea_parameters` on `ea_versions`, per GI-11); a `parameterTable` block references group ids of the linked EA Version and renders the group heading + columns; editing a parameter updates **every** table in **every** manual version referencing that group (no copy drift). Editing requires `ea_version:update`. (PRD-CNT-006, PRD-CNT-007, PRD-CNT-010) | MUST | propagation test across two manual versions. |
 | AC-P3-9 | An `image` block references an `image_assets` id; the chapter cannot be marked "complete" while alt text is empty. (PRD-CNT-005) | MUST | test. |
-| AC-P3-10 | An EA Version with two supported setups renders both rows in Chapter 2 and Chapter 9 with no free-text ambiguity. (PRD-EA-006 UI, PRD-SUCC-008) | MUST | render test. |
+| AC-P3-10 | Phase 3 **improves the presentation** of the Supported Configuration editor (e.g. inline in the builder, drag polish); it is **not** the first phase configurations can be entered — that shipped in Phase 2 (AC-P2-9/9b). Chapter 2 and Chapter 9 render the explicit configuration rows with no free-text ambiguity and no inferred combinations (GI-10). (PRD-EA-009, PRD-SUCC-008) | MUST | render test + confirm P2 entry path unchanged. |
 | AC-P3-11 | The risk chapter supports a top-of-chapter `warning` callout; a manual for an EA Version that declares a danger mode without that callout is detectably incomplete (surfaced now, enforced in Phase 5). (PRD-CNT-009) | SHOULD | test. |
 | AC-P3-12 | Undo restores the previous editor state for text, block add/remove, and reorder. | MUST | test. |
 | AC-P3-13 | `@dnd-kit` is added **only** if native controls cannot meet the reorder UX; the decision is recorded. (PRD dependency policy) | MUST | phase report. |
@@ -105,7 +114,7 @@
 
 | ID | Criterion | Type | Verify |
 |---|---|---|---|
-| AC-P4-1 | GI-1..GI-7 hold. | MUST | phase-gate. |
+| AC-P4-1 | GI-1..GI-7, GI-10, GI-11, GI-12 hold. | MUST | phase-gate. |
 | AC-P4-2 | The `AIProvider` interface exposes `improveText`, `simplifyText`, `technicalRewrite`, `generateSteps`, `generateCaption`, `detectClaims`; both a mock and a configured provider implement it. (PRD-AI-001) | MUST | test. |
 | AC-P4-3 | With no `AI_PROVIDER`/`AI_API_KEY`, the mock provider is used and the UI makes this **unmistakable** (explicit label/badge, not silent). (PRD-AI-002) | MUST | inspect. |
 | AC-P4-4 | Each provider request payload contains only `{ selectedText, factBundle, locale, operation }`; a test asserts no other database context (org data, other manuals, tokens) is included. (PRD-AI-003, PRD-SEC-006) | MUST | payload assertion. |
@@ -125,7 +134,7 @@
 
 | ID | Criterion | Type | Verify |
 |---|---|---|---|
-| AC-P5-1 | GI-1 (now also for computed checklist output), GI-2..GI-7 hold. | MUST | phase-gate. |
+| AC-P5-1 | GI-1 (now also for computed checklist output), GI-2..GI-7, GI-10, GI-11, GI-12 hold. | MUST | phase-gate. |
 | AC-P5-2 | A versioned checklist template produces exactly one `checklist_result` per item per manual version; each result's state is one of `PASS`, `WARNING`, `MISSING`, `NOT_APPLICABLE` and carries evidence, an evaluator, and a reviewed timestamp. (PRD-VAL-002, PRD-COMP-006) | MUST | DB inspection. |
 | AC-P5-3 | The completion score = required, in-scope items in `PASS` ÷ required, in-scope items; `NOT_APPLICABLE` is excluded from both; the score updates when content changes. (PRD-VAL-001) | MUST | fixture test. |
 | AC-P5-4 | Each of these checks fires on a crafted failing fixture and clears on a passing one: missing required chapter, missing EA input in parameter tables (`CHK-PARAM-COMPLETE`), default mismatch (`CHK-PARAM-DEFAULT-MATCH`), missing Pasal 5(5)d disclaimer sentence (`CHK-DISCLAIMER-5-5-D`), missing 24/7 contact (`CHK-KONTAK`), points/pips undefined (`CHK-UNITS-DEFINED`), EA/manual version mismatch (`CHK-VERSI-MATCH`), unconditioned performance figure (`CHK-PERFORMANCE-KONDISI`), missing danger-mode warning (`CHK-DANGER-MODE-WARN`). (PRD-VAL-003, PRD-COMP-002/003/008, PRD-VER-003, PRD-CNT-008) | MUST | fixture matrix. |
@@ -147,7 +156,7 @@
 
 | ID | Criterion | Type | Verify |
 |---|---|---|---|
-| AC-P6-1 | GI-1..GI-8 hold. | MUST | phase-gate. |
+| AC-P6-1 | GI-1..GI-8, GI-10, GI-11, GI-12 hold. | MUST | phase-gate. |
 | AC-P6-2 | Workflow transitions are server-side commands with preconditions; a forged client transition request is rejected. The state machine matches: `DRAFT→TECHNICAL_REVIEW→COMPLIANCE_REVIEW→APPROVED→PUBLISHED`, `*_REVIEW→CHANGES_REQUESTED→DRAFT`, `PUBLISHED→ARCHIVED`. (PRD-REV-001, PRD-REV-002) | MUST | test each edge + a forged request. |
 | AC-P6-3 | An admin assigns a technical reviewer and a compliance reviewer per manual version; the `/reviews/technical` and `/reviews/compliance` queues show only versions assigned to the current user (admin sees all), org-scoped. (PRD-REV-003, PRD-REV-009) | MUST | test. |
 | AC-P6-4 | Reviewers add comments anchored to a section, a block, or the manual; comments have resolved/unresolved state that persists across review rounds. (PRD-REV-004, PRD-REV-008) | MUST | test. |
@@ -157,7 +166,7 @@
 | AC-P6-8 | A resubmission after `CHANGES_REQUESTED` re-enters `TECHNICAL_REVIEW` (never straight to compliance); prior comment threads remain visible. (PRD-REV-008) | MUST | test. |
 | AC-P6-9 | Publishing an `APPROVED` version creates a `published_snapshots` row (render JSON, content hash, public slug, public version, published timestamp), sets the version to `PUBLISHED`, and writes an `audit_events` row — all in one DB transaction; a fault mid-transaction leaves no partial state. (PRD-OUT-002, PRD-NFR-003) | MUST | fault-injection test. |
 | AC-P6-10 | **PRD-SUCC-004:** an update or delete against a `PUBLISHED` manual version (other than controlled archive metadata) is rejected at the database; re-rendering the snapshot reproduces the stored content hash byte-stably. (PRD-OUT-003, PRD-VER-004) | MUST | trigger test + hash recompute. |
-| AC-P6-11 | "Create manual for new version" clones the latest manual version (sections, blocks, parameter groups, checklist scaffold) into a fresh `DRAFT` linked to the chosen EA Version, with a new unique manual version string; the published version is unchanged. (PRD-MAN-013) | MUST | test. |
+| AC-P6-11 | "Create manual for new version" clones the latest manual version's **sections, blocks, checklist scaffold, and changelog** into a fresh `DRAFT` linked to the chosen EA Version, with a new unique manual version string; the published version is unchanged. It does **not** clone `parameter_groups`/`ea_parameters` or `ea_version_setups` (those stay owned by the EA Version); the clone's `parameterTable` blocks reference the linked EA Version's groups. (PRD-MAN-013, PRD-CNT-010, GI-11) | MUST | test. |
 | AC-P6-12 | Publish is blocked while any required, in-scope `MISSING` remains or a publish-blocking claim `WARNING` is unresolved; the block lists the reasons. (PRD-MOUT-008) | MUST | test. |
 | AC-P6-13 | Every privileged action (assignment, decision, publish, archive, template change, member change) writes exactly one append-only `audit_events` row with actor, action, entity type/id, safe metadata, timestamp. (PRD-SEC-007) | MUST | DB inspection. |
 | AC-P6-14 | A feature-change changelog entry surfaces the Perba 12/2022 Pasal 8 obligation reminder (client approval + report to Kepala Bappebti); the tool does not perform any filing. (PRD-VER-007) | SHOULD | inspect (per `PRD-OQ-010` decision). |
@@ -172,7 +181,7 @@
 
 | ID | Criterion | Type | Verify |
 |---|---|---|---|
-| AC-P7-1 | GI-1..GI-8 hold. | MUST | phase-gate. |
+| AC-P7-1 | GI-1..GI-8, GI-10, GI-11, GI-12 hold. | MUST | phase-gate. |
 | AC-P7-2 | `/manual/[eaSlug]/[version]` serves only a `PUBLISHED` snapshot; an unknown or non-published slug/version returns 404; the route has no code path to draft or private tables. (PRD-OUT-004, PRD-SEC-005) | MUST | route + code review. |
 | AC-P7-3 | The public manual shows a table of contents, working in-page search, and a version switcher listing all published versions; older version URLs still resolve. (PRD-POUT-002, PRD-VER-005) | MUST | test. |
 | AC-P7-4 | **PRD-SUCC-005:** for a given version, the web render and the PDF render contain the same chapters, blocks, and parameter values — verified by a visual-regression fixture within tolerance and a content-model diff that is empty. (PRD-OUT-001, PRD-POUT-001) | MUST | visual regression + diff. |
@@ -191,7 +200,7 @@
 
 | ID | Criterion | Type | Verify |
 |---|---|---|---|
-| AC-P8-1 | GI-1..GI-9 hold across the whole app. | MUST | full pass. |
+| AC-P8-1 | GI-1..GI-12 hold across the whole app. | MUST | full pass. |
 | AC-P8-2 | Every route has a defined loading state, an empty state with a clear next action, and an error state with retry; a matrix documents each. (PRD-NFR-002, general) | MUST | route matrix. |
 | AC-P8-3 | An accessibility audit (automated + manual) shows WCAG 2.1 AA conformance: contrast ≥ 4.5:1, visible focus, 44px targets, icon+text status, keyboard alternatives for every drag, `prefers-reduced-motion`, correct landmarks and headings, labelled controls, inline + summary form errors. (PRD-NFR-004) | MUST | audit report. |
 | AC-P8-4 | A responsive audit passes at 375 / 768 / 1024 / 1440 px on every route; no document-level horizontal scroll; the builder centre column never nests horizontal scroll. (PRD-NFR-005) | MUST | audit report. |

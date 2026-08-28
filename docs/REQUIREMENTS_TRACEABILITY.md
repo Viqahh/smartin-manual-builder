@@ -17,10 +17,12 @@
 | PRD-EA-002 | Archive EA Product (soft, timestamped), hidden from default lists | DM | P1 | Admin | `/ea-products`, `/ea-products/[productId]` | `ea_products.archived_at` | 2 | Planned | Archive; product leaves default list, still reachable by id. |
 | PRD-EA-003 | EA Version (semver, platform MT4/MT5, release date, requirements, support) | DM, CG §4.1 | P0 | Developer, Admin | `/ea-products/[productId]` | `ea_versions` | 2 | Mocked | Create a version; fields persisted; shown under product. |
 | PRD-EA-004 | EA Version unique per product **and platform** | DM | P0 | Developer, Admin | `/ea-products/[productId]` | `ea_versions` unique(product, platform, version) | 2 | Planned | MT4 1.0.0 and MT5 1.0.0 coexist; duplicate (same platform) rejected. |
-| PRD-EA-005 | Version requirements: symbols, timeframes, account type, min lot, testing deposit, broker reqs, VPS/DLL/WebRequest, indicator deps | CG §4.3, wizard step 3 | P0 | Developer | wizard step 3, `/ea-products/[productId]`, builder Ch.2 | `ea_versions.requirements` (JSON) | 2 | Mocked | All fields captured + rendered into Ch.2. |
-| PRD-EA-006 | Multiple explicit supported symbol/timeframe **setups** per version | CG §4.3/§4.10, SAS | P0 | Developer | `/ea-products/[productId]`, builder Ch.2/Ch.9 | setup records (child of `ea_versions`) | 2 (data) / 3 (UI) | Planned | Version with XAUUSD@M15 + XAUUSD@H1 renders both rows (AC-P3, PRD-SUCC-008). |
-| PRD-EA-007 | New EA Version does not auto-fill version-specific data unless explicitly copied | DM | P1 | Developer | `/ea-products/[productId]` | `ea_versions`, `ea_parameters` | 2 | Planned | New version starts empty; "copy from vX" is an explicit action. |
+| PRD-EA-005 | Version requirements: account type, testing deposit, broker reqs, VPS/DLL/WebRequest, indicator deps, optional broker/account volume constraints (symbols/timeframes/min-lot are **not** free text here — see PRD-EA-009/010) | CG §4.3, wizard step 3 | P0 | Developer | wizard step 3, `/ea-products/[productId]`, builder Ch.2 | `ea_versions.requirements` (JSON) | 2 | Mocked | Fields captured + rendered into Ch.2; no free-text symbols/timeframes/min-lot in the shipped Phase 2 path. |
+| PRD-EA-006 | Multiple explicit supported symbol/timeframe **configurations** per version; never inferred | CG §4.3/§4.10, SAS | P0 | Developer | `/ea-products/[productId]` (Supported Configuration editor, UI_SPEC §2.3), builder Ch.2/Ch.9 | `ea_version_setups` (child of `ea_versions`) | **2 (model + functional UI)** | Planned | `XAUUSD/M15` + `XAUUSD/H1` + `EURUSD/H1` persist separately; no surface implies `EURUSD/M15` (AC-P2-9/9a/9b, PRD-SUCC-008/011). |
+| PRD-EA-007 | New EA Version does not auto-fill version-specific data unless explicitly copied (EA-version → EA-version copy only) | DM | P1 | Developer | `/ea-products/[productId]` | `ea_versions`, `parameter_groups`/`ea_parameters` (on `ea_versions`), `ea_version_setups` | 2 | Planned | New version starts empty; "copy from vX" copies EA-version-owned defs into the new EA version (AC-P2-18c). |
 | PRD-EA-008 | `/ea-products` list + `/ea-products/[productId]` detail | RC | P0 | Developer, Admin | `/ea-products`, `/ea-products/[productId]` | `ea_products`, `ea_versions` | 1 (list mock) / 2 (real + detail) | Mocked (list) | List shows org products; detail route exists and shows versions. |
+| PRD-EA-009 | Supported Configuration model + **Phase 2 input UI**: `symbol` (broker suffixes allowed), `timeframe` (controlled MT enum), optional preset ref, optional Tested Minimum Lot, optional notes, supported flag, position; unique `(ea_version, symbol, timeframe)`; no inference | DM, IP, UI_SPEC §2.3 | P0 | Developer, Admin | `/ea-products/[productId]`, builder Ch.2/Ch.9 (read-only) | `ea_version_setups` | 2 | Planned | Add/edit/reorder/enable/remove rows persist; suffixes `XAUUSD.m`/`EURUSD.pro` save; free-text timeframe rejected; duplicates rejected (AC-P2-9b). |
+| PRD-EA-010 | Tested Minimum Lot (developer test data on a configuration / EA version), always shown with "broker's symbol specification governs the actual minimum lot"; broker volume constraints documented separately without conflict | CG §4.3/§4.9, DM | P0 | Developer, Compliance | Supported Configuration editor, builder Ch.2/Ch.9, preview | `ea_version_setups.tested_minimum_lot` | 2 | Planned | Value labelled "tested"; broker-spec statement visible; no "universal EA minimum lot" wording (AC-P2-9c, GI-12). |
 
 ---
 
@@ -40,7 +42,7 @@
 | PRD-MAN-010 | Block positions non-negative + unique per chapter after reorder txn | DM | P0 | — | builder CENTER | `manual_blocks.position` | 2 (constraint) / 3 (UI) | Planned | Reorder transaction leaves a valid contiguous ordering. |
 | PRD-MAN-011 | Block delete is recoverable (soft-delete metadata) | DM | P1 | Developer | builder CENTER | `manual_blocks.deleted_at` | 2 / 3 | Planned | Delete a block; recover it within the session/history. |
 | PRD-MAN-012 | Debounced autosave with conflict handling (no silent overwrite) | IP, ARCH | P0 | Developer | builder topbar `save-state` | `manual_versions`, version token | 2 | Mocked (static "Saved") | Concurrent edit surfaces a conflict notice, not an overwrite (AC-P2). |
-| PRD-MAN-013 | "Create manual for new version" clones to a fresh DRAFT; never edits the published one | ARCH, IP | P0 | Developer, Admin | `/manuals`, builder | `manual_versions` (clone) | 6 | Planned | Published version unchanged; new DRAFT created + editable (AC-P6). |
+| PRD-MAN-013 | "Create manual for new version" clones sections/blocks/checklist scaffold/changelog to a fresh DRAFT; never edits the published one; **does not clone parameter defs or setups** (EA-Version-owned, referenced) | ARCH, IP | P0 | Developer, Admin | `/manuals`, builder | `manual_versions` (clone) | 6 | Planned | Published version unchanged; new DRAFT created + editable; `parameterTable` blocks still resolve to the EA Version (AC-P6-11). |
 | PRD-MAN-014 | Builder renders the manual for the route param; "Polaris EA" never shows "VMax EA" data | ARCH, P1R gap | P0 | Developer | `/manuals/[manualId]/edit`, preview | `manual_versions` by id | 2 | Mocked (always VMax) | Create Polaris; builder/inspector/preview/cover show only Polaris (AC-P2, PRD-SUCC-007). |
 
 ---
@@ -49,13 +51,14 @@
 
 | Requirement ID | Requirement | Source | Priority | User | UI / Page | Data Entity | Phase | Status | Acceptance Evidence |
 |---|---|---|---|---|---|---|---|---|---|
-| PRD-CNT-001 | Supported setups edited as `{symbol, timeframe, note}` list; rendered in Ch.2/Ch.9 | CR ch.2/9 | P0 | Developer | builder Ch.2/Ch.9 | setup records | 2 (data) / 3 (UI) | Planned | Add 2 setups; both render as discrete rows. |
+| PRD-CNT-001 | Supported Configurations edited as structured rows (symbol, timeframe, optional preset ref / Tested Minimum Lot / notes, supported flag, order); rendered as explicit rows in Ch.2/Ch.9 | CR ch.2/9 | P0 | Developer | `/ea-products/[productId]` editor + builder Ch.2/Ch.9 | `ea_version_setups` | **2** | Planned | Add 3 configs; all render as discrete rows; no inferred combination (AC-P2-9/9a). |
 | PRD-CNT-002 | Installation authored as ordered step list (title, instruction, menu path, image ref) | CG §4.5, CR ch.4 | P0 | Developer | builder Ch.4 | `manual_blocks` (steps) | 1 (mock) / 3 (builder) | Mocked | ≥ 5 ordered steps with menu paths; reorder works (AC-P3). |
 | PRD-CNT-003 | Upload image to private storage → `image_assets` (mime, dims, caption, alt, annotations, scan status) | ARCH, DM | P0 | Developer | builder CENTER (image block) | `image_assets` | 2 | Planned | Upload; object is private; record has metadata + `scan_status` (AC-P2). |
 | PRD-CNT-004 | Images private while unpublished; signed URLs; publish-safe path on publish | ARCH, DM | P0 | Developer, Public | builder, public route | `image_assets`, storage | 2 (private) / 7 (publish path) | Planned | Unauth direct URL fails; published web shows image via safe path (AC-P2, AC-P7). |
 | PRD-CNT-005 | `image` block references `image_assets` id + optional caption; alt text required for completion | DM, CR appendix A | P0 | Developer | builder CENTER, inspector | `manual_blocks` (image) | 3 (block) / 5 (validation) | Mocked | Chapter with an image without alt text cannot be marked complete (AC-P5). |
-| PRD-CNT-006 | Parameter groups (ordered) + EA parameters (display/technical name, type, default, unit, range, options, description, order effect, mutability, notes, required, position) | CG §4.8, SAS | P0 | Developer | builder Ch.7 | `parameter_groups`, `ea_parameters` | 2 (data) / 3 (builder) | Mocked | All columns captured; grouped; persisted. |
-| PRD-CNT-007 | `parameterTable` block references group id(s); renders heading + columns (Param, Type, Default, Safe range, Effect) | CG §4.8, P1R | P0 | Developer, Public | builder Ch.7, preview, public | `manual_blocks` (parameterTable) | 1 (mock) / 3 (block) | Mocked | Table renders from referenced group; edits to a parameter propagate. |
+| PRD-CNT-006 | Parameter groups (ordered) + EA parameters (display/technical name, type, default, unit, range, options, description, order effect, mutability, notes, required, position) — **owned by EA Version** | CG §4.8, SAS | P0 | Developer | builder Ch.7 | `parameter_groups`, `ea_parameters` — **FK to `ea_versions`** | 2 (data + ownership) / 3 (builder UI) | Mocked | All columns captured; grouped; persisted; tables reference `ea_versions`, not `manual_versions` (AC-P2-18a). |
+| PRD-CNT-007 | `parameterTable` block references group id(s) **of the manual version's linked EA Version**; renders heading + columns (Param, Type, Default, Safe range, Effect) | CG §4.8, P1R | P0 | Developer, Public | builder Ch.7, preview, public | `manual_blocks` (parameterTable) → `parameter_groups` on `ea_versions` | 1 (mock) / 3 (block) | Mocked | Table renders from a referenced EA-Version group; can't reference another EA version's group. |
+| PRD-CNT-010 | EA parameter definitions owned by EA Version (`EAProduct→EAVersion→EAParameterGroup→EAParameter`); manuals reference, never copy; two manual versions of one EA Version share definitions; clone does not copy definitions | DM, ARCH | P0 | Developer | builder Ch.7, `/ea-products/[productId]` | `parameter_groups`/`ea_parameters` on `ea_versions` | 2 (ownership fixed pre-migration) / 3 (builder UI) | Planned | Edit a param default → both Manual Version 1.0.0 and 1.0.1 tables update; no per-manual copies (AC-P2-18a/18b, PRD-SUCC-012, GI-11). |
 | PRD-CNT-008 | Units explicit (points vs pips, `_Point`); validation flags mixed usage without a definition | CG §4.8 | P1 | Developer | builder Ch.7, inspector | check `CHK-UNITS-DEFINED` | 5 | Planned | A manual using "200" without a points/pips definition gets a WARNING. |
 | PRD-CNT-009 | Risk chapter: verbal lot formula, floor/step/below-min behaviour; danger modes get a top warning callout | CG §4.9, CR ch.8 | P0 | Developer | builder Ch.8 | `manual_blocks` (text, callout) | 3 (authoring) / 5 (validation) | Mocked | Danger-mode EA without a top warning callout gets `MISSING` on `CHK-DANGER-MODE-WARN`. |
 
@@ -227,9 +230,11 @@
 | PRD-SUCC-005 | Web and PDF of a version show the same chapters/blocks/values | 7 | Planned | Visual regression fixtures. |
 | PRD-SUCC-006 | No approval recorded against the manual's own author/editor | 6 | Planned | Self-approval attempt → typed error. |
 | PRD-SUCC-007 | Creating "Polaris EA" shows only Polaris data everywhere | 2 | Planned | Builder/inspector/preview/cover assertions. |
-| PRD-SUCC-008 | EA version with two setups renders both in Ch.2 and Ch.9 | 3 | Planned | Setup fixture render check. |
+| PRD-SUCC-008 | EA version with `XAUUSD/M15` + `XAUUSD/H1` + `EURUSD/H1` persists all three separately and renders explicit rows in Ch.2/Ch.9; nothing implies `EURUSD/M15` | 2 | Planned | Config fixture render check (AC-P2-9/9a). |
 | PRD-SUCC-009 | Org A member cannot list/read/mutate any Org B entity | 2 / 8 | Planned | RLS + action-check role tests. |
 | PRD-SUCC-010 | Each phase passes its `ACCEPTANCE_CRITERIA.md` criteria before the next begins | 0–8 | Partial (P0, P1 done) | Phase gate sign-off recorded in the phase report. |
+| PRD-SUCC-011 | Supported Configuration editor usable in Phase 2 (add/edit/reorder/enable/remove; suffixes; controlled TF; Tested Minimum Lot labelled) | 2 | Planned | e2e editor test (AC-P2-9b/9c). |
+| PRD-SUCC-012 | Manual Version 1.0.0 and 1.0.1 on EA Version 1.0.0 resolve `parameterTable` to the same EA-Version definitions, not copies | 2 | Planned | Propagation test (AC-P2-18b). |
 
 ---
 
@@ -242,7 +247,7 @@
 | PRD-OQ-003 | Auth route group `app/(auth)/login/` vs `app/login/` (shipped) | 2 | Open |
 | PRD-OQ-004 | Exact checklist item set + rule keys (v1) | 5 | Open (draft in COMP §12) |
 | PRD-OQ-005 | Which chapters are truly `required` (15 in mock vs 13 in copy vs CR table) | 2 / 5 | Open (proposal in CR chapter map) |
-| PRD-OQ-006 | Supported-setup granularity (`{symbol,timeframe}` only vs + preset/account/spread) | 2 | Open |
+| PRD-OQ-006 | Supported-setup granularity | 2 | **Resolved** — configuration = symbol (suffixes) + timeframe (controlled MT enum) + optional preset ref + optional Tested Minimum Lot + optional notes + supported flag + order; model **and** input UI both ship in Phase 2 (`PRD-EA-009`/`PRD-EA-010`). |
 | PRD-OQ-007 | Publishing authority: admin-only vs compliance-reviewer-with-`manual:publish` | 6 | Open |
 | PRD-OQ-008 | Locale strategy: separate `manuals` rows vs per-locale versions | 2 (schema) | Open |
 | PRD-OQ-009 | Image `scan_status` mechanism; unscanned = blocked vs warning | 2 / 5 | Open |
@@ -258,8 +263,8 @@
 |---|---|---|
 | **0 — Architecture** | (all docs) NFR-001 baseline | Done — `docs/` committed, no app code (IP). |
 | **1 — UI foundation** | PRD-PLT-006, PRD-OUT-007/POUT-006, PRD-MOUT-002/003/004/006, PRD-VAL-004 (copy), PRD-COMP-001/007 (copy), PRD-VER-001, PRD-NFR-004/005/006 (initial) | Done — `docs/PHASE_1.md`. |
-| **2 — Data & CRUD** | PRD-EA-001..008, PRD-MAN-001..007/010/012/014, PRD-CNT-003/004/006, PRD-PLT-001..005/007, PRD-SEC-001..004/009, PRD-VER-002/008, PRD-NFR-007/009 | AC-P2. |
-| **3 — Document editor** | PRD-MAN-008/009/011, PRD-CNT-001/002/005/007/009, PRD-SEC-010, PRD-VER-006, PRD-MOUT-005 | AC-P3. |
+| **2 — Data & CRUD** | PRD-EA-001..010, PRD-MAN-001..007/010/012/014, PRD-CNT-001/003/004/006/010, PRD-PLT-001..005/007, PRD-SEC-001..004/009, PRD-VER-002/008, PRD-NFR-007/009, PRD-SUCC-008/011/012 | AC-P2 (incl. AC-P2-9/9a/9b/9c, AC-P2-18a/18b/18c; GI-10/11/12). |
+| **3 — Document editor** | PRD-MAN-008/009/011, PRD-CNT-002/005/007/009 (+ **presentation only** for PRD-EA-009/PRD-CNT-001), PRD-SEC-010, PRD-VER-006, PRD-MOUT-005 | AC-P3 (setup entry already delivered in P2). |
 | **4 — AI assistant** | PRD-AI-001..007, PRD-COMP-004 (scan), PRD-SEC-006 | AC-P4. |
 | **5 — Validation & compliance** | PRD-VAL-001..005, PRD-CNT-008, PRD-COMP-002..008, PRD-VER-003, PRD-MOUT-007/008, PRD-SEC-008 | AC-P5. |
 | **6 — Reviews & versioning** | PRD-REV-001..009, PRD-MAN-013, PRD-OUT-002/003, PRD-VER-004/007, PRD-SEC-007, PRD-NFR-003 | AC-P6. |

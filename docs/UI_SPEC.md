@@ -97,14 +97,36 @@ Wraps every `(workspace)` route.
 | **Target user** | Assigned member, Admin. |
 | **Layout** | `PageHeader` (product name, platform, actions **Create EA version**, **Create manual**) → identity `card` (`<dl>`: owner, slug, description, archived state) → `card` "EA Versions" table/list. |
 | **Sections** | Identity block; versions list (version `.mono`, platform badge, release date, requirements summary, # manuals, "Open"); archived banner if archived. |
-| **Fields (version create)** | semver, platform (MT4/MT5), release date, structured requirements (symbols, timeframes, account type, min lot, testing deposit, broker requirements, VPS Ya/Tidak/Disarankan, DLL Ya/Tidak, WebRequest Ya/Tidak, custom indicator dependencies), supported symbol/timeframe setups (repeatable `{symbol, timeframe, note}`), support (email, phone, WhatsApp, hours), optional "copy parameters from version…". |
-| **Validation** | semver regex; version+platform unique per product (inline); ≥ 1 symbol; ≥ 1 timeframe; email/phone format; ≥ 1 setup row. |
+| **Fields (version create)** | semver, platform (MT4/MT5), release date; structured requirements (account type, testing deposit, broker requirements, VPS Ya/Tidak/Disarankan, DLL Ya/Tidak, WebRequest Ya/Tidak, custom indicator dependencies, optional broker/account volume constraints); **Supported Configuration editor** (see §2.3); support (email, phone, WhatsApp, hours); optional "copy parameter definitions from version…". Supported symbols/timeframes are **not** free-text fields here — they are rows in the Supported Configuration editor. There is **no** single "minimum lot" field; per-configuration developer test data is *Tested Minimum Lot* inside each configuration row. |
+| **Validation** | semver regex; version+platform unique per product (inline); ≥ 1 supported configuration row; per-row rules per §2.3; email/phone format. |
 | **States** | Loading skeleton; empty versions → "No versions yet" + **Create EA version**; error + retry; disabled **Create manual** with reason if no versions exist; success confirm on create. |
-| **Responsive** | Identity `<dl>` 2-col ≥768 else 1-col; versions list → card rows <768. |
+| **Responsive** | Identity `<dl>` 2-col ≥768 else 1-col; versions list → card rows <768; Supported Configuration rows stack on <768 (§2.3). |
 | **Accessibility** | Labelled form fields, inline + summary errors (same pattern as the wizard, §4). |
-| **Data source** | `ea_products`, `ea_versions`, `ea_parameters` (for copy), setup records. |
+| **Data source** | `ea_products`, `ea_versions`, `ea_version_setups`, `parameter_groups`/`ea_parameters` (owned by `ea_versions`; used for the optional copy). |
 | **Permissions** | `ea_version:create`, `manual:create` gate the actions; read requires org membership + assignment. |
-| **Future phases** | P3 setup builder UI polish; P6 shows which manual versions target each EA version. |
+| **Future phases** | P3 improves the Supported Configuration editor **presentation** (inline in the builder, drag polish) but does not introduce it — entry ships in P2. P6 shows which manual versions target each EA version. |
+
+### 2.3 Supported Configuration editor (Phase 2 — model **and** UI)
+
+| Aspect | Specification |
+|---|---|
+| **Purpose** | Enter the explicit `symbol × timeframe` combinations an EA Version supports. Replaces the Phase 1 plain-text `symbols` / `timeframes` inputs. |
+| **Where** | `/ea-products/[productId]` version create/edit (§2.2); also surfaced read-only in builder Chapter 2 / Chapter 9. |
+| **Target user** | Developer, Admin (`ea_version:update`). |
+| **Layout** | A repeatable row list with an **Add configuration** button. Each row: `symbol` text input, `timeframe` select, `preset` text input (optional), `Tested Minimum Lot` number input (optional), `notes` text input (optional), a **Supported** toggle, drag handle + up/down buttons, remove button. Below the list: the fixed note *"The actual minimum lot is determined by the broker's symbol specification."* |
+| **Fields** | `symbol` — raw MetaTrader symbol string; broker suffixes allowed (`XAUUSD`, `XAUUSD.m`, `EURUSD.pro`); pattern `^[A-Za-z0-9]{2,}([._][A-Za-z0-9]+)?$`, upper-cased on blur. `timeframe` — controlled select: `M1, M5, M15, M30, H1, H4, D1, W1, MN1` (no free text). `preset` — optional label/reference. `Tested Minimum Lot` — optional decimal ≥ 0; helper text "developer test data, not the broker minimum". `notes` — optional short text. `Supported` — boolean, default on. `position` — implicit from row order. |
+| **Actions** | Add row; edit any field; toggle Supported; reorder (drag **and** keyboard/up-down); remove row (with confirm if it has data). |
+| **Validation** | ≥ 1 row to save the version; `symbol` matches the pattern; `timeframe` is one of the controlled values; `(symbol, timeframe)` unique within the version (inline "sudah ada" error on the duplicate row); `Tested Minimum Lot` numeric ≥ 0 when present. **No inference:** the editor never auto-creates or auto-suggests a `symbol × timeframe` pair from values typed in other rows. |
+| **Loading** | Rows render as skeletons on edit-load. |
+| **Empty** | Zero rows → a single empty row plus "Tambah konfigurasi"; saving is blocked with the reason "Tambahkan minimal satu konfigurasi yang didukung." |
+| **Error** | Per-row inline errors (pattern, duplicate, numeric); a save error banner keeps all row state. |
+| **Disabled** | Whole editor read-only for users without `ea_version:update`, with a reason. |
+| **Success** | Rows persist; builder Chapters 2 and 9 immediately reflect the explicit list. |
+| **Responsive** | ≥768: tabular rows. <768: each configuration becomes a stacked card (`symbol`, `timeframe`, then optional fields), reorder via up/down buttons; no horizontal scroll. |
+| **Accessibility** | Each control labelled (visually or `sr-only` per column); the "broker's symbol specification" note is body text, not a tooltip; reorder has keyboard controls; duplicate/pattern errors use `role="alert"`. |
+| **Data source** | `ea_version_setups` (child of `ea_versions`). |
+| **Permissions** | `ea_version:update`. |
+| **Future phases** | P3: inline-in-builder editing + drag polish only. |
 
 ---
 
@@ -140,8 +162,8 @@ Wraps every `(workspace)` route.
 | **Purpose** | Capture reusable EA facts once and create a Manual + first Manual Version from the active template. |
 | **Target user** | Developer, Admin. |
 | **Layout** | `wizard-page` → heading (eyebrow "Manual baru", h1 "Buat Manual Book") → `wizard-layout` = `wizard-steps` aside (progress `<ol>` + `autosave-note`) + `wizard-card` form. Mobile: `wizard-mobile-progress` bar replaces the aside. |
-| **Steps** | 1 **Pilih produk** (source radio: existing / new; EA product select). 2 **Identitas EA** (`form-grid`: Nama EA, Platform, Versi EA `.mono`, Versi manual `.mono`, Tanggal rilis `type=date`, Developer, Organisasi, Deskripsi produk `textarea`). 3 **Kebutuhan teknis** (Simbol/pair, Timeframe, Tipe akun, Minimum lot, Deposit pengujian, Persyaratan broker `textarea`, Kebutuhan VPS select, Kebutuhan DLL select, Kebutuhan WebRequest select). 4 **Dukungan** (Email, Telepon, WhatsApp, Jam dukungan). 5 **Tinjau** (`review-group` blocks with **Ubah** buttons per group + `demo-disclosure`). |
-| **Fields & validation (Zod, `mode: onBlur`)** | `eaName` ≥ 2; `eaVersion`/`manualVersion` match `^\d+\.\d+\.\d+$` ("Gunakan format semver, contoh 1.0.0."); `platform` ∈ {MT4, MT5}; `releaseDate` non-empty; `developer`/`organization` ≥ 2; `description` ≥ 20; `symbols` ≥ 3; `timeframes` ≥ 2; `accountType` ≥ 2; `minimumLot` ≥ 1; `testingDeposit` ≥ 1; `brokerRequirements` ≥ 5; `vpsRequired` ∈ {Ya, Tidak, Disarankan}; `dllRequired`/`webRequestRequired` ∈ {Ya, Tidak}; `email` valid email; `phone`/`whatsapp` ≥ 8; `supportHours` ≥ 5. Errors render beside the field (`field-error`, `role="alert"`, `id="{name}-error"`); each input sets `aria-describedby` when errored. |
+| **Steps** | 1 **Pilih produk** (source radio: existing / new; EA product select). 2 **Identitas EA** (`form-grid`: Nama EA, Platform, Versi EA `.mono`, Versi manual `.mono`, Tanggal rilis `type=date`, Developer, Organisasi, Deskripsi produk `textarea`). 3 **Kebutuhan teknis** — *Phase 1 (mock)*: plain-text `Simbol/pair`, `Timeframe`, `Minimum lot` plus Tipe akun, Deposit pengujian, Persyaratan broker `textarea`, Kebutuhan VPS/DLL/WebRequest selects. *Phase 2*: the plain-text `Simbol/pair` + `Timeframe` + `Minimum lot` inputs are **replaced by the Supported Configuration editor (§2.3)**; `Tested Minimum Lot` lives per configuration row; the remaining requirement fields stay. 4 **Dukungan** (Email, Telepon, WhatsApp, Jam dukungan). 5 **Tinjau** (`review-group` blocks with **Ubah** buttons per group + `demo-disclosure`; the review shows the explicit configuration list, not a free-text symbols/timeframes string). |
+| **Fields & validation (Zod, `mode: onBlur`)** | `eaName` ≥ 2; `eaVersion`/`manualVersion` match `^\d+\.\d+\.\d+$` ("Gunakan format semver, contoh 1.0.0."); `platform` ∈ {MT4, MT5}; `releaseDate` non-empty; `developer`/`organization` ≥ 2; `description` ≥ 20; `accountType` ≥ 2; `testingDeposit` ≥ 1; `brokerRequirements` ≥ 5; `vpsRequired` ∈ {Ya, Tidak, Disarankan}; `dllRequired`/`webRequestRequired` ∈ {Ya, Tidak}; `email` valid email; `phone`/`whatsapp` ≥ 8; `supportHours` ≥ 5. **Phase 1 mock only:** `symbols` ≥ 3, `timeframes` ≥ 2, `minimumLot` ≥ 1 — these three fields are removed in Phase 2 and replaced by ≥ 1 Supported Configuration row (validated per §2.3). Errors render beside the field (`field-error`, `role="alert"`, `id="{name}-error"`); each input sets `aria-describedby` when errored. |
 | **Buttons / actions** | **Lanjutkan** (validates `stepFields[step]` with `shouldFocus`; on failure focuses `error-summary`); **Kembali**; **Batal** (`window.confirm`, then `/manuals`); final **Buat manual** (submit). |
 | **Loading** | Submit shows a pending state on **Buat manual**; Phase 2 disables the form while the server creates records. |
 | **Empty** | Step 1 "existing" with no EA products (Phase 2) → the existing option is disabled with "Belum ada produk EA — buat baru"; "new" pre-selected. |
@@ -151,9 +173,9 @@ Wraps every `(workspace)` route.
 | **Persistence** | `formValues` autosaved to `localStorage` `smartin-manual-wizard` on every change; on mount, a saved draft is restored (`reset`) and a `restored-banner` (`role="status"`) shows "Draf sebelumnya telah dipulihkan." Phase 2: server-side draft. |
 | **Responsive** | ≥1024: 2-col `wizard-layout` (steps aside + card). <1024: aside hidden, `wizard-mobile-progress` shows "Langkah X dari 5" + step name + bar. `form-grid` 2-col ≥768 else 1-col. `wizard-footer` stacks buttons <480. |
 | **Accessibility** | Every field wrapped in `<label>` (`form-field`) with visible text + required `*` (`<b aria-hidden>`); helper text hidden when errored; `error-summary` focus management; step list `<ol>` conveys `data-active`/`data-complete` with icon + text; date input native. |
-| **Data source** | Phase 1: defaults seeded with VMax EA sample values; `localStorage`. Phase 2: EA product/version list for step 1; on submit creates `ea_products`/`ea_versions` (new path) then `manuals` + `manual_versions` + template-instantiated `manual_sections`. |
+| **Data source** | Phase 1: defaults seeded with VMax EA sample values; `localStorage`. Phase 2: EA product/version list for step 1; on submit creates `ea_products`/`ea_versions` (+ `ea_version_setups` rows, + `parameter_groups`/`ea_parameters` owned by the EA version) on the new path, then `manuals` + `manual_versions` + template-instantiated `manual_sections`. |
 | **Permissions** | `manual:create` (and `ea_product:create` for the "new" path). |
-| **Future phases** | P2 real product picker + server create + real draft; P3 supported-setup rows added here or in the builder (Open question `PRD-OQ-006`). |
+| **Future phases** | P2 real product picker + server create + real draft + the Supported Configuration editor (§2.3) replacing the plain-text symbols/timeframes/minimum-lot inputs; P3 only improves that editor's presentation. |
 
 ---
 
@@ -200,9 +222,9 @@ The three-panel documentation workspace. **LEFT = chapter navigation, CENTER = d
 |---|---|
 | **Purpose** | Edit the selected chapter's blocks. |
 | **Sections** | `editor-toolbar` (`BAB NN` eyebrow + `chapter-title` h1; `block-count` "N blok"; **Tambah blok** secondary). `editor-canvas` → `ManualChapterContent` for the chapter. |
-| **Blocks (model, `docs/DATA_MODEL.md`)** | `text` (rich text doc), `steps` (ordered `Step[]`), `image` (`imageAssetId` + caption), `callout` (`warning`/`info`/`tip` + content), `parameterTable` (`groupIds[]`), `faq` (question + answer). |
+| **Blocks (model, `docs/DATA_MODEL.md`)** | `text` (rich text doc), `steps` (ordered `Step[]`), `image` (`imageAssetId` + caption), `callout` (`warning`/`info`/`tip` + content), `parameterTable` (`groupIds[]`, resolved against the manual version's linked EA Version), `faq` (question + answer). |
 | **Phase 1 rendering** | `installation` → mock 5-step list + figure + warning callout. `parameters` → mock group heading + parameter table (from `parameters` mock) + info callout. `overview` → lead + `fact-grid` + tip callout. Others → `GenericContent` (template placeholder; `issue` chapters add a warning callout). |
-| **Actions** | Phase 1: none functional (**Tambah blok** disabled, title "Block editor tersedia pada Phase 3"). Phase 3: add/move/delete/duplicate block; inline text editing (TipTap); step builder; parameter group/table builder; image placement; undo/redo. |
+| **Actions** | Phase 1: none functional (**Tambah blok** disabled, title "Block editor tersedia pada Phase 3"). Phase 3: add/move/delete/duplicate block; inline text editing (TipTap); step builder; parameter group/table builder; image placement; undo/redo. The parameter builder edits the **EA Version's** parameter groups/parameters (`PRD-CNT-010`) — a change made here is visible to every manual version that references the same EA Version. A `parameterTable` block can only pick groups belonging to this manual version's linked EA Version. |
 | **Validation** | Phase 3+: per-block payload validated with Zod on every write; invalid block shows an inline block-level error, never silently dropped. Alt text required on `image` blocks before completion. |
 | **Loading** | `editor-canvas` shows block skeletons. |
 | **Empty** | A chapter with no blocks (Phase 3) shows an "Add your first block" affordance + the template's suggested block list for that chapter (from `CONTENT_REQUIREMENTS.md`). |
@@ -211,8 +233,8 @@ The three-panel documentation workspace. **LEFT = chapter navigation, CENTER = d
 | **Success** | Debounced autosave; the topbar `save-state` reflects Saved/Saving/Conflict. |
 | **Responsive** | Centre column `min-width` ~560px on desktop; on tablet/mobile it is the sole column and reflows; long text constrained to a 65–75 character measure; parameter tables scroll inside `manual-table-wrap` (contained), never the page. |
 | **Accessibility** | `aria-labelledby="chapter-title"`; block controls keyboard-reachable; reorder has button + keyboard paths (`PRD-MAN-008`); focus stays on the moved block after reorder. |
-| **Data source** | Phase 1 mock. Phase 3: `manual_blocks` for the section, `ea_parameters`/`parameter_groups` for tables, `image_assets` for images. |
-| **Permissions** | `manual:update` + editable status. |
+| **Data source** | Phase 1 mock. Phase 3: `manual_blocks` for the section; `parameter_groups`/`ea_parameters` **owned by the manual version's linked `ea_versions`** for `parameterTable`; `image_assets` for images. |
+| **Permissions** | `manual:update` + editable status; editing parameter definitions additionally requires `ea_version:update` on the linked EA Version. |
 | **Future phases** | P3 the entire editable editor; P4 text-selection AI actions invoked from here; P5 inline validation hints. |
 
 ### 5.3 RIGHT — `Inspector`

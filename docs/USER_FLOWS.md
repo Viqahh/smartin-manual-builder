@@ -30,7 +30,7 @@ flowchart TD
     EPD --> NEW
     NEW --> W1[Step 1: choose product\nexisting EA or new EA]
     W1 --> W2[Step 2: EA identity\nname, platform, EA version, manual version, release date, developer, org, description]
-    W2 --> W3[Step 3: technical requirements\nsymbols, timeframes, account type, min lot, testing deposit, broker reqs, VPS/DLL/WebRequest, indicator deps]
+    W2 --> W3[Step 3: technical requirements\naccount type, testing deposit, broker reqs, VPS/DLL/WebRequest, indicator deps\n+ Supported Configuration editor: explicit symbol x timeframe rows,\noptional preset ref / Tested Minimum Lot / notes / supported flag / order]
     W3 --> W4[Step 4: support channels\nemail, phone, WhatsApp, hours]
     W4 --> W5[Step 5: review facts]
     W5 --> CREATE[Create Manual + first Manual Version\nfrom active template]
@@ -124,16 +124,17 @@ flowchart TD
     B --> C[Enter semver + platform MT4/MT5 + release date]
     C --> D{version+platform unique for product?}
     D -- no --> C
-    D -- yes --> E[Enter structured requirements\nsymbols, timeframes, account type, min lot,\ntesting deposit, broker reqs, VPS/DLL/WebRequest,\ncustom indicator dependencies]
-    E --> F[Add supported symbol/timeframe setups\nlist of {symbol, timeframe, note}]
+    D -- yes --> E[Enter structured requirements\naccount type, testing deposit, broker reqs,\nVPS/DLL/WebRequest, custom indicator dependencies,\noptional broker/account volume constraints]
+    E --> F[Supported Configuration editor (Phase 2 UI)\nadd explicit rows: symbol (broker suffixes) x timeframe (controlled MT enum),\noptional preset ref, optional Tested Minimum Lot, optional notes,\nsupported flag, order; unique per symbol+timeframe; no inference]
     F --> G[Enter support details\nemail, phone, WhatsApp, hours]
-    G --> H[Optionally copy parameter list from a prior version]
-    H --> I[Save ea_versions row]
+    G --> H[Optionally copy parameter definitions from a prior EA version\n(EA-version -> EA-version; groups/params owned by ea_versions)]
+    H --> I[Save ea_versions row + ea_version_setups + parameter_groups/ea_parameters]
     I --> J[Version appears under product; ready to document]
 ```
 
-- Nothing version-specific is auto-filled from another version unless the user explicitly copies (`PRD-EA-007`).
-- Supported setups are discrete records so an EA version can support e.g. `XAUUSD @ M15` **and** `XAUUSD @ H1` (`PRD-SUCC-008`).
+- Nothing version-specific is auto-filled from another version unless the user explicitly copies (`PRD-EA-007`); a copy is EA-version → EA-version and includes EA-version-owned parameter groups.
+- Supported Configurations are discrete `ea_version_setups` rows entered through the Phase 2 editor, so an EA version can support e.g. `XAUUSD / M15`, `XAUUSD / H1`, **and** `EURUSD / H1` — and listing `EURUSD` and `M15` never implies `EURUSD / M15` is supported (`PRD-EA-009`, `PRD-SUCC-008`, GI-10).
+- `symbol` keeps broker suffixes (`XAUUSD.m`, `EURUSD.pro`); `timeframe` is a controlled MetaTrader value. `Tested Minimum Lot`, when present, is developer test data — the manual/UI states the broker's symbol specification determines the actual minimum lot (`PRD-EA-010`, GI-12).
 
 ---
 
@@ -167,7 +168,7 @@ Same wizard; Step 1 = "create new EA". Step 2 identity fields are empty and requ
 flowchart TD
     P[/manuals/:manualId — a PUBLISHED version/] --> A[Create manual for new version]
     A --> B[Pick target EA Version\nusually a newer ea_versions row]
-    B --> C[Server clones latest manual version\nsections + blocks + parameter groups + checklist scaffold]
+    B --> C[Server clones latest manual version\nsections + blocks + checklist scaffold + changelog\n(NOT parameter groups or setups - those stay on the EA Version, referenced)]
     C --> D[New Manual Version status = DRAFT\nmanual version string incremented, unique per manual]
     D --> E[/manuals/:manualId/edit — builder on the new draft/]
     P -. unchanged .-> P2[Published snapshot remains immutable + addressable]
@@ -191,7 +192,7 @@ flowchart LR
     A[Ch.0 Cover] --> A1[EA name, platform, EA version, manual version, release date, developer, org]
     B[Ch.1 Overview] --> B1[What the EA does in ~10 lines\nposition management model\nwhat the user must supervise\nwho it is NOT for]
     C[Ch.2 Requirements] --> C1[Platform build, account type,\nsymbols + suffix note, timeframe,\nmin deposit for testing, leverage note,\nVPS, DLL/WebRequest, custom indicators]
-    C --> C2[Supported symbol/timeframe setups table\nfrom EA Version setup records]
+    C --> C2[Supported Configuration list\nexplicit rows from ea_version_setups (EA Version)\n+ 'broker symbol spec governs minimum lot' note]
 ```
 
 - Cover/identity fields are backed by the EA Version; editing them here is guarded (may require editing the EA Version, per Open question `PRD-OQ-006`).
@@ -224,20 +225,22 @@ sequenceDiagram
 
 - A chapter with an image cannot be marked complete until alt text is present and `scan_status` is acceptable (Phase 5 gate; Open question `PRD-OQ-009`).
 
-### 5.5 Edit a parameter (`PRD-CNT-006`, `PRD-CNT-007`)
+### 5.5 Edit a parameter (`PRD-CNT-006`, `PRD-CNT-007`, `PRD-CNT-010`)
+
+Parameter definitions belong to the **EA Version** (`EAProduct → EAVersion → EAParameterGroup → EAParameter`), not to the manual version. Editing a parameter from Chapter 7 edits the linked EA Version's definition and requires `ea_version:update`.
 
 ```mermaid
 flowchart TD
-    A[Ch.7 Input / Parameter Reference] --> B[Add/select a parameter group\nname + position]
-    B --> C[Add EA parameter]
+    A[Ch.7 Input / Parameter Reference\n(manual version -> linked EA Version)] --> B[Add/select an EA Version parameter group\nname + position (owned by ea_versions)]
+    B --> C[Add EA parameter to the group]
     C --> D[Fields: display name, technical name, type\n(bool/int/double/string/enum/color),\ndefault, unit, safe range, options,\ndescription, order effect,\nmutability (before start / live / re-attach),\nnotes, required]
-    D --> E[Save ea_parameters row (validated)]
-    E --> F[parameterTable block references group id(s)]
+    D --> E[Save ea_parameters row (validated), FK -> ea_versions]
+    E --> F[parameterTable block references group id(s)\nof this manual version's linked EA Version only]
     F --> G[Renderer shows group heading + columns\nParameter | Type | Default | Safe range | Effect]
-    G --> H[Validation: every EA input present? units defined?]
+    G --> H[Validation: every EA input present? units defined?\nEA/manual version match?]
 ```
 
-- Editing an existing parameter updates the normalised record; every `parameterTable` referencing its group reflects the change (no copy-paste drift).
+- Editing a parameter updates the EA-Version-owned record; **every** `parameterTable` block in **every** manual version that references that group reflects the change. Two manual versions documenting the same EA Version can never hold divergent parameter definitions (`PRD-CNT-010`, GI-11).
 
 ### 5.6 Risk documentation (Chapter 8) (`PRD-CNT-009`)
 
@@ -422,7 +425,7 @@ Covered in §5.4. Key invariants: org-scoped private key, `image_assets` record,
 
 ### 8.2 Edit parameter (standalone reference)
 
-Covered in §5.5. Key invariant: normalised `ea_parameters`; edits propagate to every `parameterTable` block referencing the group; the version-parameter completeness check compares the parameter set to the EA Version's declared inputs.
+Covered in §5.5. Key invariant: `parameter_groups`/`ea_parameters` are owned by `ea_versions` (never `manual_versions`); edits propagate to every `parameterTable` block in every manual version referencing the group; the version-parameter completeness check compares the parameter set to the EA Version's declared inputs.
 
 ### 8.3 Template management (Admin, Phase 2/5)
 

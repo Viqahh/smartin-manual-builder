@@ -39,9 +39,14 @@ Checks:
 
 Create Supabase migrations/RLS, auth adapter, organization and role model, EA/manual/section/block/parameter CRUD, private image uploads, typed server mutations, and debounced autosave with conflict handling.
 
+Two ownership decisions are settled before the migrations are written:
+
+- **EA parameter definitions belong to `ea_versions`** (`parameter_groups` → `ea_parameters` hang off the EA version, never off `manual_versions`). A `parameterTable` block references groups of the manual version's linked EA version. Two manual versions of the same EA version share one set of definitions.
+- **Supported symbol/timeframe configurations are a Phase 2 deliverable — model *and* input UI.** The Phase 1 plain-text `symbols` / `timeframes` fields are replaced by a repeatable, functional Supported Configuration editor (`ea_version_setups`: symbol with broker suffixes, controlled MetaTrader timeframe, optional preset ref, optional tested minimum lot, optional notes, supported flag, position; unique per `(ea_version, symbol, timeframe)`; no inference of unlisted combinations). "Minimum lot" test data is stored per configuration as `tested_minimum_lot` and labeled as developer testing data, with the manual/UI stating the actual minimum lot comes from the broker's symbol specification.
+
 ## Phase 3 — Document editor
 
-Introduce TipTap after a serialization spike. Add allowlisted custom blocks, image placement, accessible reordering, installation step builder, parameter group/table builder, and undo behavior.
+Introduce TipTap after a serialization spike. Add allowlisted custom blocks, image placement, accessible reordering, installation step builder, parameter group/table builder, and undo behavior. Phase 3 may **improve the presentation** of the supported-configuration editor (e.g. inline in the builder) but is **not** the first phase where supported configurations can be entered — that ships in Phase 2.
 
 ## Phase 4 — AI assistant
 
@@ -74,3 +79,4 @@ Accessibility, responsive, security and performance audits; comprehensive empty/
 | Three-panel UI fails on small screens | One primary content region; chapter drawer and inspector sheet |
 | PDF and web layouts drift | Server renders same semantic view model and print CSS |
 | Editor complexity delays product validation | Static block UI in Phase 1; TipTap only in Phase 3 after schema spike |
+| Supported setups inferred from free text, or EA facts owned by the wrong entity | Explicit `ea_version_setups` rows entered via a functional Phase 2 UI; `parameter_groups`/`ea_parameters` owned by `ea_versions` so manual versions share one definition set |

@@ -61,7 +61,7 @@ Assignment note: a user may hold more than one role in an org; the self-approval
 **Developer**
 - Start every chapter from a Smartin template, not a blank page.
 - Enter each fact (input name, default, unit, supported symbol/timeframe) exactly once and reuse it across chapters.
-- Represent *multiple explicit* supported symbol/timeframe setups for one EA version (e.g. XAUUSD M15 and XAUUSD H1), not a single free-text blob.
+- Represent *multiple explicit* supported symbol/timeframe configurations for one EA version (e.g. `XAUUSD / M15`, `XAUUSD / H1`, `EURUSD / H1`) as structured rows entered through a functional Supported Configuration editor — never a free-text blob, and never inferred (`EURUSD / M15` is not "supported" just because `EURUSD` and `M15` each appear somewhere).
 - Build installation steps as discrete, ordered actions with menu locations.
 - Attach screenshots to a step or figure with alt text and a caption; keep them private until publication.
 - Document parameters in grouped tables with terminal name, technical name, type, default, unit, safe range, effect, and when-changeable.
@@ -160,10 +160,12 @@ IDs are referenced by `docs/REQUIREMENTS_TRACEABILITY.md`. "Phase" is the phase 
 | PRD-EA-002 | A developer/admin can archive an EA Product (soft, timestamped); archived products are hidden from default lists but remain addressable. | 2 |
 | PRD-EA-003 | An EA Product has one or more **EA Versions**, each with a semantic version string, platform (`MT4` or `MT5`), release date, structured requirements, and support details. | 2 |
 | PRD-EA-004 | EA Version is unique per product **and platform** (an MT4 and MT5 1.0.0 may coexist). | 2 |
-| PRD-EA-005 | EA Version requirements capture: supported symbols, supported timeframes, account type, minimum lot, testing deposit, broker requirements, VPS need (Yes/No/Recommended), DLL required (Yes/No), WebRequest required (Yes/No), custom indicator dependencies. | 2 |
-| PRD-EA-006 | An EA Version can declare **multiple explicit supported symbol/timeframe setups** (e.g. `XAUUSD @ M15`, `XAUUSD @ H1`), each an addressable record, not one free-text field. | 2 (data) / 3 (setup builder UI) |
+| PRD-EA-005 | EA Version requirements capture: account type, testing deposit, broker requirements, VPS need (Yes/No/Recommended), DLL required (Yes/No), WebRequest required (Yes/No), custom indicator dependencies, and (optionally) broker/account volume constraints. Supported symbols and timeframes are **not** stored here as free text — they live in the Supported Configuration model (`PRD-EA-009`). There is **no single EA-controlled "minimum lot"** field; per-configuration developer test data is captured as *Tested Minimum Lot* (`PRD-EA-010`). | 2 |
+| PRD-EA-006 | An EA Version declares **multiple explicit supported symbol/timeframe configurations**, each an addressable record, not one free-text field, and never inferred from independently listed values. | 2 (persistent model **and** functional input UI) |
 | PRD-EA-007 | Creating a new EA Version from an existing product pre-fills nothing that is EA-version-specific unless the user explicitly copies from a prior version. | 2 |
 | PRD-EA-008 | `/ea-products` lists the org's EA Products; `/ea-products/[productId]` shows identity and its versions. | 1 (list, static) / 2 (real + detail route) |
+| PRD-EA-009 | The **Supported Configuration** model (`ea_version_setups`) belongs to EA Version. Each configuration has, at minimum: `symbol` (raw MetaTrader symbol, broker suffixes allowed — `XAUUSD`, `XAUUSD.m`, `EURUSD.pro`), `timeframe` (controlled MetaTrader value — `M1,M5,M15,M30,H1,H4,D1,W1,MN1`), optional preset name/reference, optional Tested Minimum Lot, optional notes, a supported/enabled flag, and a position/order. `(ea_version, symbol, timeframe)` is unique. The **input UI** for adding, editing, reordering, enabling/disabling, and removing configurations ships in **Phase 2**; Phase 3 may only improve its presentation. The system must never infer an unlisted `symbol`×`timeframe` combination. | 2 |
+| PRD-EA-010 | **Tested Minimum Lot** is developer testing data attached to a Supported Configuration (or, where not configuration-specific, to the EA Version). It is presented as *"tested minimum lot"*, never as "the minimum lot". Every surface that shows it also states: *"The actual minimum lot is determined by the broker's symbol specification."* Broker/account volume constraints may be documented separately (Chapter 2) but must not conflict with the tested value. | 2 |
 
 ### 12.2 Manuals and manual versions (`PRD-MAN-*`)
 
@@ -181,20 +183,21 @@ IDs are referenced by `docs/REQUIREMENTS_TRACEABILITY.md`. "Phase" is the phase 
 | PRD-MAN-010 | Block positions are non-negative and unique within a chapter after any reorder transaction. | 2 (constraint) / 3 (UI) |
 | PRD-MAN-011 | Deleting a block is recoverable (soft-delete metadata). | 2 / 3 |
 | PRD-MAN-012 | Draft edits autosave with debounce and conflict handling (last-writer detection, not silent overwrite). | 2 |
-| PRD-MAN-013 | "Create manual for new version" clones an existing manual version into a fresh `DRAFT` linked to the chosen EA Version; it never edits the published one. | 6 |
+| PRD-MAN-013 | "Create manual for new version" clones an existing manual version's sections, blocks, checklist scaffold, and changelog into a fresh `DRAFT` linked to the chosen EA Version; it never edits the published one and never copies EA parameter definitions or Supported Configurations (those stay owned by the EA Version and are referenced). | 6 |
 | PRD-MAN-014 | The builder always renders the manual identified by the route param; creating "Polaris EA" must never display "VMax EA" data. | 2 |
 
 ### 12.3 Structured content: setups, installation, screenshots, parameters, risk (`PRD-CNT-*`)
 
 | ID | Requirement | Phase |
 |---|---|---|
-| PRD-CNT-001 | Supported symbol/timeframe setups are edited as a list of `{symbol, timeframe, note}` records and rendered into Chapter 2 / Chapter 9. | 2 (data) / 3 (UI) |
+| PRD-CNT-001 | Supported Configurations (`PRD-EA-009`) are edited as structured rows (`symbol`, `timeframe`, optional preset ref, optional Tested Minimum Lot, optional notes, supported flag, order) and rendered into Chapter 2 and Chapter 9 as explicit rows. Model and editor both ship in Phase 2. | 2 |
 | PRD-CNT-002 | Installation is authored as an ordered **step list**; each step has a title, instruction, and optional menu path and image reference. | 1 (mock) / 3 (builder) |
 | PRD-CNT-003 | A developer can **upload an image** to private Supabase Storage; it is stored as an `image_assets` record with MIME, dimensions, caption, alt text, annotations JSON, and scan status. | 2 |
 | PRD-CNT-004 | Images are never public while a manual is unpublished; the app serves them via short-lived signed URLs. On publish they are copied to a publish-safe path or served through controlled signed URLs. | 2 (private) / 7 (publish path) |
 | PRD-CNT-005 | An `image` block references an `image_assets` id and carries an optional caption; alt text is required before a chapter with an image can be marked complete. | 3 (block) / 5 (validation) |
-| PRD-CNT-006 | Parameters are organised into **parameter groups** (ordered) containing **EA parameters** with: display name, technical name, type, default, unit, safe range, options, description, order effect, mutability ("before start" / "may change live" / "needs re-attach"), notes, required flag, position. | 2 (data) / 3 (builder) |
-| PRD-CNT-007 | A `parameterTable` block references one or more parameter group ids and renders the group heading + table columns (Parameter, Type, Default, Safe range, Effect) used in Phase 1. | 1 (mock) / 3 (block) |
+| PRD-CNT-006 | Parameters are organised into **parameter groups** (ordered) containing **EA parameters** with: display name, technical name, type, default, unit, safe range, options, description, order effect, mutability ("before start" / "may change live" / "needs re-attach"), notes, required flag, position. **These definitions belong to the EA Version** (`PRD-CNT-010`), not to a manual version. | 2 (data + ownership) / 3 (builder UI) |
+| PRD-CNT-007 | A `parameterTable` block references one or more parameter group ids **from the manual version's linked EA Version** and renders the group heading + table columns (Parameter, Type, Default, Safe range, Effect) used in Phase 1. | 1 (mock) / 3 (block) |
+| PRD-CNT-010 | EA technical parameter definitions (technical name, type, default, unit, range, enum options, description, operational effect) are **owned by EA Version** — hierarchy `EAProduct → EAVersion → EAParameterGroup → EAParameter`. A Manual Version references (never copies) the parameter groups of its single linked EA Version. Two manual versions documenting the same EA Version therefore read identical parameter definitions and cannot silently diverge. Cloning a manual version does not clone parameter definitions. | 2 (ownership fixed before migrations) / 3 (builder UI) |
 | PRD-CNT-008 | Units are explicit: the manual must state whether values are points or pips and reference `_Point`; validation flags mixed usage without a definition. | 5 |
 | PRD-CNT-009 | Risk & money-management chapter documents the verbal lot formula, floor/step lot behaviour, and below-min-lot behaviour; dangerous modes (martingale/grid/recovery) carry a `callout` warning at the top of the chapter. | 3 (authoring) / 5 (validation) |
 
@@ -363,9 +366,11 @@ Full detail in `docs/COMPLIANCE_REQUIREMENTS.md`. PRD-level:
 | PRD-SUCC-005 | Web and PDF of the same version show the same chapters, blocks, and parameter values (visual regression fixtures, Phase 7). |
 | PRD-SUCC-006 | No technical or compliance approval is ever recorded against the manual's own author/editor (self-approval attempts are rejected with a typed error). |
 | PRD-SUCC-007 | Creating "Polaris EA" shows only Polaris data — never "VMax EA" metadata — in the builder, inspector, preview, and cover. |
-| PRD-SUCC-008 | An EA Version with two supported setups (e.g. XAUUSD M15 + XAUUSD H1) renders both in Chapters 2 and 9 without free-text ambiguity. |
+| PRD-SUCC-008 | An EA Version with the configurations `XAUUSD / M15`, `XAUUSD / H1`, and `EURUSD / H1` persists all three as separate rows and renders them as explicit rows in Chapters 2 and 9; no UI or output implies `EURUSD / M15` is supported. |
 | PRD-SUCC-009 | A member of Organisation A cannot list, read, or mutate any entity of Organisation B (RLS + action-check tests, Phase 8). |
 | PRD-SUCC-010 | Each phase passes its objective criteria in `docs/ACCEPTANCE_CRITERIA.md` before the next phase begins. |
+| PRD-SUCC-011 | The Supported Configuration editor is usable in Phase 2: a developer can add, edit, reorder, enable/disable, and remove configurations; `symbol` accepts broker suffixes (`XAUUSD.m`, `EURUSD.pro`); `timeframe` is chosen from controlled MetaTrader values; `Tested Minimum Lot` is labelled as tested data with the broker-symbol-spec note visible. |
+| PRD-SUCC-012 | Given EA Version `1.0.0` with Manual Version `1.0.0` and Manual Version `1.0.1`, both manual versions resolve their `parameterTable` blocks to the **same** EA Version parameter definitions — no independent copies. |
 
 ## 21. MVP vs later scope
 
@@ -373,10 +378,12 @@ Full detail in `docs/COMPLIANCE_REQUIREMENTS.md`. PRD-level:
 
 | Capability | MVP phase | Later |
 |---|---|---|
-| Structured EA product/version, manuals, manual versions, sections, blocks, parameters | Phase 2 | — |
+| Structured EA product/version, manuals, manual versions, sections, blocks | Phase 2 | — |
+| EA parameter definitions **owned by EA Version** (groups + parameters), referenced by manual `parameterTable` blocks | Phase 2 | — |
+| Supported Configuration model **and functional input UI** (`ea_version_setups`) | Phase 2 | — |
 | Real auth, organisation/role model, RLS | Phase 2 | — |
 | Private image upload, debounced autosave with conflict handling | Phase 2 | — |
-| TipTap editor, custom blocks, reordering, step/parameter builders | Phase 3 | — |
+| TipTap editor, custom blocks, reordering, step builder, parameter **builder UI**, improved Supported Configuration presentation | Phase 3 | — |
 | Grounded AI assistant (mock + configured), claim scan | Phase 4 | Provider/model expansion, batch claim scan |
 | Versioned checklist engine, completion scoring, mismatch detection | Phase 5 | Additional rule packs |
 | Reviewer assignment, comments, decisions, audit history, version cloning, published immutability | Phase 6 | — |
@@ -410,7 +417,9 @@ Full detail in `docs/COMPLIANCE_REQUIREMENTS.md`. PRD-level:
 | PRD-RISK-007 | PDF and web layouts drift. | Same semantic view model + print CSS; visual regression fixtures (Phase 7). |
 | PRD-RISK-008 | Editor complexity delays product validation. | Static block UI in Phase 1; TipTap only in Phase 3 after a serialization spike. |
 | PRD-RISK-009 | `[manualId]` route param ignored (Phase 1 shortcut) leaks into Phase 2. | `PRD-MAN-014` + acceptance criterion "Creating Polaris EA must never show VMax metadata." |
-| PRD-RISK-010 | Supported symbol/timeframe modelled as free text. | `PRD-EA-006` / `PRD-CNT-001`: explicit setup records. |
+| PRD-RISK-010 | Supported symbol/timeframe modelled as free text, or a combination inferred from independently listed values. | `PRD-EA-006`/`PRD-EA-009`/`PRD-CNT-001`: explicit `ea_version_setups` rows entered via a Phase 2 UI; uniqueness on `(ea_version, symbol, timeframe)`; no inference. |
+| PRD-RISK-013 | EA parameter definitions owned by the wrong entity, letting two manuals of one EA build diverge. | `PRD-CNT-010`: `parameter_groups`/`ea_parameters` owned by `ea_versions`; manuals reference, never copy; ownership fixed before Phase 2 migrations. |
+| PRD-RISK-014 | "Minimum lot" presented as an EA-controlled universal value. | `PRD-EA-010`: *Tested Minimum Lot* per configuration + mandatory "broker's symbol specification" statement; broker constraints documented separately without conflict. |
 | PRD-RISK-011 | `@supabase/ssr` beta API churn. | Pin via lockfile; isolate in `lib/supabase`; monitor release notes. |
 | PRD-RISK-012 | Reference PDFs treated as design/spec to copy verbatim. | They are domain references only; canonical structure is `CONTENT_REQUIREMENTS.md`; design is `MASTER.md`. |
 
@@ -439,7 +448,7 @@ Recorded here rather than decided. Each should be resolved with the product owne
 | PRD-OQ-003 | **Auth route group.** Architecture folder tree uses `app/(auth)/login/`; Phase 1 shipped `app/login/`. Reconcile to which? | Phase 2 |
 | PRD-OQ-004 | **Exact checklist item set.** The 26 items are asserted but not enumerated. Which items, categories, and evaluation-rule keys make up v1 of the checklist template? (Draft mapping in `COMPLIANCE_REQUIREMENTS.md` §"Checklist items" is a proposal.) | Phase 5 |
 | PRD-OQ-005 | **Required-chapter count.** `mock-data.ts` marks 15 of 18 chapters `required`; `templates/page.tsx` copy says 13. Which chapters are truly required (Bappebti-scope vs general), and does "required" differ by whether the EA is in Indonesian PBK scope? | Phase 2 (template) / Phase 5 (validation) |
-| PRD-OQ-006 | **Supported-setup granularity.** Is a "setup" just `{symbol, timeframe}` or does it also carry a preset reference, an account-type constraint, and a spread note? | Phase 2 data model detail |
+| PRD-OQ-006 | **Supported-setup granularity.** ~~Is a "setup" just `{symbol, timeframe}` or does it also carry a preset reference, an account-type constraint, and a spread note?~~ **RESOLVED:** a Supported Configuration carries `symbol` (with broker suffixes), `timeframe` (controlled MT value), optional preset name/reference, optional Tested Minimum Lot, optional notes, a supported/enabled flag, and a position/order. Model **and** input UI ship in Phase 2. See `PRD-EA-009` / `PRD-EA-010`. | ~~Phase 2~~ Decided |
 | PRD-OQ-007 | **Publishing authority.** Is publish admin-only, or can a compliance reviewer with `manual:publish` publish directly after approving? | Phase 6 |
 | PRD-OQ-008 | **Locale strategy.** Are ID and EN manuals separate `manuals` rows for the same EA product, or one manual with per-locale versions? Data model carries `locale` on `manuals` — confirm. | Post-MVP, but affects Phase 2 schema |
 | PRD-OQ-009 | **Image scanning.** What performs the `scan_status` check (Supabase extension, external service, stub)? Until decided, is unscanned = blocked or = warning? | Phase 2 (upload) / Phase 5 (gate) |

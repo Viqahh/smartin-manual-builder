@@ -29,7 +29,7 @@
 | 6 | `how-it-works` | Cara Kerja EA / How the EA Works | **Required** | Bappebti "cara kerja" |
 | 7 | `parameters` | Referensi Input / Parameter / Input / Parameter Reference | **Required** | Bappebti "cara setting" |
 | 8 | `risk` | Risiko & Manajemen Dana / Risk & Money Management | **Required** | Danger-mode warnings |
-| 9 | `presets` | Preset, Pair & Timeframe / Presets, Pair & Timeframe | **Required** | Supported setup records |
+| 9 | `presets` | Preset, Pair & Timeframe / Presets, Pair & Timeframe | **Required** | Explicit `ea_version_setups` rows |
 | 10 | `interface` | Antarmuka EA / EA Interface | Conditional | Required **if** the EA has a GUI/panel |
 | 11 | `performance` | Informasi Backtest / Backtest & Performance Information | **Required** (with conditions) | No guarantees; test conditions mandatory |
 | 12 | `troubleshooting` | Pemecahan Masalah / Troubleshooting | **Required** | Symptom-first |
@@ -87,9 +87,9 @@ Allowed everywhere: a chapter may always contain `text` and `callout` blocks. Ch
 - **Required information:**
   - Platform + minimum build (e.g. "MetaTrader 5 build 4000 atau lebih baru").
   - Account type: hedging / netting; state which is tested and which is untested.
-  - Symbols, including prefix/suffix handling (e.g. `EURUSD.m`); reference the EA Version's supported symbols.
-  - Chart timeframe to attach on, and the effect of using another timeframe.
-  - Minimum deposit for **testing** (demo), with the minimum lot.
+  - The **explicit supported configurations** — each an addressable `symbol × timeframe` row from the EA Version (`ea_version_setups`), with `symbol` keeping any broker prefix/suffix (e.g. `XAUUSD`, `XAUUSD.m`, `EURUSD.pro`). Render them as discrete rows; never a free-text list, and never imply a combination that has no row.
+  - Chart timeframe to attach on (from the configuration rows), and the effect of using an unlisted timeframe.
+  - Minimum deposit for **testing** (demo). Where a configuration carries a **Tested Minimum Lot**, present it as developer test data and add: *"The actual minimum lot is determined by the broker's symbol specification."* Any broker/account volume constraint is documented separately and must not contradict the tested value.
   - Leverage stance (usually "risk computed from equity; no specific leverage forced").
   - VPS need: Ya / Tidak / Disarankan, with the reason (AutoTrading must stay alive).
   - DLL required: Ya / Tidak. WebRequest required: Ya / Tidak (+ the URL allowlist if yes).
@@ -97,8 +97,8 @@ Allowed everywhere: a chapter may always contain `text` and `callout` blocks. Ch
 - **Optional:** OS notes, terminal locale notes, broker server-time example (how to read it in Market Watch).
 - **Allowed blocks:** `text`, `parameterTable`-style `text` table (Item / Contoh isian), `callout` (`warning` for a hard requirement), `image` (Market Watch server-time example).
 - **Expected screenshots / tables:** a requirements table (Item → concrete value). Optional screenshot of the symbol spec / server time.
-- **Validation:** platform + build present; account type stated with tested/untested; ≥ 1 symbol and its suffix handling; timeframe stated; testing deposit + min lot present; VPS/DLL/WebRequest each explicitly Ya/Tidak/Disarankan; every declared custom indicator dependency listed with the missing-file behaviour; consistency with the EA Version record.
-- **Risky / prohibited:** implying "works on any pair / any account" without testing; omitting the suffix problem (a top contributor mistake); stating a required minimum **real** deposit as a promise of adequacy.
+- **Validation:** platform + build present; account type stated with tested/untested; ≥ 1 supported configuration row rendered explicitly (no inferred `symbol × timeframe`); suffix handling covered; testing deposit present; any Tested Minimum Lot labelled as tested data with the "broker's symbol specification" statement present; VPS/DLL/WebRequest each explicitly Ya/Tidak/Disarankan; every declared custom indicator dependency listed with the missing-file behaviour; consistency with the EA Version record.
+- **Risky / prohibited:** implying "works on any pair / any account" without testing; omitting the suffix problem (a top contributor mistake); presenting Tested Minimum Lot as an EA-controlled universal minimum lot; stating a required minimum **real** deposit as a promise of adequacy.
 
 ---
 
@@ -188,13 +188,14 @@ Allowed everywhere: a chapter may always contain `text` and `callout` blocks. Ch
 ## 7. Input / Parameter Reference — `parameters`
 
 - **Purpose:** the heart of the manual — every input, grouped, with meaning (contributor guide §4.8). This is Perba 12/2022's "cara setting".
+- **Ownership:** parameter definitions belong to the **EA Version** (`EAProduct → EAVersion → EAParameterGroup → EAParameter`). This chapter's `parameterTable` blocks *reference* the linked EA Version's groups; they never hold a manual-local copy. Every manual version documenting the same EA Version shows identical definitions (`PRD-CNT-010`).
 - **Required information:**
   - Inputs grouped as in the code (e.g. Risk, Signal, Filter, Time, Display; from the domain example also Lot, Filtration, Adjustment).
   - Every input row has: **terminal name** (as shown on the Inputs tab), **technical name** (code identifier), **type** (`bool`/`int`/`double`/`string`/`enum`/`color`), **default** (the value on first attach), **safe range** (min–max or the enum options), **effect** (what changes when the value changes), **when it may be changed** (before start / may change live / needs re-attach).
   - Unit consistency: state explicitly whether values are **points** or **pips** and that points follow `_Point`. If `200` on a 5-digit EURUSD means 20 pips, say so.
   - Special inputs from the domain example, each with an effect: Magic Number (order grouping; must differ per pair when multi-pair), Comment Order (MT4 comment column text), Lot mode (fix vs compound with the compounding divisor), Allow Multiorder, Lot + Max Order, SL / TP / Trailing Stop (0 = disabled), Level order / Lots Multiply / Distance (pending-order modes), TP USD / SL USD (close-all on aggregate USD profit / loss).
 - **Optional:** a "most-changed inputs" shortlist; per-group intro sentence.
-- **Allowed blocks:** `parameterTable` (references `parameter_groups`), `text` (group intros, unit definition), `callout` (`warning`: "do not set two EAs to the same magic on one account").
+- **Allowed blocks:** `parameterTable` (references `parameter_groups` **of the manual version's linked EA Version**), `text` (group intros, unit definition), `callout` (`warning`: "do not set two EAs to the same magic on one account").
 - **Expected screenshots / tables:** one parameter table per group (columns at minimum: Parameter, Type, Default, Safe range, Effect); optionally a screenshot of the Inputs tab.
 - **Validation:** every EA input present (no "phantom" or missing inputs — version-parameter completeness check, `PRD-SUCC-002`); default in the manual equals the code default; type set; safe range set; effect non-empty; points/pips defined; groups have a heading; enum inputs list their options.
 - **Risky / prohibited:** raw variable names where a human terminal label exists; copying a marketing description into the effect column; presenting a "recommended aggressive" default without a range and warning.
@@ -222,13 +223,13 @@ Allowed everywhere: a chapter may always contain `text` and `callout` blocks. Ch
 
 - **Purpose:** publish only tested presets and the supported setups (contributor guide §4.10). "A preset is a promise."
 - **Required information:**
-  - The list of **supported symbol/timeframe setups** (from the EA Version's setup records; e.g. `XAUUSD @ M15`, `XAUUSD @ H1`) — explicit rows, not a free-text sentence.
+  - The list of **supported configurations** (explicit `ea_version_setups` rows on the EA Version; e.g. `XAUUSD / M15`, `XAUUSD / H1`, `EURUSD / H1`) — one row each, with `symbol` (broker suffixes kept), `timeframe` (controlled MetaTrader value), optional preset reference, optional Tested Minimum Lot (labelled as tested data), optional notes, supported flag. Never a free-text sentence; never an inferred combination.
   - For each official `.set` preset: symbol, timeframe, test broker, test date range, test model, spread notes.
   - How to load a preset (Inputs tab → Load).
 - **Optional:** a "conservative vs standard" pair of presets (with honest context), a note on why other pairs are unsupported.
 - **Allowed blocks:** `parameterTable`-style `text` table (one row per preset/setup), `text`, `callout` (`info`: "presets are tested configurations, not performance promises").
 - **Expected screenshots / tables:** a preset table (symbol / TF / broker / date range / model / spread); optional Load-preset screenshot.
-- **Validation:** ≥ 1 supported setup rendered; each published preset has all context columns filled; setups are consistent with Chapter 2; no preset is listed that was not tested.
+- **Validation:** ≥ 1 supported configuration row rendered explicitly (no inferred `symbol × timeframe`); each published preset has all context columns filled; configurations are consistent with Chapter 2; any Tested Minimum Lot shown is labelled as tested data; no preset is listed that was not tested.
 - **Risky / prohibited:** "12 optimal presets" without context; a preset table implying expected returns; "works on all timeframes".
 
 ---
@@ -372,7 +373,7 @@ Allowed everywhere: a chapter may always contain `text` and `callout` blocks. Ch
 | `steps` | `Step[]` (title, instruction, menuPath?, imageAssetId?) | 4, 5 | Ordered; reorder has keyboard/button paths. |
 | `image` | `imageAssetId`, `caption?` | 2, 4, 5, 6, 10, 11 | Alt text required for completion; private until publish; caption describes content. |
 | `callout` | `tone` ∈ `warning`/`info`/`tip`, `content` | all | `warning` for danger modes / demo-only / destructive controls. |
-| `parameterTable` | `groupIds[]` | 7 (and 2/9/11 as `text` tables) | References `parameter_groups`; renders group heading + columns. |
+| `parameterTable` | `groupIds[]` | 7 (and 2/9/11 as `text` tables) | References `parameter_groups` **of the manual version's linked EA Version** (definitions owned by EA Version); renders group heading + columns. |
 | `faq` | `question`, `answer` (RichText) | 6 (edge cases), 13 | Required question set in Chapter 13. |
 
 ## Appendix B — Prohibited claim language (applies to every chapter, incl. headings, captions, FAQ)
