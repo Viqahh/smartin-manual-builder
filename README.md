@@ -4,7 +4,7 @@ Architecture-first repository for **PT Smartin Advisor Sistem's EA Developer Too
 
 ## Current delivery
 
-**Phase 0 — Architecture is complete.** No application runtime has been scaffolded yet because the product brief explicitly requires approval before Phase 1.
+**Phase 1 — UI Foundation is complete.** The application is a production-quality mocked interface with no database, real authentication, rich-text editor, AI, or publishing backend yet.
 
 - [Architecture](docs/ARCHITECTURE.md)
 - [Data model](docs/DATA_MODEL.md)
@@ -12,10 +12,16 @@ Architecture-first repository for **PT Smartin Advisor Sistem's EA Developer Too
 - [Dependencies](docs/DEPENDENCIES.md)
 - [Implementation plan](docs/IMPLEMENTATION_PLAN.md)
 - [Design system](design-system/smartin-manual-builder/MASTER.md)
+- [Phase 1 completion report](docs/PHASE_1.md)
 
-## Repository inspection
+## Run locally
 
-The target directory was empty and was not a Git repository. Phase 0 therefore establishes the technical source of truth without prematurely adding runtime dependencies or application scaffolding.
+```bash
+npm install
+npm run dev
+```
+
+Open `http://localhost:3000`. The mocked wizard and selected builder chapter persist in browser storage.
 
 ## Product guardrails
 
@@ -28,4 +34,4 @@ The target directory was empty and was not a Git repository. Phase 0 therefore e
 
 ## Next step
 
-After Phase 0 approval, Phase 1 will add the Next.js UI foundation with mocked data only, then run lint, TypeScript, browser workflow, console, and responsive checks before stopping again.
+Phase 2 remains blocked pending explicit approval. It will introduce Supabase data/auth/storage and CRUD according to the committed architecture.

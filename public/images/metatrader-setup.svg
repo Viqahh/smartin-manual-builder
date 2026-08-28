@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540" role="img" aria-labelledby="title desc">
+  <title id="title">Ilustrasi folder data MetaTrader 5</title>
+  <desc id="desc">Contoh antarmuka MetaTrader dengan menu File dan jalur MQL5 Experts disorot.</desc>
+  <rect width="960" height="540" fill="#dfe7ef"/>
+  <rect x="30" y="32" width="900" height="476" rx="10" fill="#f8fafc" stroke="#94a3b8"/>
+  <rect x="30" y="32" width="900" height="44" rx="10" fill="#14243c"/>
+  <rect x="30" y="64" width="900" height="12" fill="#14243c"/>
+  <circle cx="54" cy="54" r="6" fill="#ef4444"/><circle cx="74" cy="54" r="6" fill="#f59e0b"/><circle cx="94" cy="54" r="6" fill="#22c55e"/>
+  <text x="126" y="60" font-family="Arial, sans-serif" font-size="15" fill="#f8fafc">MetaTrader 5 — VMax EA Demo</text>
+  <rect x="30" y="76" width="900" height="36" fill="#ffffff"/>
+  <text x="50" y="99" font-family="Arial, sans-serif" font-size="14" fill="#0f172a">File</text><text x="96" y="99" font-family="Arial, sans-serif" font-size="14" fill="#475569">View</text><text x="144" y="99" font-family="Arial, sans-serif" font-size="14" fill="#475569">Insert</text><text x="194" y="99" font-family="Arial, sans-serif" font-size="14" fill="#475569">Charts</text><text x="250" y="99" font-family="Arial, sans-serif" font-size="14" fill="#475569">Tools</text>
+  <rect x="42" y="112" width="238" height="168" rx="4" fill="#ffffff" stroke="#94a3b8"/>
+  <rect x="48" y="126" width="226" height="34" rx="3" fill="#e8f2ff"/>
+  <text x="64" y="148" font-family="Arial, sans-serif" font-size="14" font-weight="700" fill="#1d4ed8">Open Data Folder</text>
+  <text x="64" y="186" font-family="Arial, sans-serif" font-size="14" fill="#334155">Open an Account</text><text x="64" y="218" font-family="Arial, sans-serif" font-size="14" fill="#334155">Open Offline</text><text x="64" y="250" font-family="Arial, sans-serif" font-size="14" fill="#334155">Exit</text>
+  <rect x="304" y="128" width="592" height="344" rx="6" fill="#ffffff" stroke="#cbd5e1"/>
+  <rect x="304" y="128" width="592" height="42" rx="6" fill="#eef2f6"/>
+  <text x="330" y="154" font-family="Arial, sans-serif" font-size="14" font-weight="700" fill="#0f172a">Data Folder</text>
+  <rect x="328" y="194" width="160" height="118" rx="5" fill="#eff6ff" stroke="#60a5fa" stroke-width="2"/>
+  <path d="M354 225h40l12 13h56v48H354z" fill="#2563eb" opacity=".86"/>
+  <text x="373" y="337" font-family="Arial, sans-serif" font-size="16" font-weight="700" fill="#1e3a8a">MQL5</text>
+  <path d="M506 253h62" stroke="#64748b" stroke-width="3"/><path d="M559 245l12 8-12 8" fill="none" stroke="#64748b" stroke-width="3"/>
+  <rect x="588" y="194" width="160" height="118" rx="5" fill="#f0fdf4" stroke="#4ade80" stroke-width="2"/>
+  <path d="M614 225h40l12 13h56v48H614z" fill="#22c55e" opacity=".88"/>
+  <text x="632" y="337" font-family="Arial, sans-serif" font-size="16" font-weight="700" fill="#166534">Experts</text>
+  <rect x="328" y="378" width="420" height="58" rx="5" fill="#fff7ed" stroke="#fdba74"/>
+  <circle cx="357" cy="407" r="14" fill="#f97316"/><text x="353" y="412" font-family="Arial, sans-serif" font-size="15" font-weight="700" fill="#fff">3</text>
+  <text x="382" y="412" font-family="Arial, sans-serif" font-size="15" font-weight="700" fill="#9a3412">Salin VMaxEA.ex5 ke folder Experts</text>
+  <text x="796" y="455" font-family="Arial, sans-serif" font-size="12" fill="#64748b">SAMPLE / DEMO</text>
+</svg>

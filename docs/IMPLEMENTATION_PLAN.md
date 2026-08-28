@@ -17,9 +17,11 @@ Each phase begins only after approval of the prior phase. Completion requires ru
 
 Validation for this documentation-only phase: Markdown structure/link checks, repository status check, and Git commit. Runtime/lint/typecheck are not applicable because Phase 0 intentionally has no application scaffold.
 
-## Phase 1 — UI foundation
+## Phase 1 — UI foundation (complete)
 
 Scope: application shell, responsive sidebar, production-quality Indonesian dashboard, manual list, mocked create-manual wizard, three-panel builder with chapter navigation, mock blocks, reusable renderer, A4 preview, and local mocked state persistence.
+
+Completion and acceptance evidence are recorded in [`PHASE_1.md`](PHASE_1.md). Phase 2 has not started.
 
 Not in scope: database, real authentication, uploads, autosave backend, TipTap, drag-and-drop, AI, checklist engine, review transitions, public publishing, or PDF generation.
 
