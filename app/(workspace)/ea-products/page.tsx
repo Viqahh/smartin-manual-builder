@@ -1,20 +1,58 @@
-import { Plus } from "lucide-react";
 import Link from "next/link";
 import { PageHeader } from "@/components/page-header";
+import { getWorkspaceContext } from "@/lib/auth/context";
+import { listEaProducts } from "@/features/ea-products/queries";
+import { ProductCreateForm } from "@/features/ea-products/product-create-form";
 
-const products = [
-  { name: "VMax EA", platform: "MT5", version: "1.0.0", manuals: 1, status: "Aktif" },
-  { name: "Smart Grid Pro", platform: "MT5", version: "2.4.1", manuals: 3, status: "Aktif" },
-  { name: "Momentum Edge", platform: "MT4", version: "3.1.0", manuals: 4, status: "Aktif" },
-];
+export const dynamic = "force-dynamic";
 
-export default function EAProductsPage() {
+export default async function EAProductsPage() {
+  const ctx = await getWorkspaceContext();
+  const products = await listEaProducts(ctx.activeOrg!.id);
+
   return (
     <div className="page-container">
-      <PageHeader eyebrow="Produk EA" title="My EA Products" description="Sumber data identitas, versi, kebutuhan teknis, dan dokumentasi untuk setiap EA." action={<Link className="primary-button" href="/manuals/new"><Plus aria-hidden="true" size={18} /> Tambah produk</Link>} />
-      <section className="card product-grid" aria-label="Daftar produk EA">
-        {products.map((product) => <article key={product.name}><div className="product-logo">EA</div><div><span className="status-badge" data-status="PUBLISHED">{product.status}</span><h2>{product.name}</h2><p>{product.platform} · versi <span className="mono">{product.version}</span></p></div><dl><div><dt>Manual</dt><dd>{product.manuals}</dd></div><div><dt>Platform</dt><dd>{product.platform}</dd></div></dl><Link href="/manuals">Lihat dokumentasi</Link></article>)}
-      </section>
+      <PageHeader
+        eyebrow="Produk EA"
+        title="Produk EA"
+        description="Sumber data identitas, versi, konfigurasi yang didukung, dan parameter untuk setiap EA."
+        action={<ProductCreateForm />}
+      />
+
+      {products.length === 0 ? (
+        <section className="card empty-state">
+          <h2>Belum ada produk EA</h2>
+          <p>Tambahkan produk EA pertama untuk organisasi ini.</p>
+        </section>
+      ) : (
+        <section className="card product-grid" aria-label="Daftar produk EA">
+          {products.map((p) => (
+            <article key={p.id}>
+              <div className="product-logo">EA</div>
+              <div>
+                {p.archivedAt && (
+                  <span className="status-badge" data-status="ARCHIVED">
+                    Diarsipkan
+                  </span>
+                )}
+                <h2>{p.name}</h2>
+                <p>{p.description || "Tanpa deskripsi."}</p>
+              </div>
+              <dl>
+                <div>
+                  <dt>Versi</dt>
+                  <dd>{p.versionCount}</dd>
+                </div>
+                <div>
+                  <dt>Manual</dt>
+                  <dd>{p.manualCount}</dd>
+                </div>
+              </dl>
+              <Link href={`/ea-products/${p.id}`}>Buka produk</Link>
+            </article>
+          ))}
+        </section>
+      )}
     </div>
   );
 }

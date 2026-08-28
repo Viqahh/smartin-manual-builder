@@ -2,50 +2,67 @@
 
 import { AlertTriangle, ArrowUpRight, CheckCircle2, CircleDashed, Search } from "lucide-react";
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
-import { manuals, ManualRecord, ManualStatus, statusLabels } from "./mock-data";
+import { useMemo, useState } from "react";
+import type { ManualListRow } from "./queries";
+import type { ManualStatusDb } from "@/lib/supabase/database.types";
 
-const statusIcons: Record<ManualStatus, typeof CheckCircle2> = {
+export const STATUS_LABELS: Record<ManualStatusDb, string> = {
+  DRAFT: "Draf",
+  TECHNICAL_REVIEW: "Review teknis",
+  COMPLIANCE_REVIEW: "Review kepatuhan",
+  CHANGES_REQUESTED: "Perlu perubahan",
+  APPROVED: "Disetujui",
+  PUBLISHED: "Diterbitkan",
+  ARCHIVED: "Diarsipkan",
+};
+
+const STATUS_ICON: Record<ManualStatusDb, typeof CheckCircle2> = {
   DRAFT: CircleDashed,
   TECHNICAL_REVIEW: CircleDashed,
   COMPLIANCE_REVIEW: CircleDashed,
   CHANGES_REQUESTED: AlertTriangle,
   APPROVED: CheckCircle2,
   PUBLISHED: CheckCircle2,
+  ARCHIVED: CircleDashed,
 };
 
-export function StatusBadge({ status }: { status: ManualStatus }) {
-  const Icon = statusIcons[status];
+export function StatusBadge({ status }: { status: ManualStatusDb }) {
+  const Icon = STATUS_ICON[status];
   return (
     <span className="status-badge" data-status={status}>
       <Icon aria-hidden="true" size={14} />
-      {statusLabels[status]}
+      {STATUS_LABELS[status]}
     </span>
   );
 }
 
-export function Completion({ value }: { value: number }) {
-  return (
-    <div className="completion-cell" aria-label={`Kelengkapan ${value}%`}>
-      <span>{value}%</span>
-      <span className="progress-track"><span style={{ width: `${value}%` }} /></span>
-    </div>
-  );
-}
-
-function ManualRow({ manual }: { manual: ManualRecord }) {
+function Row({ manual }: { manual: ManualListRow }) {
   return (
     <tr>
-      <td data-label="EA"><strong>{manual.eaName}</strong><span className="mobile-subline">{manual.platform} · EA {manual.eaVersion}</span></td>
-      <td data-label="Platform"><span className="platform-badge">{manual.platform}</span></td>
-      <td data-label="Versi EA" className="mono">{manual.eaVersion}</td>
-      <td data-label="Versi manual" className="mono">{manual.manualVersion}</td>
-      <td data-label="Kelengkapan"><Completion value={manual.completion} /></td>
-      <td data-label="Checklist" className="mono">{manual.compliance}</td>
-      <td data-label="Status"><StatusBadge status={manual.status} /></td>
-      <td data-label="Diperbarui">{manual.updated}</td>
+      <td data-label="EA">
+        <strong>{manual.eaName}</strong>
+        <span className="mobile-subline">
+          {manual.platform} · EA {manual.eaVersion}
+        </span>
+      </td>
+      <td data-label="Platform">
+        <span className="platform-badge">{manual.platform}</span>
+      </td>
+      <td data-label="Versi EA" className="mono">
+        {manual.eaVersion}
+      </td>
+      <td data-label="Versi manual" className="mono">
+        {manual.manualVersion}
+      </td>
+      <td data-label="Bab" className="mono">
+        {manual.sectionsTotal}
+      </td>
+      <td data-label="Status">
+        <StatusBadge status={manual.status} />
+      </td>
+      <td data-label="Diperbarui">{new Date(manual.updatedAt).toLocaleDateString("id-ID")}</td>
       <td data-label="Aksi">
-        <Link className="table-action" href={`/manuals/${manual.id}/edit`}>
+        <Link className="table-action" href={`/manuals/${manual.manualId}/edit`}>
           Buka <ArrowUpRight aria-hidden="true" size={15} />
         </Link>
       </td>
@@ -53,31 +70,20 @@ function ManualRow({ manual }: { manual: ManualRecord }) {
   );
 }
 
-export function ManualTable({ compact = false }: { compact?: boolean }) {
+export function ManualTable({ rows, compact = false }: { rows: ManualListRow[]; compact?: boolean }) {
   const [query, setQuery] = useState("");
-  const [status, setStatus] = useState("ALL");
-  const [records, setRecords] = useState(manuals);
+  const [status, setStatus] = useState<"ALL" | ManualStatusDb>("ALL");
 
-  useEffect(() => {
-    const raw = localStorage.getItem("smartin-new-manual");
-    if (!raw) return;
-    let frame = 0;
-    try {
-      const created = JSON.parse(raw) as ManualRecord;
-      frame = requestAnimationFrame(() => setRecords((current) => current.some((item) => item.id === created.id) ? current : [created, ...current]));
-    } catch {
-      localStorage.removeItem("smartin-new-manual");
-    }
-    return () => cancelAnimationFrame(frame);
-  }, []);
-
-  const filtered = useMemo(() => records.filter((manual) => {
-    const matchesQuery = manual.eaName.toLowerCase().includes(query.toLowerCase());
-    const matchesStatus = status === "ALL" || manual.status === status;
-    return matchesQuery && matchesStatus;
-  }), [query, records, status]);
-
-  const displayed = compact ? filtered.slice(0, 4) : filtered;
+  const filtered = useMemo(
+    () =>
+      rows.filter((m) => {
+        const matchesQuery = m.eaName.toLowerCase().includes(query.toLowerCase());
+        const matchesStatus = status === "ALL" || m.status === status;
+        return matchesQuery && matchesStatus;
+      }),
+    [rows, query, status],
+  );
+  const displayed = compact ? filtered.slice(0, 5) : filtered;
 
   return (
     <div className="table-region">
@@ -86,31 +92,68 @@ export function ManualTable({ compact = false }: { compact?: boolean }) {
           <label className="search-field">
             <Search aria-hidden="true" size={17} />
             <span className="sr-only">Cari manual</span>
-            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Cari nama EA…" />
+            <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Cari nama EA…" />
           </label>
           <label>
             <span className="sr-only">Filter status</span>
-            <select value={status} onChange={(event) => setStatus(event.target.value)}>
+            <select value={status} onChange={(e) => setStatus(e.target.value as "ALL" | ManualStatusDb)}>
               <option value="ALL">Semua status</option>
-              {Object.entries(statusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              {Object.entries(STATUS_LABELS).map(([v, l]) => (
+                <option key={v} value={v}>
+                  {l}
+                </option>
+              ))}
             </select>
           </label>
           <span className="filter-count">{displayed.length} manual</span>
         </div>
       )}
-      {displayed.length ? (
-        <div className="responsive-table-wrap">
-          <table className="manual-table">
-            <thead><tr><th>EA</th><th>Platform</th><th>Versi EA</th><th>Versi manual</th><th>Kelengkapan</th><th>Checklist</th><th>Status</th><th>Diperbarui</th><th>Aksi</th></tr></thead>
-            <tbody>{displayed.map((manual) => <ManualRow key={manual.id} manual={manual} />)}</tbody>
-          </table>
+
+      {rows.length === 0 ? (
+        <div className="empty-state">
+          <Search aria-hidden="true" size={26} />
+          <h2>Belum ada manual</h2>
+          <p>Buat manual pertama untuk organisasi ini.</p>
+          <Link className="secondary-button" href="/manuals/new">
+            Buat manual
+          </Link>
         </div>
-      ) : (
+      ) : displayed.length === 0 ? (
         <div className="empty-state">
           <Search aria-hidden="true" size={26} />
           <h2>Manual tidak ditemukan</h2>
           <p>Coba ubah kata kunci atau filter status.</p>
-          <button className="secondary-button" onClick={() => { setQuery(""); setStatus("ALL"); }}>Reset filter</button>
+          <button
+            className="secondary-button"
+            onClick={() => {
+              setQuery("");
+              setStatus("ALL");
+            }}
+          >
+            Reset filter
+          </button>
+        </div>
+      ) : (
+        <div className="responsive-table-wrap">
+          <table className="manual-table">
+            <thead>
+              <tr>
+                <th>EA</th>
+                <th>Platform</th>
+                <th>Versi EA</th>
+                <th>Versi manual</th>
+                <th>Bab</th>
+                <th>Status</th>
+                <th>Diperbarui</th>
+                <th>Aksi</th>
+              </tr>
+            </thead>
+            <tbody>
+              {displayed.map((m) => (
+                <Row key={m.manualId} manual={m} />
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
     </div>

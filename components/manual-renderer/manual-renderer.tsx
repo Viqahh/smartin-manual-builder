@@ -1,86 +1,274 @@
-import { AlertTriangle, CheckCircle2, Info, Lightbulb } from "lucide-react";
+import { AlertTriangle, Info, Lightbulb } from "lucide-react";
 import Image from "next/image";
-import { Chapter, parameters } from "@/features/manuals/mock-data";
+import { BROKER_MIN_LOT_NOTE_ID } from "@/lib/domain/setups";
+import { manualIdentity, type ManualViewModel } from "@/lib/manual/view-model";
 
-function InstallationContent() {
-  return (
-    <div className="manual-content">
-      <p className="lead">Ikuti langkah berikut untuk memasang VMax EA pada MetaTrader 5. Tutup platform sebelum menyalin berkas jika broker Anda mensyaratkannya.</p>
-      <div className="step-list">
-        <article><span>1</span><div><h3>Buka folder data MetaTrader 5</h3><p>Di menu utama, pilih <strong>File → Open Data Folder</strong>.</p></div></article>
-        <article><span>2</span><div><h3>Buka direktori Expert Advisor</h3><p>Masuk ke folder <code>MQL5</code>, lalu buka folder <code>Experts</code>.</p></div></article>
-      </div>
-      <figure className="manual-image-block">
-        <Image src="/images/metatrader-setup.svg" width={960} height={540} alt="Contoh navigasi dari menu File menuju folder MQL5 Experts di MetaTrader 5" priority />
-        <figcaption>Gambar 4.1 — Lokasi folder Expert Advisor pada MetaTrader 5. Ilustrasi demo.</figcaption>
-      </figure>
-      <div className="step-list">
-        <article><span>3</span><div><h3>Salin berkas EA</h3><p>Salin berkas <code>VMaxEA.ex5</code> ke dalam folder <code>Experts</code>.</p></div></article>
-        <article><span>4</span><div><h3>Muat ulang Navigator</h3><p>Kembali ke MetaTrader 5, klik kanan panel Navigator, lalu pilih <strong>Refresh</strong>.</p></div></article>
-        <article><span>5</span><div><h3>Pasang EA pada chart</h3><p>Tarik VMax EA ke chart XAUUSD dan periksa seluruh parameter sebelum mengaktifkan Algo Trading.</p></div></article>
-      </div>
-      <aside className="manual-callout warning"><AlertTriangle aria-hidden="true" /><div><strong>Periksa akun sebelum aktivasi</strong><p>Gunakan akun demo untuk pengujian awal. EA merupakan alat bantu dan hasil perdagangan tidak dapat dijamin.</p></div></aside>
-    </div>
-  );
+/**
+ * The ONE shared manual renderer (spec §18). It consumes a typed ManualViewModel — no
+ * hardcoded product — so the builder preview, and later the public web manual + PDF, all
+ * render from the same content model.
+ */
+
+type Section = ManualViewModel["sections"][number];
+type Block = Section["blocks"][number];
+
+function paragraphsOf(payload: Record<string, unknown>): string[] {
+  const content = (payload.content ?? payload.answer) as { paragraphs?: unknown } | undefined;
+  const list = content?.paragraphs;
+  return Array.isArray(list) ? list.filter((p): p is string => typeof p === "string") : [];
 }
 
-function ParameterContent() {
+function CalloutIcon({ tone }: { tone: string }) {
+  if (tone === "warning") return <AlertTriangle aria-hidden="true" />;
+  if (tone === "tip") return <Lightbulb aria-hidden="true" />;
+  return <Info aria-hidden="true" />;
+}
+
+function BlockView({ block, vm }: { block: Block; vm: ManualViewModel }) {
+  switch (block.type) {
+    case "text":
+      return (
+        <div className="manual-content">
+          {paragraphsOf(block.payload).map((p, i) => (
+            <p key={i}>{p}</p>
+          ))}
+        </div>
+      );
+    case "callout": {
+      const tone = String(block.payload.tone ?? "info");
+      return (
+        <aside className={`manual-callout ${tone}`}>
+          <CalloutIcon tone={tone} />
+          <div>
+            {paragraphsOf(block.payload).map((p, i) => (
+              <p key={i}>{p}</p>
+            ))}
+          </div>
+        </aside>
+      );
+    }
+    case "steps": {
+      const steps = (block.payload.steps as { title?: string; instruction?: string; menuPath?: string }[]) ?? [];
+      return (
+        <div className="step-list">
+          {steps.map((s, i) => (
+            <article key={i}>
+              <span>{i + 1}</span>
+              <div>
+                <h3>{s.title}</h3>
+                <p>{s.instruction}</p>
+                {s.menuPath && (
+                  <p>
+                    <code>{s.menuPath}</code>
+                  </p>
+                )}
+              </div>
+            </article>
+          ))}
+        </div>
+      );
+    }
+    case "image": {
+      const asset = block.imageAssetId ? vm.images[block.imageAssetId] : undefined;
+      if (!asset?.signedUrl) {
+        return <p className="manual-image-missing">[gambar belum tersedia]</p>;
+      }
+      return (
+        <figure className="manual-image-block">
+          <Image src={asset.signedUrl} width={960} height={540} alt={asset.altText ?? ""} unoptimized />
+          {(asset.caption || (block.payload.caption as string)) && (
+            <figcaption>{asset.caption ?? (block.payload.caption as string)}</figcaption>
+          )}
+        </figure>
+      );
+    }
+    case "parameterTable": {
+      const groups = vm.parameterGroups.filter((g) => block.parameterGroupIds.includes(g.id));
+      const shown = groups.length ? groups : vm.parameterGroups;
+      return (
+        <div className="manual-content">
+          {shown.map((g) => (
+            <div key={g.id}>
+              <div className="parameter-group-heading">
+                <div>
+                  <div>
+                    <h3>{g.name}</h3>
+                    <p>{g.parameters.length} parameter</p>
+                  </div>
+                </div>
+              </div>
+              <div className="manual-table-wrap">
+                <table className="parameter-table">
+                  <thead>
+                    <tr>
+                      <th>Parameter</th>
+                      <th>Tipe</th>
+                      <th>Default</th>
+                      <th>Rentang aman</th>
+                      <th>Efek pada order</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {g.parameters.map((p) => (
+                      <tr key={p.id}>
+                        <td>
+                          <strong>{p.displayName}</strong>
+                          <code>{p.technicalName}</code>
+                        </td>
+                        <td>
+                          <code>{p.paramType}</code>
+                        </td>
+                        <td>
+                          <code>{p.defaultValue ?? "—"}</code>
+                        </td>
+                        <td>{p.safeRange ?? "—"}</td>
+                        <td>{p.orderEffect ?? p.description ?? "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ))}
+        </div>
+      );
+    }
+    case "faq":
+      return (
+        <div className="manual-content">
+          <h3>{String(block.payload.question ?? "")}</h3>
+          {paragraphsOf(block.payload).map((p, i) => (
+            <p key={i}>{p}</p>
+          ))}
+        </div>
+      );
+    default:
+      return null;
+  }
+}
+
+function SupportedConfigTable({ vm }: { vm: ManualViewModel }) {
+  if (vm.supportedSetups.length === 0) return null;
   return (
     <div className="manual-content">
-      <p className="lead">Parameter berikut merupakan data contoh untuk menunjukkan struktur referensi input. Nilai harus diverifikasi terhadap EA sebelum review teknis.</p>
-      <div className="parameter-group-heading"><div><span>TR</span><div><h3>Trading</h3><p>Pengaturan dasar eksekusi dan identifikasi order</p></div></div><span>3 parameter</span></div>
       <div className="manual-table-wrap">
         <table className="parameter-table">
-          <thead><tr><th>Parameter</th><th>Tipe</th><th>Default</th><th>Rentang aman</th><th>Efek pada order</th></tr></thead>
-          <tbody>{parameters.map((parameter) => <tr key={parameter.technicalName}><td><strong>{parameter.displayName}</strong><code>{parameter.technicalName}</code></td><td><code>{parameter.type}</code></td><td><code>{parameter.defaultValue}</code></td><td>{parameter.safeRange}</td><td>{parameter.effect}</td></tr>)}</tbody>
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>Timeframe</th>
+              <th>Preset</th>
+              <th>Tested Minimum Lot</th>
+              <th>Didukung</th>
+            </tr>
+          </thead>
+          <tbody>
+            {vm.supportedSetups.map((s) => (
+              <tr key={s.id}>
+                <td className="mono">{s.symbol}</td>
+                <td className="mono">{s.timeframe}</td>
+                <td>{s.presetRef ?? "—"}</td>
+                <td>{s.testedMinimumLot === null ? "—" : `${s.testedMinimumLot} (data uji developer)`}</td>
+                <td>{s.isSupported ? "Ya" : "Tidak"}</td>
+              </tr>
+            ))}
+          </tbody>
         </table>
       </div>
-      <aside className="manual-callout info"><Info aria-hidden="true" /><div><strong>Data terstruktur</strong><p>Parameter dikelola sebagai data reusable. Tabel editor lengkap akan tersedia pada Phase 3.</p></div></aside>
+      <aside className="manual-callout info">
+        <Info aria-hidden="true" />
+        <div>
+          <p>{BROKER_MIN_LOT_NOTE_ID}</p>
+        </div>
+      </aside>
     </div>
   );
 }
 
-function OverviewContent() {
-  return (
-    <div className="manual-content">
-      <p className="lead">VMax EA adalah Expert Advisor MetaTrader 5 yang membantu pengguna menjalankan konfigurasi perdagangan pada XAUUSD. Seluruh keputusan konfigurasi dan risiko penggunaan tetap menjadi tanggung jawab pengguna.</p>
-      <div className="fact-grid"><div><span>Platform</span><strong>MetaTrader 5</strong></div><div><span>Versi EA</span><strong>1.0.0</strong></div><div><span>Simbol demo</span><strong>XAUUSD</strong></div><div><span>Timeframe demo</span><strong>M15, H1</strong></div></div>
-      <aside className="manual-callout tip"><Lightbulb aria-hidden="true" /><div><strong>Informasi demo</strong><p>Konten Phase 1 menunjukkan format dokumentasi dan tidak menyatakan performa produk nyata.</p></div></aside>
-    </div>
-  );
-}
-
-function GenericContent({ chapter }: { chapter: Chapter }) {
+export function SectionContent({ section, vm }: { section: Section; vm: ManualViewModel }) {
+  const injectSetups = section.key === "requirements" || section.key === "presets";
   return (
     <div className="manual-content generic-chapter">
-      <p className="lead">Bab ini telah disiapkan dari template Smartin agar developer tidak memulai dari halaman kosong.</p>
-      <div className="content-outline">
-        <CheckCircle2 aria-hidden="true" />
-        <div><h3>Konten terstruktur untuk {chapter.title}</h3><p>Fakta produk, panduan pengguna, gambar, dan catatan validasi akan disusun dalam blok yang mudah ditinjau.</p></div>
-      </div>
-      {chapter.state === "issue" && <aside className="manual-callout warning"><AlertTriangle aria-hidden="true" /><div><strong>Perlu verifikasi teknis</strong><p>Tambahkan informasi faktual dari developer sebelum bab ini dikirim ke reviewer.</p></div></aside>}
+      {section.blocks.length === 0 && !injectSetups && (
+        <p className="lead">Bab ini telah disiapkan dari template Smartin. Konten akan disusun pada editor (Phase 3).</p>
+      )}
+      {section.blocks.map((b) => (
+        <BlockView key={b.id} block={b} vm={vm} />
+      ))}
+      {injectSetups && <SupportedConfigTable vm={vm} />}
+      {section.completionState === "issue" && (
+        <aside className="manual-callout warning">
+          <AlertTriangle aria-hidden="true" />
+          <div>
+            <p>Perlu verifikasi teknis sebelum bab ini dikirim ke reviewer.</p>
+          </div>
+        </aside>
+      )}
     </div>
   );
 }
 
-export function ManualChapterContent({ chapter }: { chapter: Chapter }) {
-  if (chapter.id === "installation") return <InstallationContent />;
-  if (chapter.id === "parameters") return <ParameterContent />;
-  if (chapter.id === "overview") return <OverviewContent />;
-  return <GenericContent chapter={chapter} />;
-}
-
-export function ManualRenderer() {
+export function ManualRenderer({ vm }: { vm: ManualViewModel }) {
+  const id = manualIdentity(vm);
   return (
     <article className="a4-document">
       <section className="manual-cover">
-        <div className="manual-cover-brand"><span>S</span><div><strong>SMARTIN</strong><small>Advisor Sistem</small></div></div>
-        <div className="manual-cover-copy"><p>EXPERT ADVISOR MANUAL</p><h1>VMax EA</h1><h2>User Manual Book</h2><div className="cover-rule" /><dl><div><dt>Platform</dt><dd>MetaTrader 5</dd></div><div><dt>EA Version</dt><dd>1.0.0</dd></div><div><dt>Manual Version</dt><dd>1.0.0</dd></div><div><dt>Release Date</dt><dd>28 August 2026</dd></div></dl></div>
-        <footer><span>PT Smartin Advisor Sistem</span><span>Sample / Demo Document</span></footer>
+        <div className="manual-cover-brand">
+          <span>S</span>
+          <div>
+            <strong>SMARTIN</strong>
+            <small>{id.organization}</small>
+          </div>
+        </div>
+        <div className="manual-cover-copy">
+          <p>EXPERT ADVISOR MANUAL</p>
+          <h1>{id.eaName}</h1>
+          <h2>User Manual Book</h2>
+          <div className="cover-rule" />
+          <dl>
+            <div>
+              <dt>Platform</dt>
+              <dd>{id.platform}</dd>
+            </div>
+            <div>
+              <dt>EA Version</dt>
+              <dd className="mono">{id.eaVersion}</dd>
+            </div>
+            <div>
+              <dt>Manual Version</dt>
+              <dd className="mono">{id.manualVersion}</dd>
+            </div>
+            <div>
+              <dt>Release Date</dt>
+              <dd>{id.releaseDate ?? "—"}</dd>
+            </div>
+          </dl>
+        </div>
+        <footer>
+          <span>{id.organization}</span>
+          <span>{id.developer ? `Developer: ${id.developer}` : "Sample / Demo Document"}</span>
+        </footer>
       </section>
-      <section className="manual-page"><header><span>VMax EA · User Manual</span><span>Version 1.0.0</span></header><div className="manual-page-body"><p className="chapter-kicker">01 · PRODUCT OVERVIEW</p><h2>Ringkasan Produk</h2><OverviewContent /></div><footer><span>SMARTIN MANUAL BUILDER</span><span>2</span></footer></section>
-      <section className="manual-page"><header><span>VMax EA · User Manual</span><span>Version 1.0.0</span></header><div className="manual-page-body"><p className="chapter-kicker">04 · INSTALLATION</p><h2>Instalasi</h2><InstallationContent /></div><footer><span>SMARTIN MANUAL BUILDER</span><span>3</span></footer></section>
-      <section className="manual-page"><header><span>VMax EA · User Manual</span><span>Version 1.0.0</span></header><div className="manual-page-body"><p className="chapter-kicker">07 · INPUT REFERENCE</p><h2>Referensi Input / Parameter</h2><ParameterContent /></div><footer><span>SMARTIN MANUAL BUILDER</span><span>4</span></footer></section>
+
+      {vm.sections.map((section, index) => (
+        <section className="manual-page" key={section.id}>
+          <header>
+            <span>{id.eaName} · User Manual</span>
+            <span>Version {id.manualVersion}</span>
+          </header>
+          <div className="manual-page-body">
+            <p className="chapter-kicker">
+              {String(section.position).padStart(2, "0")} · {section.title.toUpperCase()}
+            </p>
+            <h2>{section.title}</h2>
+            <SectionContent section={section} vm={vm} />
+          </div>
+          <footer>
+            <span>SMARTIN MANUAL BUILDER</span>
+            <span>{index + 2}</span>
+          </footer>
+        </section>
+      ))}
     </article>
   );
 }

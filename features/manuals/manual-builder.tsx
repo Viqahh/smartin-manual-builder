@@ -1,100 +1,377 @@
 "use client";
 
-import { AlertTriangle, Check, ChevronRight, Circle, Eye, FileText, Info, LockKeyhole, PanelLeft, PanelRight, Save, Sparkles, X } from "lucide-react";
+import {
+  AlertTriangle,
+  Check,
+  ChevronRight,
+  Circle,
+  Eye,
+  FileText,
+  Info,
+  LockKeyhole,
+  PanelLeft,
+  PanelRight,
+  Save,
+  Sparkles,
+  X,
+} from "lucide-react";
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
-import { ManualChapterContent } from "@/components/manual-renderer/manual-renderer";
-import { chapters } from "./mock-data";
+import { useMemo, useRef, useState } from "react";
+import { SectionContent } from "@/components/manual-renderer/manual-renderer";
+import { manualIdentity, type ManualViewModel } from "@/lib/manual/view-model";
+import { STATUS_LABELS } from "./manual-table";
+import { SAVE_STATE_LABEL, DEFAULT_AUTOSAVE_DEBOUNCE_MS, type SaveState } from "@/lib/domain/autosave";
+import { saveSection } from "./autosave-actions";
 
-function StateIcon({ state }: { state: (typeof chapters)[number]["state"] }) {
+type Section = ManualViewModel["sections"][number];
+type CompletionState = Section["completionState"];
+
+const COMPLETION_LABEL: Record<CompletionState, string> = {
+  incomplete: "Belum lengkap",
+  in_progress: "Sedang dikerjakan",
+  complete: "Selesai",
+  issue: "Ada masalah",
+};
+
+function StateIcon({ state }: { state: CompletionState | "current" }) {
   if (state === "complete") return <Check aria-label="Selesai" size={14} />;
   if (state === "issue") return <AlertTriangle aria-label="Ada masalah" size={14} />;
   if (state === "current") return <span className="current-dot" aria-label="Sedang diedit" />;
   return <Circle aria-label="Belum lengkap" size={13} />;
 }
 
-function ChapterPanel({ selected, onSelect, close }: { selected: string; onSelect: (id: string) => void; close?: () => void }) {
+function ChapterPanel({
+  sections,
+  selectedId,
+  progress,
+  completedCount,
+  onSelect,
+  onClose,
+}: {
+  sections: Section[];
+  selectedId: string;
+  progress: number;
+  completedCount: number;
+  onSelect: (id: string) => void;
+  onClose?: () => void;
+}) {
   return (
     <aside className="chapter-panel" aria-label="Navigasi bab">
-      {close && <button className="icon-button panel-close" aria-label="Tutup daftar bab" onClick={close}><X aria-hidden="true" /></button>}
-      <div className="panel-heading"><div><p className="eyebrow">Manual Book</p><h2>Daftar bab</h2></div><span>82%</span></div>
-      <div className="overall-progress"><span style={{ width: "82%" }} /></div>
-      <p className="progress-copy">14 dari 18 bab memiliki konten</p>
+      {onClose && (
+        <button className="icon-button panel-close" aria-label="Tutup daftar bab" onClick={onClose}>
+          <X aria-hidden="true" />
+        </button>
+      )}
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">Manual Book</p>
+          <h2>Daftar bab</h2>
+        </div>
+        <span>{progress}%</span>
+      </div>
+      <div className="overall-progress">
+        <span style={{ width: `${progress}%` }} />
+      </div>
+      <p className="progress-copy">
+        {completedCount} dari {sections.length} bab ditandai selesai
+      </p>
       <nav className="chapter-list">
-        {chapters.map((chapter) => (
-          <button key={chapter.id} data-active={selected === chapter.id} data-state={chapter.state} onClick={() => { onSelect(chapter.id); close?.(); }}>
-            <span className="chapter-state"><StateIcon state={selected === chapter.id ? "current" : chapter.state} /></span>
-            <span className="chapter-copy"><small>BAB {chapter.number.padStart(2, "0")}</small><strong>{chapter.title}</strong></span>
+        {sections.map((chapter) => (
+          <button
+            key={chapter.id}
+            data-active={selectedId === chapter.id}
+            data-state={chapter.completionState}
+            onClick={() => {
+              onSelect(chapter.id);
+              onClose?.();
+            }}
+          >
+            <span className="chapter-state">
+              <StateIcon state={selectedId === chapter.id ? "current" : chapter.completionState} />
+            </span>
+            <span className="chapter-copy">
+              <small>BAB {String(chapter.position).padStart(2, "0")}</small>
+              <strong>{chapter.title}</strong>
+            </span>
             {chapter.required && <LockKeyhole aria-label="Bab wajib" size={13} />}
           </button>
         ))}
       </nav>
-      <button className="secondary-button full-button" disabled title="Bab kustom tersedia pada Phase 2">Tambah bab kustom</button>
     </aside>
   );
 }
 
-function Inspector({ tab, setTab, close }: { tab: string; setTab: (tab: string) => void; close?: () => void }) {
+function Inspector({
+  identity,
+  section,
+  progress,
+  saveState,
+  tab,
+  onTab,
+  onSetCompletion,
+  onClose,
+}: {
+  identity: ReturnType<typeof manualIdentity>;
+  section: Section | undefined;
+  progress: number;
+  saveState: SaveState;
+  tab: "Validasi" | "Metadata";
+  onTab: (t: "Validasi" | "Metadata") => void;
+  onSetCompletion: (s: CompletionState) => void;
+  onClose?: () => void;
+}) {
   return (
     <aside className="inspector-panel" aria-label="Inspector manual">
-      {close && <button className="icon-button panel-close" aria-label="Tutup inspector" onClick={close}><X aria-hidden="true" /></button>}
+      {onClose && (
+        <button className="icon-button panel-close" aria-label="Tutup inspector" onClick={onClose}>
+          <X aria-hidden="true" />
+        </button>
+      )}
       <div className="inspector-tabs" role="tablist" aria-label="Inspector">
-        {["Validasi", "Metadata"].map((item) => <button role="tab" aria-selected={tab === item} key={item} onClick={() => setTab(item)}>{item}</button>)}
+        {(["Validasi", "Metadata"] as const).map((item) => (
+          <button role="tab" aria-selected={tab === item} key={item} onClick={() => onTab(item)}>
+            {item}
+          </button>
+        ))}
       </div>
       {tab === "Validasi" ? (
         <div className="inspector-content">
-          <div className="inspector-score"><span>82<small>%</small></span><div><strong>Kelengkapan bab</strong><p>3 pemeriksaan aktif</p></div></div>
-          <section><h3>Status bab</h3><div className="validation-item success"><Check aria-hidden="true" /><div><strong>Judul bab tersedia</strong><p>Struktur mengikuti template.</p></div></div><div className="validation-item success"><Check aria-hidden="true" /><div><strong>Langkah instalasi tersedia</strong><p>5 langkah terdokumentasi.</p></div></div><div className="validation-item warning"><AlertTriangle aria-hidden="true" /><div><strong>Tambahkan alt text final</strong><p>Teks saat ini masih berstatus demo.</p></div></div></section>
-          <section><h3>Asisten penulisan</h3><button className="ai-placeholder" disabled title="Asisten AI direncanakan untuk Phase 4"><Sparkles aria-hidden="true" /><span><strong>AI Assistant</strong><small>Tersedia pada Phase 4</small></span></button></section>
-          <div className="compliance-note"><Info aria-hidden="true" /><p>Skor ini mengukur kelengkapan dokumentasi, bukan persetujuan hukum atau regulator.</p></div>
+          <div className="inspector-score">
+            <span>
+              {progress}
+              <small>%</small>
+            </span>
+            <div>
+              <strong>Kelengkapan bab</strong>
+              <p>Ditandai manual (Phase 2)</p>
+            </div>
+          </div>
+          <section>
+            <h3>Status bab ini</h3>
+            <div className="chapter-status-buttons">
+              {(["incomplete", "in_progress", "complete", "issue"] as const).map((s) => (
+                <button
+                  key={s}
+                  className="secondary-button"
+                  data-active={section?.completionState === s}
+                  onClick={() => onSetCompletion(s)}
+                >
+                  {COMPLETION_LABEL[s]}
+                </button>
+              ))}
+            </div>
+            <p className="save-state" role="status">
+              <Save aria-hidden="true" size={14} /> {SAVE_STATE_LABEL[saveState]}
+            </p>
+          </section>
+          <section>
+            <h3>Asisten penulisan</h3>
+            <button className="ai-placeholder" disabled title="Asisten AI direncanakan untuk Phase 4">
+              <Sparkles aria-hidden="true" />
+              <span>
+                <strong>AI Assistant</strong>
+                <small>Tersedia pada Phase 4</small>
+              </span>
+            </button>
+          </section>
+          <div className="compliance-note">
+            <Info aria-hidden="true" />
+            <p>Skor ini mengukur kelengkapan dokumentasi, bukan persetujuan hukum atau regulator.</p>
+          </div>
         </div>
       ) : (
-        <div className="inspector-content metadata-list"><section><h3>Produk</h3><dl><div><dt>EA</dt><dd>VMax EA</dd></div><div><dt>Platform</dt><dd>MT5</dd></div><div><dt>Versi EA</dt><dd className="mono">1.0.0</dd></div><div><dt>Versi manual</dt><dd className="mono">1.0.0</dd></div></dl></section><section><h3>Kepemilikan</h3><dl><div><dt>Developer</dt><dd>Andi Setiawan</dd></div><div><dt>Organisasi</dt><dd>PT Smartin Advisor Sistem</dd></div></dl></section></div>
+        <div className="inspector-content metadata-list">
+          <section>
+            <h3>Produk</h3>
+            <dl>
+              <div>
+                <dt>EA</dt>
+                <dd>{identity.eaName}</dd>
+              </div>
+              <div>
+                <dt>Platform</dt>
+                <dd>{identity.platform}</dd>
+              </div>
+              <div>
+                <dt>Versi EA</dt>
+                <dd className="mono">{identity.eaVersion}</dd>
+              </div>
+              <div>
+                <dt>Versi manual</dt>
+                <dd className="mono">{identity.manualVersion}</dd>
+              </div>
+            </dl>
+          </section>
+          <section>
+            <h3>Kepemilikan</h3>
+            <dl>
+              <div>
+                <dt>Developer</dt>
+                <dd>{identity.developer ?? "—"}</dd>
+              </div>
+              <div>
+                <dt>Organisasi</dt>
+                <dd>{identity.organization}</dd>
+              </div>
+            </dl>
+          </section>
+        </div>
       )}
     </aside>
   );
 }
 
-export function ManualBuilder() {
-  const [selected, setSelected] = useState("installation");
+export function ManualBuilder({ vm }: { vm: ManualViewModel }) {
+  const identity = manualIdentity(vm);
+  const [selectedId, setSelectedId] = useState(vm.sections[0]?.id ?? "");
   const [mobilePanel, setMobilePanel] = useState<"chapters" | "inspector" | null>(null);
-  const [tab, setTab] = useState("Validasi");
+  const [tab, setTab] = useState<"Validasi" | "Metadata">("Validasi");
+  const [sections, setSections] = useState(vm.sections);
+  const [saveState, setSaveState] = useState<SaveState>("idle");
+  const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  useEffect(() => {
-    const saved = localStorage.getItem("smartin-builder-chapter");
-    if (!saved || !chapters.some((chapter) => chapter.id === saved)) return;
-    const frame = requestAnimationFrame(() => setSelected(saved));
-    return () => cancelAnimationFrame(frame);
-  }, []);
+  const section = useMemo(
+    () => sections.find((s) => s.id === selectedId) ?? sections[0],
+    [sections, selectedId],
+  );
 
-  function selectChapter(id: string) {
-    setSelected(id);
-    localStorage.setItem("smartin-builder-chapter", id);
+  const completedCount = sections.filter((s) => s.completionState === "complete").length;
+  const progress = sections.length ? Math.round((completedCount / sections.length) * 100) : 0;
+
+  /**
+   * Debounced autosave of the chapter completion state (Phase 2's small editable surface).
+   * The row_version-guarded UPDATE (features/manuals/autosave-actions.ts) is the real conflict
+   * mechanism: a stale write returns CONFLICT and we surface "Konflik perubahan" — never a
+   * silent overwrite (AC-P2-20). The full block editor + its autosave arrive in Phase 3.
+   */
+  function setCompletion(next: CompletionState) {
+    const target = section;
+    if (!target) return;
+    setSections((prev) => prev.map((s) => (s.id === target.id ? { ...s, completionState: next } : s)));
+    setSaveState("dirty");
+    if (debounce.current) clearTimeout(debounce.current);
+    debounce.current = setTimeout(() => {
+      setSaveState("saving");
+      void saveSection({
+        sectionId: target.id,
+        expectedRowVersion: target.rowVersion,
+        patch: { completionState: next },
+      }).then((result) => {
+        if (result.ok) {
+          const rv = result.data.rowVersion;
+          setSections((prev) => prev.map((s) => (s.id === target.id ? { ...s, rowVersion: rv } : s)));
+          setSaveState("saved");
+        } else if (result.code === "CONFLICT") {
+          setSaveState("conflict");
+        } else {
+          setSaveState("error");
+        }
+      });
+    }, DEFAULT_AUTOSAVE_DEBOUNCE_MS);
   }
-
-  const chapter = useMemo(() => chapters.find((item) => item.id === selected) ?? chapters[4], [selected]);
 
   return (
     <div className="builder-page">
       <header className="builder-topbar">
-        <div className="builder-breadcrumb"><Link href="/manuals">Manual Book</Link><ChevronRight aria-hidden="true" size={14} /><strong>VMax EA</strong><span className="status-badge" data-status="DRAFT">Draf</span></div>
-        <div className="save-state" role="status"><Save aria-hidden="true" size={15} /> Tersimpan barusan</div>
-        <div className="builder-top-actions"><Link className="secondary-button" href="/manuals/vmax-ea/preview"><Eye aria-hidden="true" size={17} /> Preview manual</Link><button className="primary-button" disabled title="Pengiriman review tersedia pada Phase 6">Kirim review</button></div>
+        <div className="builder-breadcrumb">
+          <Link href="/manuals">Manual Book</Link>
+          <ChevronRight aria-hidden="true" size={14} />
+          <strong>{identity.eaName}</strong>
+          <span className="status-badge" data-status={identity.status}>
+            {STATUS_LABELS[identity.status]}
+          </span>
+        </div>
+        <div className="save-state" role="status">
+          <Save aria-hidden="true" size={15} /> {SAVE_STATE_LABEL[saveState]}
+        </div>
+        <div className="builder-top-actions">
+          <Link className="secondary-button" href={`/manuals/${vm.manual.id}/preview`}>
+            <Eye aria-hidden="true" size={17} /> Preview manual
+          </Link>
+          <button className="primary-button" disabled title="Pengiriman review tersedia pada Phase 6">
+            Kirim review
+          </button>
+        </div>
       </header>
+
       <div className="builder-mobile-controls">
-        <button className="secondary-button" onClick={() => setMobilePanel("chapters")}><PanelLeft aria-hidden="true" size={17} /> Bab</button>
-        <span>{chapter.number}. {chapter.title}</span>
-        <button className="secondary-button" onClick={() => setMobilePanel("inspector")}><PanelRight aria-hidden="true" size={17} /> Inspector</button>
+        <button className="secondary-button" onClick={() => setMobilePanel("chapters")}>
+          <PanelLeft aria-hidden="true" size={17} /> Bab
+        </button>
+        <span>
+          {section?.position}. {section?.title}
+        </span>
+        <button className="secondary-button" onClick={() => setMobilePanel("inspector")}>
+          <PanelRight aria-hidden="true" size={17} /> Inspector
+        </button>
       </div>
+
       <div className="builder-grid">
-        <div className="builder-chapters-desktop"><ChapterPanel selected={selected} onSelect={selectChapter} /></div>
+        <div className="builder-chapters-desktop">
+          <ChapterPanel
+            sections={sections}
+            selectedId={selectedId}
+            progress={progress}
+            completedCount={completedCount}
+            onSelect={setSelectedId}
+          />
+        </div>
         <section className="editor-workspace" aria-labelledby="chapter-title">
-          <div className="editor-toolbar"><div><p className="eyebrow">BAB {chapter.number.padStart(2, "0")}</p><h1 id="chapter-title">{chapter.title}</h1></div><div><span className="block-count"><FileText aria-hidden="true" size={15} /> {chapter.id === "installation" ? "9 blok" : chapter.id === "parameters" ? "5 blok" : "3 blok"}</span><button className="secondary-button" disabled title="Block editor tersedia pada Phase 3">Tambah blok</button></div></div>
-          <div className="editor-canvas"><ManualChapterContent chapter={chapter} /></div>
+          <div className="editor-toolbar">
+            <div>
+              <p className="eyebrow">BAB {String(section?.position ?? 0).padStart(2, "0")}</p>
+              <h1 id="chapter-title">{section?.title}</h1>
+            </div>
+            <div>
+              <span className="block-count">
+                <FileText aria-hidden="true" size={15} /> {section?.blocks.length ?? 0} blok
+              </span>
+              <button className="secondary-button" disabled title="Block editor tersedia pada Phase 3">
+                Tambah blok
+              </button>
+            </div>
+          </div>
+          <div className="editor-canvas">{section && <SectionContent section={section} vm={vm} />}</div>
         </section>
-        <div className="builder-inspector-desktop"><Inspector tab={tab} setTab={setTab} /></div>
+        <div className="builder-inspector-desktop">
+          <Inspector
+            identity={identity}
+            section={section}
+            progress={progress}
+            saveState={saveState}
+            tab={tab}
+            onTab={setTab}
+            onSetCompletion={setCompletion}
+          />
+        </div>
       </div>
-      {mobilePanel && <div className="panel-drawer-layer"><button className="drawer-scrim" aria-label="Tutup panel" onClick={() => setMobilePanel(null)} />{mobilePanel === "chapters" ? <ChapterPanel selected={selected} onSelect={selectChapter} close={() => setMobilePanel(null)} /> : <Inspector tab={tab} setTab={setTab} close={() => setMobilePanel(null)} />}</div>}
+
+      {mobilePanel && (
+        <div className="panel-drawer-layer">
+          <button className="drawer-scrim" aria-label="Tutup panel" onClick={() => setMobilePanel(null)} />
+          {mobilePanel === "chapters" ? (
+            <ChapterPanel
+              sections={sections}
+              selectedId={selectedId}
+              progress={progress}
+              completedCount={completedCount}
+              onSelect={setSelectedId}
+              onClose={() => setMobilePanel(null)}
+            />
+          ) : (
+            <Inspector
+              identity={identity}
+              section={section}
+              progress={progress}
+              saveState={saveState}
+              tab={tab}
+              onTab={setTab}
+              onSetCompletion={setCompletion}
+              onClose={() => setMobilePanel(null)}
+            />
+          )}
+        </div>
+      )}
     </div>
   );
 }

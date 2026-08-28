@@ -1,0 +1,22 @@
+# Supabase local development config. `supabase start` provisions a full local stack;
+# `supabase db reset` replays supabase/migrations/*.sql then supabase/seed.sql.
+# A clean project is reproducible from this repository (spec §6).
+project_id = "smartin-manual-builder"
+
+[db]
+major_version = 15
+
+[auth]
+enable_signup = true
+# Phase 2 uses email + password. Email confirmations are disabled locally so the seeded
+# demo users can sign in immediately; enable them in hosted environments.
+[auth.email]
+enable_confirmations = false
+
+[storage]
+enabled = true
+
+[storage.buckets.manual-images]
+public = false
+file_size_limit = "10MiB"
+allowed_mime_types = ["image/png", "image/jpeg", "image/webp", "image/gif"]

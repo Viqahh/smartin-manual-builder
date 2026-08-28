@@ -20,6 +20,16 @@ import {
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
+import { SignOutButton } from "@/app/login/sign-out-button";
+
+const ROLE_LABEL: Record<string, string> = {
+  DEVELOPER: "Developer",
+  TECHNICAL_REVIEWER: "Technical Reviewer",
+  COMPLIANCE_REVIEWER: "Compliance Reviewer",
+  ADMIN: "Admin",
+};
+
+export type ShellUser = { displayName: string; role: string } | null;
 
 const navGroups = [
   {
@@ -52,15 +62,28 @@ const navGroups = [
   },
 ];
 
-function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
+function Sidebar({
+  onNavigate,
+  user,
+  orgName,
+}: {
+  onNavigate?: () => void;
+  user: ShellUser;
+  orgName: string | null;
+}) {
   const pathname = usePathname();
+  const initials = (user?.displayName ?? "S M")
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((w) => w[0]?.toUpperCase() ?? "")
+    .join("");
   return (
     <aside className="sidebar" aria-label="Navigasi utama">
       <div className="brand-lockup">
         <span className="brand-mark" aria-hidden="true">S</span>
         <span>
           <strong>SMARTIN</strong>
-          <small>Manual Builder</small>
+          <small>{orgName ?? "Manual Builder"}</small>
         </span>
       </div>
       <nav className="sidebar-nav">
@@ -91,20 +114,40 @@ function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
           <Settings aria-hidden="true" size={18} strokeWidth={1.8} />
           Pengaturan
         </Link>
-        <div className="sidebar-user">
-          <span className="avatar">AS</span>
-          <span>
-            <strong>Andi Setiawan</strong>
-            <small>Developer</small>
-          </span>
-          <ChevronDown aria-hidden="true" size={16} />
-        </div>
+        {user ? (
+          <div className="sidebar-user">
+            <span className="avatar">{initials || "S"}</span>
+            <span>
+              <strong>{user.displayName}</strong>
+              <small>{ROLE_LABEL[user.role] ?? user.role}</small>
+            </span>
+            <SignOutButton className="icon-button" />
+          </div>
+        ) : (
+          <div className="sidebar-user">
+            <span className="avatar" aria-hidden="true">
+              <ChevronDown size={16} />
+            </span>
+            <span>
+              <strong>Belum masuk</strong>
+              <small>Mode setup</small>
+            </span>
+          </div>
+        )}
       </div>
     </aside>
   );
 }
 
-export function AppShell({ children }: { children: React.ReactNode }) {
+export function AppShell({
+  children,
+  user,
+  orgName,
+}: {
+  children: React.ReactNode;
+  user: ShellUser;
+  orgName: string | null;
+}) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
 
@@ -118,7 +161,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <div className="app-frame">
       <a className="skip-link" href="#main-content">Lewati ke konten utama</a>
-      <div className="desktop-sidebar"><Sidebar /></div>
+      <div className="desktop-sidebar"><Sidebar user={user} orgName={orgName} /></div>
       {menuOpen && (
         <div className="drawer-layer" role="presentation">
           <button className="drawer-scrim" aria-label="Tutup navigasi" onClick={() => setMenuOpen(false)} />
@@ -126,7 +169,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <button className="icon-button drawer-close" aria-label="Tutup navigasi" onClick={() => setMenuOpen(false)}>
               <X aria-hidden="true" size={20} />
             </button>
-            <Sidebar onNavigate={() => setMenuOpen(false)} />
+            <Sidebar onNavigate={() => setMenuOpen(false)} user={user} orgName={orgName} />
           </div>
         </div>
       )}

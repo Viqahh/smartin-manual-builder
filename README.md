@@ -4,7 +4,11 @@ Architecture-first repository for **PT Smartin Advisor Sistem's EA Developer Too
 
 ## Current delivery
 
-**Phase 1 — UI Foundation is complete.** The application is a production-quality mocked interface with no database, real authentication, rich-text editor, AI, or publishing backend yet.
+**Phase 2 — Data & CRUD is implemented** (Supabase Postgres + Auth + Storage, RLS, organisation/role model, EA product/version/supported-configuration/parameter CRUD, manual + manual-version + section + block persistence, private image upload, real dynamic manual routing, action-based server authorization, `row_version` autosave with conflict handling, unit tests, CI). `lint`, `typecheck`, `test`, and `build` all pass.
+
+Live-Supabase acceptance tests (auth sign-in, CRUD round-trips, RLS enforcement, the Polaris / parameter-ownership / cross-org scenarios) are **BLOCKED BY EXTERNAL CREDENTIALS** in the build environment and are not yet signed off — see [`docs/PHASE_2.md`](docs/PHASE_2.md). Phase 3 (document editor) has not started.
+
+Phase 1 (mocked UI foundation) is recorded in [`docs/PHASE_1.md`](docs/PHASE_1.md).
 
 ## Documentation
 
@@ -32,16 +36,44 @@ The documentation is split into a **Product** layer (what the product is and mus
 | [Dependencies](docs/DEPENDENCIES.md) | Per-phase runtime and dev dependency policy, environment contract, explicit non-dependencies. |
 | [Implementation Plan](docs/IMPLEMENTATION_PLAN.md) | Phase 0–8 roadmap, phase-gate policy, principal risks and mitigations. |
 | [Phase 1 completion report](docs/PHASE_1.md) | Delivered scope and acceptance verification for the UI foundation. |
+| [Phase 2 completion report](docs/PHASE_2.md) | Delivered scope, schema/migrations, ownership model, auth/RLS, autosave strategy, acceptance-criteria results, known limitations, external-credential limitations. |
 | [Design System](design-system/smartin-manual-builder/MASTER.md) | Colour, type, spacing, component specs, motion, anti-patterns, pre-delivery checklist. |
 
 ## Run locally
 
 ```bash
 npm install
+```
+
+### Without Supabase
+
+```bash
 npm run dev
 ```
 
-Open `http://localhost:3000`. The mocked wizard and selected builder chapter persist in browser storage.
+Open `http://localhost:3000`. The app boots; `/api/health` reports `ready:false` and the workspace shows a "Supabase belum dikonfigurasi" panel. `/login` and static routes work.
+
+### With Supabase (the real data path)
+
+1. `cp .env.example .env.local` and fill in `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_SECRET_KEY`, `APP_URL`. Never commit `.env.local`.
+2. Apply the schema + seed:
+   ```bash
+   # local stack (needs Docker + the supabase CLI)
+   supabase start
+   supabase db reset            # replays supabase/migrations/ then supabase/seed.sql
+   # OR hosted
+   supabase link --project-ref <ref> && supabase db push
+   ```
+3. `npm run dev`. Sign in with a seeded demo user (`developer@smartin.demo` / `demo-password-123`, local only).
+
+### Checks
+
+```bash
+npm run lint
+npm run typecheck
+npm run test        # 39 unit tests; RLS integration tests are credential-gated
+npm run build
+```
 
 ## Product guardrails
 
@@ -54,4 +86,4 @@ Open `http://localhost:3000`. The mocked wizard and selected builder chapter per
 
 ## Next step
 
-Phase 2 remains blocked pending explicit approval. It will introduce Supabase data/auth/storage and CRUD according to the committed architecture.
+Phase 2 awaits a live-Supabase verification pass (see `docs/PHASE_2.md` §14) and explicit review/approval before Phase 3 (document editor) begins.
