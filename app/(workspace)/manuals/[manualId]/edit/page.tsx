@@ -6,6 +6,7 @@ import { SupabaseManualDataSource } from "@/features/manuals/data-source";
 import { assembleManualViewModel } from "@/lib/manual/view-model";
 import { listOrgImages } from "@/features/images/queries";
 import { listParameterGroups } from "@/features/parameters/queries";
+import { currentProviderMode } from "@/lib/ai/providers";
 
 export const dynamic = "force-dynamic";
 
@@ -37,6 +38,7 @@ export default async function ManualBuilderPage({
       canEdit={canEdit}
       images={images}
       groups={groups.map((g) => ({ id: g.id, name: g.name, count: g.parameters.length }))}
+      aiProviderMode={currentProviderMode()}
     />
   );
 }

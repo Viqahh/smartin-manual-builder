@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertTriangle, Check, ChevronRight, Circle, Eye, Info, PanelLeft, PanelRight, Save, Sparkles, X } from "lucide-react";
+import { AlertTriangle, Check, ChevronRight, Circle, Eye, Info, PanelLeft, PanelRight, Save, X } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { manualIdentity, type ManualViewModel } from "@/lib/manual/view-model";
@@ -8,8 +8,9 @@ import { STATUS_LABELS } from "./manual-table";
 import { SAVE_STATE_LABEL, type SaveState } from "@/lib/domain/autosave";
 import { saveSection } from "./autosave-actions";
 import { ChapterNav } from "./editor/chapter-nav";
-import { SectionEditor } from "./editor/section-editor";
+import { SectionEditor, type AiBlockTarget, type SectionEditorHandle } from "./editor/section-editor";
 import type { BlockEditorCtx } from "./editor/block-editors";
+import { AiPanel } from "@/features/ai/ai-panel";
 import { createAutosaveQueue, type SaveOutcome } from "@/lib/editor/autosave-queue";
 import {
   addCustomSection,
@@ -47,6 +48,11 @@ function Inspector({
   tab,
   canEdit,
   completionBlockers,
+  aiProviderMode,
+  manualId,
+  aiTarget,
+  aiApplyState,
+  editorRef,
   onTab,
   onSetCompletion,
   onClose,
@@ -58,6 +64,11 @@ function Inspector({
   tab: "Validasi" | "Metadata";
   canEdit: boolean;
   completionBlockers: string[];
+  aiProviderMode: "mock" | "configured" | "config-error";
+  manualId: string;
+  aiTarget: AiBlockTarget | null;
+  aiApplyState: SaveState | null;
+  editorRef: React.RefObject<SectionEditorHandle | null>;
   onTab: (t: "Validasi" | "Metadata") => void;
   onSetCompletion: (s: CompletionState) => void;
   onClose?: () => void;
@@ -126,16 +137,17 @@ function Inspector({
               </p>
             )}
           </section>
-          <section>
-            <h3>Asisten penulisan</h3>
-            <button className="ai-placeholder" disabled title="Asisten AI direncanakan untuk Phase 4">
-              <Sparkles aria-hidden="true" />
-              <span>
-                <strong>AI Assistant</strong>
-                <small>Tersedia pada Phase 4</small>
-              </span>
-            </button>
-          </section>
+          {section && (
+            <AiPanel
+              providerMode={aiProviderMode}
+              canEdit={canEdit}
+              manualId={manualId}
+              sectionId={section.id}
+              target={aiTarget}
+              applyState={aiApplyState}
+              editorRef={editorRef}
+            />
+          )}
           <div className="compliance-note">
             <Info aria-hidden="true" />
             <p>Skor ini mengukur kelengkapan dokumentasi, bukan persetujuan hukum atau regulator.</p>
@@ -188,11 +200,13 @@ export function ManualBuilder({
   canEdit = false,
   images: initialImages = [],
   groups = [],
+  aiProviderMode = "mock",
 }: {
   vm: ManualViewModel;
   canEdit?: boolean;
   images?: OrgImage[];
   groups?: { id: string; name: string; count: number }[];
+  aiProviderMode?: "mock" | "configured" | "config-error";
 }) {
   const identity = manualIdentity(vm);
   const [sections, setSections] = useState(vm.sections);
@@ -201,11 +215,23 @@ export function ManualBuilder({
   const [tab, setTab] = useState<"Validasi" | "Metadata">("Validasi");
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [images, setImages] = useState<OrgImage[]>(initialImages);
+  const sectionEditorRef = useRef<SectionEditorHandle | null>(null);
+  const [aiTarget, setAiTarget] = useState<AiBlockTarget | null>(null);
+  const [aiApplyState, setAiApplyState] = useState<SaveState | null>(null);
   const [blockCounts, setBlockCounts] = useState<Record<string, number>>(() =>
     Object.fromEntries(vm.sections.map((s) => [s.id, s.blocks.length])),
   );
   const section = useMemo(() => sections.find((s) => s.id === selectedId) ?? sections[0], [sections, selectedId]);
   const sectionId = section?.id ?? "";
+
+  // the AI target belongs to the mounted SectionEditor — drop it when the chapter changes
+  // (store-previous-prop render-phase reset; see react.dev "You Might Not Need an Effect")
+  const [aiTargetSection, setAiTargetSection] = useState(selectedId);
+  if (aiTargetSection !== selectedId) {
+    setAiTargetSection(selectedId);
+    setAiTarget(null);
+    setAiApplyState(null);
+  }
 
   // stable + idempotent: never re-set state to the same count (prevents an update loop)
   const handleBlocksChanged = useCallback(
@@ -495,11 +521,14 @@ export function ManualBuilder({
           {section && (
             <SectionEditor
               key={section.id}
+              ref={sectionEditorRef}
               section={section}
               vm={vm}
               canEdit={canEdit}
               ctx={editorCtx}
               onBlocksChanged={handleBlocksChanged}
+              onAiTargetChange={setAiTarget}
+              onAiApplyStateChange={setAiApplyState}
             />
           )}
         </section>
@@ -513,6 +542,11 @@ export function ManualBuilder({
             tab={tab}
             canEdit={canEdit}
             completionBlockers={completionBlockers}
+            aiProviderMode={aiProviderMode}
+            manualId={vm.manual.id}
+            aiTarget={aiTarget}
+            aiApplyState={aiApplyState}
+            editorRef={sectionEditorRef}
             onTab={setTab}
             onSetCompletion={setCompletion}
           />
@@ -533,6 +567,11 @@ export function ManualBuilder({
               tab={tab}
               canEdit={canEdit}
               completionBlockers={completionBlockers}
+              aiProviderMode={aiProviderMode}
+              manualId={vm.manual.id}
+              aiTarget={aiTarget}
+              aiApplyState={aiApplyState}
+              editorRef={sectionEditorRef}
               onTab={setTab}
               onSetCompletion={setCompletion}
               onClose={() => setMobilePanel(null)}

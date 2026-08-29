@@ -1286,3 +1286,110 @@ describe.skipIf(!HAS_SERVICE)("Phase 3 — parameter definition edits propagate 
     expect(restored.default_value).toBe(fl0.default_value);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 4 — ai_revisions RLS + idempotency (spec §21, §22, §31, AC-P4-9/10)
+//
+// read  = any active member of the org           (reviewers included, read-only)
+// write = app.can_author(org) AND actor_id = uid  (DEVELOPER / ADMIN only)
+// no delete policy; anon cannot touch the table; a partial unique index enforces
+// "at most one PENDING proposal per (manual_version_id, input_hash)".
+// ---------------------------------------------------------------------------
+describe.skipIf(!HAS_API)("Phase 4 — ai_revisions RLS + idempotency", () => {
+  const MARK = `test:ai-rls:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+  let dev: SupabaseClient;
+  let technical: SupabaseClient;
+  let compliance: SupabaseClient;
+  let outsider: SupabaseClient;
+  let anon: SupabaseClient;
+  let devUid = "";
+
+  const baseRow = (over: Record<string, unknown> = {}) => ({
+    organization_id: ORG_A,
+    manual_version_id: VMAX_MV,
+    section_id: null,
+    block_id: null,
+    target_field: "content",
+    operation: "improveText",
+    input_hash: MARK,
+    locale: "id",
+    status: "PROPOSAL",
+    proposed_output: { kind: "text", text: "Pasang file EX5 ke folder Experts." },
+    provider: "mock",
+    ...over,
+  });
+
+  beforeAll(async () => {
+    anon = createClient(URL!, ANON!);
+    dev = await signIn("developer@smartin.demo");
+    technical = await signIn("reviewer@smartin.demo");
+    compliance = await signIn("compliance@smartin.demo");
+    outsider = await signIn("outsider@smartin.demo");
+    devUid = (await dev.auth.getUser()).data.user!.id;
+  });
+
+  afterAll(async () => {
+    // data hygiene (§38): remove every row this suite created; assert it is gone
+    const svc = service();
+    await svc.from("ai_revisions").delete().eq("input_hash", MARK);
+    const { data } = await svc.from("ai_revisions").select("id").eq("input_hash", MARK);
+    expect(data ?? [], "ai_revisions test rows cleaned up").toHaveLength(0);
+  });
+
+  it("anon cannot insert, update, or read ai_revisions", async () => {
+    const ins = await anon.from("ai_revisions").insert(baseRow({ actor_id: null }));
+    expect(ins.error, "anon insert denied").toBeTruthy();
+    const upd = await anon.from("ai_revisions").update({ decision: "ACCEPTED" }).eq("input_hash", MARK).select("id");
+    expect(upd.data ?? [], "anon update no-op").toHaveLength(0);
+    const sel = await anon.from("ai_revisions").select("id").eq("input_hash", MARK);
+    expect(sel.data ?? [], "anon select empty").toHaveLength(0);
+  });
+
+  it("a reviewer (technical / compliance) cannot insert an ai_revisions row", async () => {
+    for (const c of [technical, compliance]) {
+      const uid = (await c.auth.getUser()).data.user!.id;
+      const { error } = await c.from("ai_revisions").insert(baseRow({ actor_id: uid }));
+      expect(error, "reviewer insert denied by RLS").toBeTruthy();
+    }
+  });
+
+  it("a DEVELOPER can insert their own PROPOSAL, and the PENDING dedup index blocks a duplicate", async () => {
+    const first = await dev.from("ai_revisions").insert(baseRow({ actor_id: devUid })).select("id, decision").single();
+    expect(first.error, "developer insert ok").toBeNull();
+    expect(first.data?.decision).toBe("PENDING");
+
+    // identical (manual_version_id, input_hash) while still PENDING -> unique-index violation
+    const dup = await dev.from("ai_revisions").insert(baseRow({ actor_id: devUid }));
+    expect(dup.error, "duplicate PENDING proposal rejected").toBeTruthy();
+    expect(dup.error?.code, "unique_violation").toBe("23505");
+
+    // the developer can record a decision on their own row
+    const decided = await dev
+      .from("ai_revisions")
+      .update({ decision: "REJECTED", decided_at: new Date().toISOString() })
+      .eq("id", first.data!.id)
+      .select("decision")
+      .single();
+    expect(decided.error).toBeNull();
+    expect(decided.data?.decision).toBe("REJECTED");
+
+    // once it is no longer PENDING, an identical request may create a fresh proposal
+    const reissue = await dev.from("ai_revisions").insert(baseRow({ actor_id: devUid })).select("id").single();
+    expect(reissue.error, "re-issue after decision allowed").toBeNull();
+  });
+
+  it("a reviewer can READ the org's ai_revisions audit (read-only)", async () => {
+    const { data, error } = await technical.from("ai_revisions").select("id, operation").eq("input_hash", MARK);
+    expect(error).toBeNull();
+    expect((data ?? []).length, "reviewer sees the audit rows").toBeGreaterThan(0);
+  });
+
+  it("an outsider (org B) can neither read nor write org A's ai_revisions", async () => {
+    const sel = await outsider.from("ai_revisions").select("id").eq("input_hash", MARK);
+    expect(sel.data ?? [], "org B reads none of org A's rows").toHaveLength(0);
+
+    const outUid = (await outsider.auth.getUser()).data.user!.id;
+    const ins = await outsider.from("ai_revisions").insert(baseRow({ actor_id: outUid }));
+    expect(ins.error, "org B insert into org A denied").toBeTruthy();
+  });
+});

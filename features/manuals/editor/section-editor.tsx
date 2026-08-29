@@ -1,6 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
+import { richTextFromParagraphs, richTextToPlainText } from "@/lib/domain/rich-text";
+import type { ProposalOutput, TargetField } from "@/lib/ai/types";
 import {
   ChevronDown,
   Copy,
@@ -83,19 +85,79 @@ function toSnapshot(blocks: EBlock[]): Snapshot {
   return blocks.map((b) => ({ key: b.key, id: b.id, type: b.type, payload: b.payload, rowVersion: b.rowVersion }));
 }
 
-export function SectionEditor({
-  section,
-  vm,
-  canEdit,
-  ctx,
-  onBlocksChanged,
-}: {
+/** The AI-eligible block currently focused in the editor (drives the inspector AI panel). */
+export type AiBlockTarget = {
+  blockKey: string;
+  blockId: string | null;
+  blockType: "text" | "steps" | "image" | "callout" | "faq";
+  targetField: TargetField;
+  /** plain text of the target field — becomes `selectedText` in the GroundedRequest */
+  selectedText: string;
+  /** canonical hash of the block payload at focus time — for stale-target detection on Accept */
+  payloadHash: string;
+};
+
+export type SectionEditorHandle = {
+  /** Apply an accepted AI proposal to a block through the normal autosave/history pipeline. */
+  applyProposal: (
+    blockKey: string,
+    targetField: TargetField,
+    output: ProposalOutput,
+  ) => { ok: true; changed: boolean } | { ok: false; reason: "not-found" | "invalid" | "stale" };
+  /** Canonical hash of a block's current payload (stale-target guard, §18). */
+  blockPayloadHash: (blockKey: string) => string | null;
+};
+
+type SectionEditorProps = {
   section: Section;
   vm: ManualViewModel;
   canEdit: boolean;
   ctx: BlockEditorCtx;
   onBlocksChanged: (count: number) => void;
-}) {
+  onAiTargetChange?: (target: AiBlockTarget | null) => void;
+  /** Live per-block autosave state for the block an AI proposal was last applied to (§17). */
+  onAiApplyStateChange?: (state: SaveState | null) => void;
+};
+
+function targetFieldFor(type: AiBlockTarget["blockType"]): TargetField {
+  if (type === "faq") return "answer";
+  if (type === "image") return "caption";
+  if (type === "steps") return "steps";
+  return "content";
+}
+
+function blockSelectedText(type: string, payload: Record<string, unknown>): string {
+  switch (type) {
+    case "text":
+    case "callout":
+      return safeRichPlain(payload.content);
+    case "faq":
+      return safeRichPlain(payload.answer);
+    case "image":
+      return typeof payload.caption === "string" ? payload.caption : "";
+    case "steps": {
+      const steps = Array.isArray(payload.steps) ? (payload.steps as Record<string, unknown>[]) : [];
+      return steps
+        .map((s) => [s.title, s.instruction, s.menuPath].filter((x) => typeof x === "string" && x).join(" — "))
+        .join("\n");
+    }
+    default:
+      return "";
+  }
+}
+function safeRichPlain(v: unknown): string {
+  try {
+    if (v && typeof v === "object") return richTextToPlainText(v as never);
+  } catch {
+    /* ignore */
+  }
+  return "";
+}
+
+export const SectionEditor = forwardRef<SectionEditorHandle, SectionEditorProps>(function SectionEditor(
+  { section, vm, canEdit, ctx, onBlocksChanged, onAiTargetChange, onAiApplyStateChange },
+  ref,
+) {
   const initial: EBlock[] = useMemo(
     () =>
       section.blocks.map((b) => ({
@@ -115,6 +177,9 @@ export function SectionEditor({
   const [addOpen, setAddOpen] = useState(false);
   const [deletedCount, setDeletedCount] = useState(0);
   const [conflict, setConflict] = useState<{ key: string; serverRowVersion: number; serverPayload: unknown } | null>(null);
+  // the block an accepted AI proposal was last applied to — its autosave state is mirrored to
+  // the inspector AI panel so "Menyimpan… → Tersimpan" is the real Phase 3 result (§17).
+  const aiApplyKey = useRef<string | null>(null);
   const deletedStash = useRef<Map<string, EBlock>>(new Map());
   const stashDelete = (id: string, b: EBlock) => {
     deletedStash.current.set(id, b);
@@ -240,8 +305,10 @@ export function SectionEditor({
       if (state === "conflict" && extra?.serverRowVersion != null) {
         setConflict({ key, serverRowVersion: extra.serverRowVersion, serverPayload: extra.serverPayload });
       }
+      // mirror the AI-applied block's real persistence state to the inspector panel (§17)
+      if (aiApplyKey.current === key) onAiApplyStateChange?.(state as SaveState);
     },
-    [],
+    [onAiApplyStateChange],
   );
 
   const onSaveVersion = useCallback((key: string, rowVersion: number) => {
@@ -251,7 +318,6 @@ export function SectionEditor({
   // `createAutosaveQueue` only STORES these handlers — it never invokes them during construction,
   // so nothing reads a ref during render. Handlers are stable useCallbacks keyed on `section.id`
   // (which is stable for this component instance — <SectionEditor key={section.id}>).
-  // eslint-disable-next-line react-hooks/refs
   const [saver] = useState(() =>
     createAutosaveQueue<Record<string, unknown>>({
       debounceMs: 800,
@@ -292,6 +358,9 @@ export function SectionEditor({
     );
   }, [section.id, saver]);
 
+  // the block whose editor currently holds focus — so a keystroke edit can refresh the AI target
+  const aiTargetKey = useRef<string | null>(null);
+
   const changePayload = useCallback(
     (key: string, payload: Record<string, unknown>) => {
       // Ignore a no-op change (a rich-text editor re-normalising identical content on remount —
@@ -300,8 +369,111 @@ export function SectionEditor({
       if (current && payloadsEqual(current.payload, payload)) return;
       setBlocks((prev) => prev.map((x) => (x.key === key ? { ...x, payload, save: "dirty" as SaveState } : x)));
       saver.queue(key, payload, currentRv(key));
+      // keep the inspector AI target in step with what the developer is typing
+      if (aiTargetKey.current === key) reportAiTarget(key, payload, current?.type);
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [saver, currentRv],
+  );
+
+  // ---------------------------------------------------------------- AI assistant bridge
+  /** Report the focused AI-eligible block to the inspector panel (§17/§24). */
+  const reportAiTarget = useCallback(
+    (blockKey: string, payloadOverride?: Record<string, unknown>, typeOverride?: BlockType) => {
+      if (!onAiTargetChange) return;
+      const b = blocksRef.current.find((x) => x.key === blockKey);
+      const type = (typeOverride ?? b?.type) as BlockType | undefined;
+      if (!b || !type || type === "parameterTable") {
+        aiTargetKey.current = null;
+        onAiTargetChange(null);
+        return;
+      }
+      const payload = payloadOverride ?? b.payload;
+      const t = type as AiBlockTarget["blockType"];
+      aiTargetKey.current = blockKey;
+      onAiTargetChange({
+        blockKey: b.key,
+        blockId: b.id,
+        blockType: t,
+        targetField: targetFieldFor(t),
+        selectedText: blockSelectedText(t, payload),
+        payloadHash: stableStringify(payload),
+      });
+    },
+    [onAiTargetChange],
+  );
+  /**
+   * The AI target is "sticky": it follows the last AI-eligible block the developer focused and
+   * is only replaced when another block is focused (`reportAiTarget`), the targeted block is
+   * removed, or the chapter changes (parent clears on `selectedId`). It is NOT cleared on plain
+   * blur — clicking an operation button in the inspector necessarily blurs the editor, and the
+   * Accept path re-checks the block payload hash for staleness anyway (§18).
+   */
+  const clearAiTargetIfBlock = useCallback(
+    (blockKey: string) => {
+      if (aiTargetKey.current === blockKey) {
+        aiTargetKey.current = null;
+        onAiTargetChange?.(null);
+      }
+      if (aiApplyKey.current === blockKey) {
+        aiApplyKey.current = null;
+        onAiApplyStateChange?.(null);
+      }
+    },
+    [onAiTargetChange, onAiApplyStateChange],
+  );
+
+  useImperativeHandle(
+    ref,
+    (): SectionEditorHandle => ({
+      blockPayloadHash: (blockKey) => {
+        const b = blocksRef.current.find((x) => x.key === blockKey);
+        return b ? stableStringify(b.payload) : null;
+      },
+      applyProposal: (blockKey, targetField, output) => {
+        const b = blocksRef.current.find((x) => x.key === blockKey);
+        if (!b) return { ok: false, reason: "not-found" };
+
+        let nextPayload: Record<string, unknown>;
+        let nextType = b.type as BlockType;
+        if (output.kind === "text") {
+          const doc = richTextFromParagraphs(output.text.split(/\n/).map((l) => l.trim())).doc;
+          if (b.type === "callout") {
+            nextPayload = { type: "callout", schemaVersion: 1, tone: (b.payload.tone as string) ?? "info", content: { schemaVersion: 2, format: "doc", doc } };
+          } else if (b.type === "faq" && targetField === "answer") {
+            nextPayload = { type: "faq", schemaVersion: 1, question: (b.payload.question as string) ?? "", answer: { schemaVersion: 2, format: "doc", doc } };
+          } else {
+            nextPayload = { type: "text", schemaVersion: 1, content: { schemaVersion: 2, format: "doc", doc } };
+            nextType = "text";
+          }
+        } else if (output.kind === "caption") {
+          if (b.type !== "image" || typeof b.payload.imageAssetId !== "string") return { ok: false, reason: "invalid" };
+          nextPayload = { type: "image", schemaVersion: 1, imageAssetId: b.payload.imageAssetId, caption: output.caption };
+        } else {
+          // steps — convert the block into (or refine) a steps block
+          nextPayload = { type: "steps", schemaVersion: 1, steps: output.steps.map((s) => ({ title: s.title, instruction: s.instruction, ...(s.menuPath ? { menuPath: s.menuPath } : {}) })) };
+          nextType = "steps";
+        }
+
+        if (!parseBlockPayload(nextPayload).ok) return { ok: false, reason: "invalid" };
+        if (payloadsEqual(b.payload, nextPayload)) return { ok: true, changed: false };
+
+        // Accepting a proposal is an EDIT (§19): apply optimistically, record ONE undo step for
+        // the pre-AI state, then persist through the normal single-flight autosave queue. Undo
+        // restores the pre-AI text; Redo re-applies the accepted proposal.
+        const next = blocksRef.current.map((x) =>
+          x.key === blockKey ? { ...x, type: nextType, payload: nextPayload, save: "dirty" as SaveState } : x,
+        );
+        setBlocks(next);
+        pushSnapshot(next);
+        // track this block so its autosave transitions reach the inspector AI panel
+        aiApplyKey.current = blockKey;
+        onAiApplyStateChange?.("dirty");
+        saver.queue(blockKey, nextPayload, currentRv(blockKey), true);
+        return { ok: true, changed: true };
+      },
+    }),
+    [saver, currentRv, pushSnapshot, onAiApplyStateChange],
   );
 
   useEffect(() => () => saver.dispose(), [saver]);
@@ -344,6 +516,7 @@ export function SectionEditor({
       if (!b) return;
       cancelTimer(key); // drop any queued save for an unsaved block
       setConflict((c) => (c?.key === key ? null : c));
+      clearAiTargetIfBlock(key); // don't leave the inspector pointed at a removed block
       const next = blocksRef.current.filter((x) => x.key !== key);
       setBlocks(next);
       pushSnapshot(next); // POST-delete state — undo restores it, redo removes it again
@@ -353,7 +526,7 @@ export function SectionEditor({
         void softDeleteBlock({ blockId: b.id });
       }
     },
-    [cancelTimer, pushSnapshot, rememberId],
+    [cancelTimer, pushSnapshot, rememberId, clearAiTargetIfBlock],
   );
 
   const restoreLast = useCallback(() => {
@@ -630,6 +803,7 @@ export function SectionEditor({
                 className="block-item"
                 data-save={b.save}
                 data-dragover={dragOver === i}
+                onFocusCapture={() => reportAiTarget(b.key)}
                 onDragOver={(e) => {
                   if (dragFrom.current === null) return;
                   e.preventDefault();
@@ -726,4 +900,4 @@ export function SectionEditor({
       </div>
     </div>
   );
-}
+});
