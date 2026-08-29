@@ -11,6 +11,21 @@ export const eaVersionRequirementsSchema = z.object({
   webRequest: z.boolean().default(false),
   customIndicators: z.array(z.string().max(200)).max(40).default([]),
   volumeConstraints: z.string().trim().max(1000).default(""),
+  /**
+   * Explicit legal-scope flag (Phase 5, PRD-OQ-011). Never derived from locale / broker /
+   * currency / EA name — an organisation records it deliberately. Default IN_SCOPE so
+   * Bappebti checks apply unless someone opts a purely offshore EA out.
+   */
+  pbkScope: z.enum(["IN_SCOPE", "OUT_OF_SCOPE"]).default("IN_SCOPE"),
+  /** EA declares a high-risk operating mode (martingale / unbounded grid / recovery). */
+  dangerMode: z.boolean().default(false),
+  /** EA declares an on-chart GUI / panel — drives CHK-INTERFACE applicability (Phase 5). */
+  gui: z.boolean().default(false),
+  /**
+   * Verified feature names the manual must explain (Pasal 4(3) / CHK-FITUR-DIJELASKAN). Empty =
+   * the check is NOT_APPLICABLE. Never inferred — an organisation records it deliberately.
+   */
+  verifiedFeatures: z.array(z.string().trim().max(200)).max(40).default([]),
 });
 export type EaVersionRequirements = z.infer<typeof eaVersionRequirementsSchema>;
 

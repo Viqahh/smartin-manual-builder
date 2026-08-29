@@ -21,6 +21,9 @@ export function VersionCreateForm({ eaProductId }: { eaProductId: string }) {
   const [accountType, setAccountType] = useState("Standard / ECN");
   const [testingDeposit, setTestingDeposit] = useState("USD 1.000 (demo)");
   const [brokerRequirements, setBrokerRequirements] = useState("");
+  const [pbkScope, setPbkScope] = useState<"IN_SCOPE" | "OUT_OF_SCOPE">("IN_SCOPE");
+  const [dangerMode, setDangerMode] = useState(false);
+  const [gui, setGui] = useState(false);
   const [rows, setRows] = useState<Row[]>([blank()]);
   const [rowErrors, setRowErrors] = useState<Record<number, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
@@ -82,6 +85,10 @@ export function VersionCreateForm({ eaProductId }: { eaProductId: string }) {
           webRequest: false,
           customIndicators: [],
           volumeConstraints: "",
+          pbkScope,
+          dangerMode,
+          gui,
+          verifiedFeatures: [],
         },
         support: { email: "", phone: "", whatsapp: "", hours: "" },
         setups: rows.map((r, index) => ({
@@ -148,6 +155,21 @@ export function VersionCreateForm({ eaProductId }: { eaProductId: string }) {
         <label className="form-field">
           <span>Persyaratan broker</span>
           <input value={brokerRequirements} onChange={(e) => setBrokerRequirements(e.target.value)} />
+        </label>
+        <label className="form-field">
+          <span>Lingkup Perdagangan Berjangka (PBK)</span>
+          <select value={pbkScope} onChange={(e) => setPbkScope(e.target.value as "IN_SCOPE" | "OUT_OF_SCOPE")}>
+            <option value="IN_SCOPE">Dalam lingkup PBK Indonesia (Bappebti)</option>
+            <option value="OUT_OF_SCOPE">Hanya luar negeri / MQL5 Market</option>
+          </select>
+        </label>
+        <label className="form-field checkbox-field">
+          <input type="checkbox" checked={dangerMode} onChange={(e) => setDangerMode(e.target.checked)} />
+          <span>EA memakai mode berisiko tinggi (martingale / grid tak terbatas / recovery)</span>
+        </label>
+        <label className="form-field checkbox-field">
+          <input type="checkbox" checked={gui} onChange={(e) => setGui(e.target.checked)} />
+          <span>EA memiliki antarmuka / panel di chart (GUI)</span>
         </label>
       </div>
 

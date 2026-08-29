@@ -7,6 +7,7 @@ import { assembleManualViewModel } from "@/lib/manual/view-model";
 import { listOrgImages } from "@/features/images/queries";
 import { listParameterGroups } from "@/features/parameters/queries";
 import { currentProviderMode } from "@/lib/ai/providers";
+import { getValidation } from "@/features/validation/actions";
 
 export const dynamic = "force-dynamic";
 
@@ -23,22 +24,27 @@ export default async function ManualBuilderPage({
   const vm = await assembleManualViewModel(source, manualId);
   if (!vm) notFound();
 
-  const canEdit = canAny(ctx.activeOrg?.roles ?? [], "manual:update");
+  const roles = ctx.activeOrg?.roles ?? [];
+  const canEdit = canAny(roles, "manual:update");
+  const canReview = canAny(roles, "review:technical") || canAny(roles, "review:compliance");
 
   // Editor context: org images for placement, and the linked EA Version's parameter groups
   // (parameterTable blocks may only reference these — GI-11 / AC-P3-8).
-  const [images, groups] = await Promise.all([
+  const [images, groups, validationRes] = await Promise.all([
     listOrgImages(orgId).catch(() => []),
     listParameterGroups(orgId, vm.eaVersion.id).catch(() => []),
+    getValidation({ manualId }).catch(() => null),
   ]);
 
   return (
     <ManualBuilder
       vm={vm}
       canEdit={canEdit}
+      canReview={canReview}
       images={images}
       groups={groups.map((g) => ({ id: g.id, name: g.name, count: g.parameters.length }))}
       aiProviderMode={currentProviderMode()}
+      initialValidation={validationRes && validationRes.ok ? validationRes.data : null}
     />
   );
 }

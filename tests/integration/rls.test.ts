@@ -1393,3 +1393,189 @@ describe.skipIf(!HAS_API)("Phase 4 — ai_revisions RLS + idempotency", () => {
     expect(ins.error, "org B insert into org A denied").toBeTruthy();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 5 — checklist template + results RLS (AC-P5-2/11, spec §35)
+//
+//   checklist_templates / checklist_items  -> SELECT for any authenticated user; NO client write
+//   checklist_results                      -> SELECT for org members; NO client write at all
+//                                             (server actions write via the service-role client)
+// ---------------------------------------------------------------------------
+describe.skipIf(!HAS_SERVICE)("Phase 5 — checklist RLS", () => {
+  const MARK = `p5-rls-${Date.now()}`;
+  let dev: SupabaseClient;
+  let technical: SupabaseClient;
+  let outsider: SupabaseClient;
+  let anon: SupabaseClient;
+  let seededResultId: string | null = null;
+
+  const TEMPLATE_ID = "c5000000-0000-4000-8000-000000000001";
+
+  beforeAll(async () => {
+    dev = await signIn("developer@smartin.demo");
+    technical = await signIn("reviewer@smartin.demo");
+    outsider = await signIn("outsider@smartin.demo");
+    anon = createClient(URL!, ANON!);
+
+    // seed one Org A result row via the service role (the only path that may write)
+    const ins = await service()
+      .from("checklist_results")
+      .insert({
+        organization_id: ORG_A,
+        manual_version_id: VMAX_MV,
+        checklist_template_id: TEMPLATE_ID,
+        checklist_template_version: 1,
+        check_key: "CHK-VERSI-MATCH",
+        category: "identity",
+        required: true,
+        state: "PASS",
+        evidence: { _reason: `seed ${MARK}` },
+        evaluator: "system",
+      })
+      .select("id")
+      .single();
+    expect(ins.error, "service seed of checklist_result").toBeNull();
+    seededResultId = ins.data!.id as string;
+  });
+
+  afterAll(async () => {
+    await service().from("checklist_results").delete().eq("id", seededResultId);
+    const { data } = await service().from("checklist_results").select("id").eq("id", seededResultId);
+    expect(data ?? [], "checklist_results test row cleaned up").toHaveLength(0);
+  });
+
+  it("the active checklist template v1 has the full 31-item set with stable keys (PRD-OQ-004)", async () => {
+    const { data, error } = await dev
+      .from("checklist_items")
+      .select("check_key, rule_key, position, required, bappebti_only")
+      .eq("checklist_template_id", TEMPLATE_ID)
+      .order("position");
+    expect(error).toBeNull();
+    const rows = data ?? [];
+    expect(rows).toHaveLength(31);
+    expect(rows.map((r) => r.check_key)).toEqual([
+      "CHK-VERSI-DUA", "CHK-VERSI-MATCH", "CHK-DEV-LEGAL", "CHK-INSTALASI", "CHK-INSTALL-AUTOTRADING",
+      "CHK-DEPENDENCIES-LISTED", "CHK-PACKAGE-FILES", "CHK-CARA-KERJA", "CHK-SPECIAL-CONDITIONS", "CHK-SETTING",
+      "CHK-PARAM-COMPLETE", "CHK-PARAM-DEFAULT-MATCH", "CHK-UNITS-DEFINED", "CHK-QUICKSTART-DEMO", "CHK-SAFE-STOP",
+      "CHK-DISCLAIMER-5-5-D", "CHK-RISK-GENERAL", "CHK-PAST-NOT-FUTURE", "CHK-DANGER-MODE-WARN", "CHK-NO-PROHIBITED-CLAIMS",
+      "CHK-KONTAK", "CHK-KONTAK-SPLIT", "CHK-TRANSPARANSI", "CHK-BAHASA-ALGO", "CHK-PERIODE-EFEKTIF",
+      "CHK-PERFORMANCE-KONDISI", "CHK-CHANGELOG-VERSI", "CHK-DISCLOSURE-REF", "CHK-ONBOARDING-MARGIN",
+      "CHK-FITUR-DIJELASKAN", "CHK-INTERFACE",
+    ]);
+    // positions are 0..30, no gaps / duplicates
+    expect(rows.map((r) => r.position)).toEqual(Array.from({ length: 31 }, (_, i) => i));
+    // CHK-REQUIRED-CHAPTER (the removed umbrella) is gone
+    expect(rows.some((r) => r.check_key === "CHK-REQUIRED-CHAPTER")).toBe(false);
+    // exactly one non-required item, exactly seven bappebti-only
+    expect(rows.filter((r) => !r.required).map((r) => r.check_key)).toEqual(["CHK-PACKAGE-FILES"]);
+    expect(rows.filter((r) => r.bappebti_only).map((r) => r.check_key)).toEqual([
+      "CHK-DISCLAIMER-5-5-D", "CHK-KONTAK", "CHK-TRANSPARANSI", "CHK-BAHASA-ALGO", "CHK-PERIODE-EFEKTIF",
+      "CHK-DISCLOSURE-REF", "CHK-ONBOARDING-MARGIN",
+    ]);
+  });
+
+  it("drift guard: every seeded rule_key maps to a registered evaluator (§9)", async () => {
+    const { RULES } = await import("@/lib/validation/rules");
+    const { data } = await dev.from("checklist_items").select("check_key, rule_key").eq("checklist_template_id", TEMPLATE_ID);
+    for (const row of data ?? []) {
+      expect(typeof RULES[row.rule_key as string], `no evaluator for ${row.check_key} (rule_key=${row.rule_key})`).toBe("function");
+    }
+    // and no orphan evaluator
+    const seeded = new Set((data ?? []).map((r) => r.rule_key));
+    for (const key of Object.keys(RULES)) expect(seeded.has(key), `evaluator ${key} not in the active template`).toBe(true);
+  });
+
+  it("the seeded result records its checklist template version (AC-P5-11)", async () => {
+    const { data } = await dev
+      .from("checklist_results")
+      .select("checklist_template_id, checklist_template_version, state, evaluator")
+      .eq("id", seededResultId)
+      .single();
+    expect(data?.checklist_template_id).toBe(TEMPLATE_ID);
+    expect(data?.checklist_template_version).toBe(1);
+  });
+
+  it("templates + items are readable but not client-writable (immutable)", async () => {
+    const rd = await dev.from("checklist_templates").select("id").eq("id", TEMPLATE_ID);
+    expect((rd.data ?? []).length, "member reads the system template").toBe(1);
+
+    const wr = await dev.from("checklist_templates").update({ title: "hacked" }).eq("id", TEMPLATE_ID).select("id");
+    expect(wr.data ?? [], "no client update on checklist_templates").toHaveLength(0);
+
+    const wi = await dev.from("checklist_items").update({ required: false }).eq("checklist_template_id", TEMPLATE_ID).select("id");
+    expect(wi.data ?? [], "no client update on checklist_items").toHaveLength(0);
+  });
+
+  it("no authenticated role can insert / update / delete a checklist_result directly", async () => {
+    for (const [name, c] of [["developer", dev], ["reviewer", technical], ["outsider", outsider]] as const) {
+      const ins = await c.from("checklist_results").insert({
+        organization_id: ORG_A,
+        manual_version_id: VMAX_MV,
+        checklist_template_id: TEMPLATE_ID,
+        checklist_template_version: 1,
+        check_key: "CHK-KONTAK",
+        category: "support",
+        required: true,
+        state: "NOT_APPLICABLE",
+        evidence: {},
+        evaluator: "reviewer",
+      });
+      expect(ins.error, `${name} cannot insert a checklist_result`).toBeTruthy();
+
+      const upd = await c
+        .from("checklist_results")
+        .update({ state: "NOT_APPLICABLE", evaluator: "reviewer" })
+        .eq("id", seededResultId)
+        .select("id");
+      expect(upd.data ?? [], `${name} cannot update a checklist_result (forge N/A)`).toHaveLength(0);
+
+      const del = await c.from("checklist_results").delete().eq("id", seededResultId).select("id");
+      expect(del.data ?? [], `${name} cannot delete a checklist_result`).toHaveLength(0);
+    }
+  });
+
+  it("developer of the org reads its own manual's checklist_results", async () => {
+    const { data, error } = await dev.from("checklist_results").select("id, state").eq("manual_version_id", VMAX_MV);
+    expect(error).toBeNull();
+    expect((data ?? []).some((r) => r.id === seededResultId)).toBe(true);
+  });
+
+  it("an outsider (org B) reads none of org A's checklist_results", async () => {
+    const { data } = await outsider.from("checklist_results").select("id").eq("manual_version_id", VMAX_MV);
+    expect(data ?? [], "org B sees no org A checklist_results").toHaveLength(0);
+  });
+
+  it("anon cannot read or write checklist_results", async () => {
+    const rd = await anon.from("checklist_results").select("id").eq("manual_version_id", VMAX_MV);
+    expect(rd.data ?? [], "anon reads nothing").toHaveLength(0);
+    const wr = await anon.from("checklist_results").insert({
+      organization_id: ORG_A,
+      manual_version_id: VMAX_MV,
+      checklist_template_id: TEMPLATE_ID,
+      checklist_template_version: 1,
+      check_key: "CHK-KONTAK",
+      category: "support",
+      required: true,
+      state: "PASS",
+      evidence: {},
+      evaluator: "system",
+    });
+    expect(wr.error, "anon insert denied").toBeTruthy();
+  });
+
+  it("the unique (manual_version_id, check_key) constraint holds (AC-P5-2)", async () => {
+    const dup = await service().from("checklist_results").insert({
+      organization_id: ORG_A,
+      manual_version_id: VMAX_MV,
+      checklist_template_id: TEMPLATE_ID,
+      checklist_template_version: 1,
+      check_key: "CHK-VERSI-MATCH", // same as the seeded row
+      category: "identity",
+      required: true,
+      state: "MISSING",
+      evidence: {},
+      evaluator: "system",
+    });
+    expect(dup.error?.code, "duplicate item per manual version rejected").toBe("23505");
+  });
+});

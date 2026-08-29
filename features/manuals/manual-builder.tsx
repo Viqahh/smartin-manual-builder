@@ -11,6 +11,8 @@ import { ChapterNav } from "./editor/chapter-nav";
 import { SectionEditor, type AiBlockTarget, type SectionEditorHandle } from "./editor/section-editor";
 import type { BlockEditorCtx } from "./editor/block-editors";
 import { AiPanel } from "@/features/ai/ai-panel";
+import { ValidationPanel } from "@/features/validation/validation-panel";
+import type { ValidationView } from "@/lib/validation/types";
 import { createAutosaveQueue, type SaveOutcome } from "@/lib/editor/autosave-queue";
 import {
   addCustomSection,
@@ -43,32 +45,38 @@ function StateIcon({ state }: { state: CompletionState | "current" }) {
 function Inspector({
   identity,
   section,
-  progress,
   saveState,
   tab,
   canEdit,
+  canReview,
   completionBlockers,
   aiProviderMode,
   manualId,
   aiTarget,
   aiApplyState,
   editorRef,
+  initialValidation,
+  validationNonce,
+  onNavigateSection,
   onTab,
   onSetCompletion,
   onClose,
 }: {
   identity: ReturnType<typeof manualIdentity>;
   section: Section | undefined;
-  progress: number;
   saveState: SaveState;
   tab: "Validasi" | "Metadata";
   canEdit: boolean;
+  canReview: boolean;
   completionBlockers: string[];
   aiProviderMode: "mock" | "configured" | "config-error";
   manualId: string;
   aiTarget: AiBlockTarget | null;
   aiApplyState: SaveState | null;
   editorRef: React.RefObject<SectionEditorHandle | null>;
+  initialValidation: ValidationView | null;
+  validationNonce: number;
+  onNavigateSection: (sectionKey: string) => void;
   onTab: (t: "Validasi" | "Metadata") => void;
   onSetCompletion: (s: CompletionState) => void;
   onClose?: () => void;
@@ -89,16 +97,13 @@ function Inspector({
       </div>
       {tab === "Validasi" ? (
         <div className="inspector-content">
-          <div className="inspector-score">
-            <span>
-              {progress}
-              <small>%</small>
-            </span>
-            <div>
-              <strong>Kelengkapan bab</strong>
-              <p>Ditandai manual (Phase 3)</p>
-            </div>
-          </div>
+          <ValidationPanel
+            manualId={manualId}
+            canReview={canReview}
+            initial={initialValidation}
+            refreshNonce={validationNonce}
+            onNavigateSection={onNavigateSection}
+          />
           <section>
             <h3>Status bab ini</h3>
             {canEdit ? (
@@ -198,15 +203,19 @@ function Inspector({
 export function ManualBuilder({
   vm,
   canEdit = false,
+  canReview = false,
   images: initialImages = [],
   groups = [],
   aiProviderMode = "mock",
+  initialValidation = null,
 }: {
   vm: ManualViewModel;
   canEdit?: boolean;
+  canReview?: boolean;
   images?: OrgImage[];
   groups?: { id: string; name: string; count: number }[];
   aiProviderMode?: "mock" | "configured" | "config-error";
+  initialValidation?: ValidationView | null;
 }) {
   const identity = manualIdentity(vm);
   const [sections, setSections] = useState(vm.sections);
@@ -218,6 +227,27 @@ export function ManualBuilder({
   const sectionEditorRef = useRef<SectionEditorHandle | null>(null);
   const [aiTarget, setAiTarget] = useState<AiBlockTarget | null>(null);
   const [aiApplyState, setAiApplyState] = useState<SaveState | null>(null);
+  // Phase 5 — bump this after a persisted builder change so the readiness panel re-evaluates
+  // (server-side, from the DB). Coalesced: one re-eval ~1.2s after edits settle (§27).
+  const [validationNonce, setValidationNonce] = useState(0);
+  const validationTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleValidationRefresh = useCallback(() => {
+    if (validationTimer.current) clearTimeout(validationTimer.current);
+    validationTimer.current = setTimeout(() => setValidationNonce((n) => n + 1), 1200);
+  }, []);
+  useEffect(() => () => {
+    if (validationTimer.current) clearTimeout(validationTimer.current);
+  }, []);
+  const navigateToSection = useCallback(
+    (key: string) => {
+      const target = vm.sections.find((s) => s.key === key);
+      if (target) {
+        setSelectedId(target.id);
+        setMobilePanel(null);
+      }
+    },
+    [vm.sections],
+  );
   const [blockCounts, setBlockCounts] = useState<Record<string, number>>(() =>
     Object.fromEntries(vm.sections.map((s) => [s.id, s.blocks.length])),
   );
@@ -529,6 +559,7 @@ export function ManualBuilder({
               onBlocksChanged={handleBlocksChanged}
               onAiTargetChange={setAiTarget}
               onAiApplyStateChange={setAiApplyState}
+              onBlockSaved={scheduleValidationRefresh}
             />
           )}
         </section>
@@ -537,16 +568,19 @@ export function ManualBuilder({
           <Inspector
             identity={identity}
             section={section}
-            progress={progress}
             saveState={saveState}
             tab={tab}
             canEdit={canEdit}
+            canReview={canReview}
             completionBlockers={completionBlockers}
             aiProviderMode={aiProviderMode}
             manualId={vm.manual.id}
             aiTarget={aiTarget}
             aiApplyState={aiApplyState}
             editorRef={sectionEditorRef}
+            initialValidation={initialValidation}
+            validationNonce={validationNonce}
+            onNavigateSection={navigateToSection}
             onTab={setTab}
             onSetCompletion={setCompletion}
           />
@@ -562,16 +596,19 @@ export function ManualBuilder({
             <Inspector
               identity={identity}
               section={section}
-              progress={progress}
               saveState={saveState}
               tab={tab}
               canEdit={canEdit}
+              canReview={canReview}
               completionBlockers={completionBlockers}
               aiProviderMode={aiProviderMode}
               manualId={vm.manual.id}
               aiTarget={aiTarget}
               aiApplyState={aiApplyState}
               editorRef={sectionEditorRef}
+              initialValidation={initialValidation}
+              validationNonce={validationNonce}
+              onNavigateSection={navigateToSection}
               onTab={setTab}
               onSetCompletion={setCompletion}
               onClose={() => setMobilePanel(null)}

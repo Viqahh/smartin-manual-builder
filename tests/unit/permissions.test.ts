@@ -61,6 +61,18 @@ describe("permission / action map (PRD-SEC-003, AC-P2-22)", () => {
     expect(canAny(["TECHNICAL_REVIEWER", "COMPLIANCE_REVIEWER"], "review:compliance")).toBe(true);
   });
 
+  it("a pure DEVELOPER cannot review — the exact expression the Phase 5 N/A-override gate uses (AC-P5-9)", () => {
+    // features/validation/actions.ts canReview(): canAny(roles,"review:technical") || canAny(roles,"review:compliance")
+    const canReview = (roles: string[]) =>
+      canAny(roles as never, "review:technical") || canAny(roles as never, "review:compliance");
+    expect(canAny(["DEVELOPER"], "review:technical")).toBe(false);
+    expect(canAny(["DEVELOPER"], "review:compliance")).toBe(false);
+    expect(canReview(["DEVELOPER"])).toBe(false);
+    // a reviewer role flips it on; the multi-role developer+reviewer fixture may override
+    expect(canReview(["DEVELOPER", "TECHNICAL_REVIEWER"])).toBe(true);
+    expect(canReview(["COMPLIANCE_REVIEWER"])).toBe(true);
+  });
+
   it("only ADMIN in the role set grants admin-only actions", () => {
     expect(canAny(["DEVELOPER"], "member:manage")).toBe(false);
     expect(canAny(["DEVELOPER", "TECHNICAL_REVIEWER"], "template:manage")).toBe(false);

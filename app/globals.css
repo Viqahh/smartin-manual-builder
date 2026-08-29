@@ -372,6 +372,64 @@ button, a, input, select, textarea { touch-action: manipulation; }
 .compliance-note { display: flex; gap: 7px; margin-top: 18px; padding: 10px; color: #475569; background: #f1f5f9; border-radius: 5px; }
 .compliance-note svg { width: 15px; flex: none; }
 .compliance-note p { margin: 0; font-size: 9px; }
+
+/* Phase 5 — documentation-readiness panel */
+.validation-panel { display: flex; flex-direction: column; gap: 10px; }
+.validation-panel h3 { margin: 0; color: #475569; font-size: 10px; letter-spacing: .07em; text-transform: uppercase; }
+.validation-panel p { margin: 0; }
+.v-loading { display: flex; align-items: center; gap: 6px; color: var(--muted-foreground); font-size: 12px; }
+.v-score { display: flex; align-items: center; gap: 11px; padding: 12px; color: #fff; background: #162945; border-radius: 7px; }
+.v-score[data-empty="true"] { background: #475569; }
+.v-score-num { font-size: 26px; font-weight: 750; line-height: 1; }
+.v-score-num small { font-size: 12px; margin-left: 1px; }
+.v-score > div { display: flex; flex-direction: column; min-width: 0; }
+.v-score strong { font-size: 11px; }
+.v-score p { margin-top: 2px; color: #b8c6d9; font-size: 9px; overflow-wrap: anywhere; }
+.v-disclaimer { color: #64748b; font-size: 10px; line-height: 1.45; }
+.v-counts { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.v-counts li { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; border: 1px solid var(--border); }
+.v-counts li svg { flex: none; }
+.v-counts li b { font-weight: 800; }
+.v-pass { color: var(--success); }
+.v-warning { color: var(--warning); }
+.v-missing { color: var(--danger); }
+.v-na { color: #64748b; }
+.v-eligibility { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; }
+.v-eligibility svg { flex: none; }
+.v-ready { color: var(--success); }
+.v-notready { color: var(--danger); }
+.v-blocking { list-style: disc; margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 3px; }
+.v-blocking li { font-size: 11px; color: #7f1d1d; overflow-wrap: anywhere; }
+.v-group { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+.v-group-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin: 4px 0 0; font-size: 11px; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase; color: #64748b; overflow-wrap: anywhere; }
+.v-group-tally { flex: none; font-size: 11px; font-weight: 600; letter-spacing: normal; text-transform: none; color: #94a3b8; }
+.v-items { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.v-item { display: flex; flex-direction: column; gap: 4px; padding: 9px 10px; border: 1px solid var(--border); border-left: 3px solid var(--border); border-radius: 6px; background: #fbfdff; }
+.v-item.v-pass { border-left-color: var(--success); }
+.v-item.v-warning { border-left-color: var(--warning); }
+.v-item.v-missing { border-left-color: var(--danger); }
+.v-item.v-na { border-left-color: #94a3b8; }
+.v-item-head { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 7px; font-size: 12px; }
+.v-item-head svg { flex: none; }
+.v-item-state { font-weight: 700; font-size: 10px; text-transform: uppercase; letter-spacing: .03em; }
+.v-item-label { font-weight: 650; color: #1e293b; overflow-wrap: anywhere; }
+.v-item-reason { font-size: 11px; line-height: 1.45; color: #475569; overflow-wrap: anywhere; }
+.v-item-override { font-size: 10px; color: #7c3aed; overflow-wrap: anywhere; }
+.v-item-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 2px; }
+.v-link { display: inline-flex; align-items: center; gap: 2px; min-height: 32px; padding: 3px 0; background: none; border: none; color: var(--primary); font-size: 11px; font-weight: 650; text-decoration: underline; cursor: pointer; }
+.v-na-btn { min-height: 32px; padding: 4px 9px; font-size: 11px; font-weight: 600; color: #475569; background: #fff; border: 1px solid var(--border); border-radius: 5px; cursor: pointer; }
+.v-na-btn:hover { border-color: #94a3b8; }
+.v-na-form { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; padding: 8px; background: #f8fafc; border: 1px solid var(--border); border-radius: 6px; }
+.v-na-form label { display: flex; flex-direction: column; gap: 4px; font-size: 10px; font-weight: 650; color: #475569; }
+.v-na-form textarea { width: 100%; padding: 7px 9px; font: inherit; font-size: 12px; border: 1px solid var(--border); border-radius: 5px; resize: vertical; }
+.v-na-form-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.v-na-form-actions .primary-button, .v-na-form-actions .secondary-button { min-height: 34px; padding: 6px 12px; font-size: 12px; }
+.v-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 2px; }
+.v-foot .secondary-button { min-height: 34px; padding: 6px 10px; font-size: 12px; }
+.v-evaluated { font-size: 10px; color: #94a3b8; }
+.v-error { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 8px 10px; font-size: 11px; color: #7f1d1d; background: #fef2f2; border: 1px solid #fca5a5; border-radius: 6px; }
+.v-error svg { flex: none; }
+.v-error .secondary-button { min-height: 30px; padding: 4px 10px; font-size: 11px; }
 .metadata-list dl { margin: 0; }
 .metadata-list dl div { display: flex; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px solid #edf0f3; }
 .metadata-list dt { color: #64748b; font-size: 10px; }

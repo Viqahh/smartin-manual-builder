@@ -117,6 +117,8 @@ type SectionEditorProps = {
   onAiTargetChange?: (target: AiBlockTarget | null) => void;
   /** Live per-block autosave state for the block an AI proposal was last applied to (§17). */
   onAiApplyStateChange?: (state: SaveState | null) => void;
+  /** fires once each time a block edit is persisted — drives the Phase 5 checklist refresh. */
+  onBlockSaved?: () => void;
 };
 
 function targetFieldFor(type: AiBlockTarget["blockType"]): TargetField {
@@ -155,7 +157,7 @@ function safeRichPlain(v: unknown): string {
 }
 
 export const SectionEditor = forwardRef<SectionEditorHandle, SectionEditorProps>(function SectionEditor(
-  { section, vm, canEdit, ctx, onBlocksChanged, onAiTargetChange, onAiApplyStateChange },
+  { section, vm, canEdit, ctx, onBlocksChanged, onAiTargetChange, onAiApplyStateChange, onBlockSaved },
   ref,
 ) {
   const initial: EBlock[] = useMemo(
@@ -307,8 +309,10 @@ export const SectionEditor = forwardRef<SectionEditorHandle, SectionEditorProps>
       }
       // mirror the AI-applied block's real persistence state to the inspector panel (§17)
       if (aiApplyKey.current === key) onAiApplyStateChange?.(state as SaveState);
+      // a committed block edit may change a Phase 5 checklist result (§27)
+      if (state === "saved") onBlockSaved?.();
     },
-    [onAiApplyStateChange],
+    [onAiApplyStateChange, onBlockSaved],
   );
 
   const onSaveVersion = useCallback((key: string, rowVersion: number) => {
