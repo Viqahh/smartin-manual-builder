@@ -1,27 +1,26 @@
 "use client";
 
-import {
-  AlertTriangle,
-  Check,
-  ChevronRight,
-  Circle,
-  Eye,
-  FileText,
-  Info,
-  LockKeyhole,
-  PanelLeft,
-  PanelRight,
-  Save,
-  Sparkles,
-  X,
-} from "lucide-react";
+import { AlertTriangle, Check, ChevronRight, Circle, Eye, Info, PanelLeft, PanelRight, Save, Sparkles, X } from "lucide-react";
 import Link from "next/link";
-import { useMemo, useRef, useState } from "react";
-import { SectionContent } from "@/components/manual-renderer/manual-renderer";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { manualIdentity, type ManualViewModel } from "@/lib/manual/view-model";
 import { STATUS_LABELS } from "./manual-table";
-import { SAVE_STATE_LABEL, DEFAULT_AUTOSAVE_DEBOUNCE_MS, type SaveState } from "@/lib/domain/autosave";
+import { SAVE_STATE_LABEL, type SaveState } from "@/lib/domain/autosave";
 import { saveSection } from "./autosave-actions";
+import { ChapterNav } from "./editor/chapter-nav";
+import { SectionEditor } from "./editor/section-editor";
+import type { BlockEditorCtx } from "./editor/block-editors";
+import { createAutosaveQueue, type SaveOutcome } from "@/lib/editor/autosave-queue";
+import {
+  addCustomSection,
+  renameSection,
+  deleteCustomSection,
+  reorderSections,
+  getSectionRowVersions,
+} from "@/features/sections/actions";
+import { uploadManualImage, updateImageAsset, signImageUrl } from "@/features/images/actions";
+import { sectionCompletionBlockers, eaDeclaresDangerMode } from "@/lib/domain/section-completion";
+import type { OrgImage } from "@/features/images/queries";
 
 type Section = ManualViewModel["sections"][number];
 type CompletionState = Section["completionState"];
@@ -40,67 +39,6 @@ function StateIcon({ state }: { state: CompletionState | "current" }) {
   return <Circle aria-label="Belum lengkap" size={13} />;
 }
 
-function ChapterPanel({
-  sections,
-  selectedId,
-  progress,
-  completedCount,
-  onSelect,
-  onClose,
-}: {
-  sections: Section[];
-  selectedId: string;
-  progress: number;
-  completedCount: number;
-  onSelect: (id: string) => void;
-  onClose?: () => void;
-}) {
-  return (
-    <aside className="chapter-panel" aria-label="Navigasi bab">
-      {onClose && (
-        <button className="icon-button panel-close" aria-label="Tutup daftar bab" onClick={onClose}>
-          <X aria-hidden="true" />
-        </button>
-      )}
-      <div className="panel-heading">
-        <div>
-          <p className="eyebrow">Manual Book</p>
-          <h2>Daftar bab</h2>
-        </div>
-        <span>{progress}%</span>
-      </div>
-      <div className="overall-progress">
-        <span style={{ width: `${progress}%` }} />
-      </div>
-      <p className="progress-copy">
-        {completedCount} dari {sections.length} bab ditandai selesai
-      </p>
-      <nav className="chapter-list">
-        {sections.map((chapter) => (
-          <button
-            key={chapter.id}
-            data-active={selectedId === chapter.id}
-            data-state={chapter.completionState}
-            onClick={() => {
-              onSelect(chapter.id);
-              onClose?.();
-            }}
-          >
-            <span className="chapter-state">
-              <StateIcon state={selectedId === chapter.id ? "current" : chapter.completionState} />
-            </span>
-            <span className="chapter-copy">
-              <small>BAB {String(chapter.position).padStart(2, "0")}</small>
-              <strong>{chapter.title}</strong>
-            </span>
-            {chapter.required && <LockKeyhole aria-label="Bab wajib" size={13} />}
-          </button>
-        ))}
-      </nav>
-    </aside>
-  );
-}
-
 function Inspector({
   identity,
   section,
@@ -108,6 +46,7 @@ function Inspector({
   saveState,
   tab,
   canEdit,
+  completionBlockers,
   onTab,
   onSetCompletion,
   onClose,
@@ -118,6 +57,7 @@ function Inspector({
   saveState: SaveState;
   tab: "Validasi" | "Metadata";
   canEdit: boolean;
+  completionBlockers: string[];
   onTab: (t: "Validasi" | "Metadata") => void;
   onSetCompletion: (s: CompletionState) => void;
   onClose?: () => void;
@@ -145,7 +85,7 @@ function Inspector({
             </span>
             <div>
               <strong>Kelengkapan bab</strong>
-              <p>Ditandai manual (Phase 2)</p>
+              <p>Ditandai manual (Phase 3)</p>
             </div>
           </div>
           <section>
@@ -158,12 +98,22 @@ function Inspector({
                       key={s}
                       className="secondary-button"
                       data-active={section?.completionState === s}
+                      disabled={s === "complete" && completionBlockers.length > 0}
                       onClick={() => onSetCompletion(s)}
                     >
                       {COMPLETION_LABEL[s]}
                     </button>
                   ))}
                 </div>
+                {completionBlockers.length > 0 && (
+                  <ul className="completion-blockers" role="alert">
+                    {completionBlockers.map((b) => (
+                      <li key={b}>
+                        <AlertTriangle aria-hidden="true" size={13} /> {b}
+                      </li>
+                    ))}
+                  </ul>
+                )}
                 <p className="save-state" role="status">
                   <Save aria-hidden="true" size={14} /> {SAVE_STATE_LABEL[saveState]}
                 </p>
@@ -233,55 +183,253 @@ function Inspector({
   );
 }
 
-export function ManualBuilder({ vm, canEdit = false }: { vm: ManualViewModel; canEdit?: boolean }) {
+export function ManualBuilder({
+  vm,
+  canEdit = false,
+  images: initialImages = [],
+  groups = [],
+}: {
+  vm: ManualViewModel;
+  canEdit?: boolean;
+  images?: OrgImage[];
+  groups?: { id: string; name: string; count: number }[];
+}) {
   const identity = manualIdentity(vm);
+  const [sections, setSections] = useState(vm.sections);
   const [selectedId, setSelectedId] = useState(vm.sections[0]?.id ?? "");
   const [mobilePanel, setMobilePanel] = useState<"chapters" | "inspector" | null>(null);
   const [tab, setTab] = useState<"Validasi" | "Metadata">("Validasi");
-  const [sections, setSections] = useState(vm.sections);
   const [saveState, setSaveState] = useState<SaveState>("idle");
-  const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const section = useMemo(
-    () => sections.find((s) => s.id === selectedId) ?? sections[0],
-    [sections, selectedId],
+  const [images, setImages] = useState<OrgImage[]>(initialImages);
+  const [blockCounts, setBlockCounts] = useState<Record<string, number>>(() =>
+    Object.fromEntries(vm.sections.map((s) => [s.id, s.blocks.length])),
   );
+  const section = useMemo(() => sections.find((s) => s.id === selectedId) ?? sections[0], [sections, selectedId]);
+  const sectionId = section?.id ?? "";
 
+  // stable + idempotent: never re-set state to the same count (prevents an update loop)
+  const handleBlocksChanged = useCallback(
+    (count: number) => {
+      setBlockCounts((c) => (c[sectionId] === count ? c : { ...c, [sectionId]: count }));
+    },
+    [sectionId],
+  );
   const completedCount = sections.filter((s) => s.completionState === "complete").length;
   const progress = sections.length ? Math.round((completedCount / sections.length) * 100) : 0;
+  const dangerMode = eaDeclaresDangerMode(vm.eaVersion.requirements);
+
+  const imageAltText = useMemo(
+    () => Object.fromEntries(images.map((i) => [i.id, i.altText])) as Record<string, string | null>,
+    [images],
+  );
+
+  const completionBlockers = useMemo(() => {
+    if (!section) return [];
+    return sectionCompletionBlockers({
+      sectionKey: section.key,
+      blocks: section.blocks.map((b) => ({ type: b.type, payload: b.payload, imageAssetId: b.imageAssetId })),
+      imageAltText,
+      eaDangerMode: dangerMode,
+    });
+  }, [section, imageAltText, dangerMode]);
+
+  // -------------------------------------------------------------- completion save
+  // Single-flight per section, same discipline as the block autosave queue: one request in
+  // flight per section, the authoritative row_version lives in the queue (never a stale
+  // closure), and a self-generated stale-version race (e.g. a chapter reorder bumped
+  // row_version, or an overlapping completion save) is re-read and retried silently instead
+  // of surfacing a false "Konflik perubahan". Completion is an explicit enum toggle with no
+  // user-typed text to lose, so a genuine concurrent change is also resolved by adopting the
+  // latest version and re-applying the click.
+  const sectionsRef = useRef(sections);
+  useEffect(() => {
+    sectionsRef.current = sections;
+  });
+
+  const saveCompletionImpl = useCallback(
+    async (key: string, payload: { completionState: CompletionState }, expectedRowVersion: number): Promise<SaveOutcome> => {
+      const res = await saveSection({
+        sectionId: key,
+        expectedRowVersion,
+        patch: { completionState: payload.completionState },
+      });
+      if (res.ok) return { ok: true, rowVersion: res.data.rowVersion };
+      if (res.code === "CONFLICT") {
+        const fresh = await getSectionRowVersions({ manualVersionId: vm.manualVersion.id });
+        const row = fresh.ok ? fresh.data.sections.find((s) => s.id === key) : undefined;
+        if (row) return { ok: false, kind: "retry", serverRowVersion: row.rowVersion };
+      }
+      return { ok: false, kind: "error", message: res.message ?? "Gagal menyimpan status bab." };
+    },
+    [vm.manualVersion.id],
+  );
+
+  const [completionSaver] = useState(() =>
+    createAutosaveQueue<{ completionState: CompletionState }>({
+      debounceMs: 600,
+      save: saveCompletionImpl,
+      onState: (_key, state) => setSaveState(state as SaveState),
+      onVersion: (key, rowVersion) =>
+        setSections((prev) => prev.map((s) => (s.id === key ? { ...s, rowVersion } : s))),
+    }),
+  );
+  useEffect(() => () => completionSaver.dispose(), [completionSaver]);
 
   /**
-   * Debounced autosave of the chapter completion state (Phase 2's small editable surface).
-   * The row_version-guarded UPDATE (features/manuals/autosave-actions.ts) is the real conflict
-   * mechanism: a stale write returns CONFLICT and we surface "Konflik perubahan" — never a
-   * silent overwrite (AC-P2-20). The full block editor + its autosave arrive in Phase 3.
+   * After a structural chapter mutation (reorder / rename / add / delete) the section
+   * row_versions on the server have moved — reorder is a two-phase RPC that bumps every live
+   * section by +2. Adopt the fresh versions so a following completion save doesn't fire with
+   * a pre-mutation row_version and hit a false conflict.
    */
+  const resyncSectionVersions = useCallback(async () => {
+    const fresh = await getSectionRowVersions({ manualVersionId: vm.manualVersion.id });
+    if (!fresh.ok) return;
+    const byId = new Map(fresh.data.sections.map((s) => [s.id, s]));
+    setSections((prev) =>
+      prev.map((s) => {
+        const f = byId.get(s.id);
+        return f ? { ...s, rowVersion: f.rowVersion, position: f.position } : s;
+      }),
+    );
+    for (const [id, f] of byId) if (!completionSaver.hasPending(id)) completionSaver.adoptVersion(id, f.rowVersion);
+  }, [vm.manualVersion.id, completionSaver]);
+
   function setCompletion(next: CompletionState) {
-    if (!canEdit) return; // server also enforces manual:update
+    if (!canEdit || !section) return;
+    if (next === "complete" && completionBlockers.length > 0) return;
     const target = section;
-    if (!target) return;
     setSections((prev) => prev.map((s) => (s.id === target.id ? { ...s, completionState: next } : s)));
-    setSaveState("dirty");
-    if (debounce.current) clearTimeout(debounce.current);
-    debounce.current = setTimeout(() => {
-      setSaveState("saving");
-      void saveSection({
-        sectionId: target.id,
-        expectedRowVersion: target.rowVersion,
-        patch: { completionState: next },
-      }).then((result) => {
-        if (result.ok) {
-          const rv = result.data.rowVersion;
-          setSections((prev) => prev.map((s) => (s.id === target.id ? { ...s, rowVersion: rv } : s)));
-          setSaveState("saved");
-        } else if (result.code === "CONFLICT") {
-          setSaveState("conflict");
-        } else {
-          setSaveState("error");
+    completionSaver.queue(
+      target.id,
+      { completionState: next },
+      completionSaver.currentVersion(target.id) ?? target.rowVersion,
+    );
+  }
+
+  // -------------------------------------------------------------- chapter actions
+  const handleReorderChapters = useCallback(
+    (orderedIds: string[]) => {
+      setSections((prev) => {
+        const byId = new Map(prev.map((s) => [s.id, s]));
+        return orderedIds.map((id, i) => ({ ...(byId.get(id) as Section), position: i }));
+      });
+      void reorderSections({ manualVersionId: vm.manualVersion.id, orderedSectionIds: orderedIds }).then((res) => {
+        if (res.ok) void resyncSectionVersions();
+      });
+    },
+    [vm.manualVersion.id, resyncSectionVersions],
+  );
+
+  const handleAddChapter = useCallback(
+    (title: string) => {
+      void addCustomSection({ manualVersionId: vm.manualVersion.id, title }).then((res) => {
+        if (!res.ok) return;
+        const newSection: Section = {
+          id: res.data.id,
+          key: res.data.sectionKey,
+          title,
+          required: false,
+          isCustom: true,
+          position: res.data.position,
+          completionState: "incomplete",
+          rowVersion: 1,
+          blocks: [],
+        };
+        setSections((prev) => [...prev, newSection]);
+        setBlockCounts((c) => ({ ...c, [res.data.id]: 0 }));
+        setSelectedId(res.data.id);
+      });
+    },
+    [vm.manualVersion.id],
+  );
+
+  const handleRenameChapter = useCallback(
+    (id: string, title: string) => {
+      setSections((prev) => prev.map((s) => (s.id === id ? { ...s, title } : s)));
+      void renameSection({ sectionId: id, title }).then((res) => {
+        if (res.ok) void resyncSectionVersions();
+      });
+    },
+    [resyncSectionVersions],
+  );
+
+  const handleDeleteChapter = useCallback(
+    (id: string) => {
+      // Optimistically drop the chapter AND recompact positions so BAB numbering closes the gap
+      // immediately; the server also recompacts (AC-P3-5) and resyncSectionVersions reconciles.
+      setSections((prev) => {
+        const next = prev.filter((s) => s.id !== id).map((s, i) => ({ ...s, position: i }));
+        if (selectedId === id) setSelectedId(next[0]?.id ?? "");
+        return next;
+      });
+      void deleteCustomSection({ sectionId: id }).then((res) => {
+        if (!res.ok) return;
+        // reconcile straight from the atomic RPC result (id -> {position, rowVersion})
+        const byId = new Map(res.data.sections.map((s) => [s.id, s]));
+        setSections((prev) =>
+          prev
+            .filter((s) => byId.has(s.id))
+            .map((s) => ({ ...s, position: byId.get(s.id)!.position, rowVersion: byId.get(s.id)!.rowVersion })),
+        );
+        for (const s of res.data.sections) {
+          if (!completionSaver.hasPending(s.id)) completionSaver.adoptVersion(s.id, s.rowVersion);
         }
       });
-    }, DEFAULT_AUTOSAVE_DEBOUNCE_MS);
-  }
+    },
+    [selectedId, completionSaver],
+  );
+
+  // -------------------------------------------------------------- image ctx
+  const editorCtx: BlockEditorCtx = useMemo(
+    () => ({
+      images,
+      groups,
+      onUploadImage: async (file, altText) => {
+        const fd = new FormData();
+        fd.set("file", file);
+        fd.set("altText", altText);
+        const res = await uploadManualImage(fd);
+        if (!res.ok) return { ok: false, message: res.message };
+        const signed = await signImageUrl(res.data.id);
+        setImages((prev) => [
+          {
+            id: res.data.id,
+            altText: altText || null,
+            caption: null,
+            width: res.data.width,
+            height: res.data.height,
+            signedUrl: signed.ok ? signed.data.url : null,
+          },
+          ...prev,
+        ]);
+        return { ok: true, id: res.data.id };
+      },
+      onUpdateImageMeta: async (id, patch) => {
+        await updateImageAsset({ id, altText: patch.altText, caption: patch.caption });
+        setImages((prev) =>
+          prev.map((i) =>
+            i.id === id
+              ? { ...i, altText: patch.altText ?? i.altText, caption: patch.caption ?? i.caption }
+              : i,
+          ),
+        );
+      },
+    }),
+    [images, groups],
+  );
+
+  const chapterNavProps = {
+    sections,
+    selectedId,
+    canEdit,
+    progress,
+    completedCount,
+    onSelect: setSelectedId,
+    onReorder: handleReorderChapters,
+    onAdd: handleAddChapter,
+    onRename: handleRenameChapter,
+    onDelete: handleDeleteChapter,
+  };
 
   return (
     <div className="builder-page">
@@ -329,14 +477,9 @@ export function ManualBuilder({ vm, canEdit = false }: { vm: ManualViewModel; ca
 
       <div className="builder-grid">
         <div className="builder-chapters-desktop">
-          <ChapterPanel
-            sections={sections}
-            selectedId={selectedId}
-            progress={progress}
-            completedCount={completedCount}
-            onSelect={setSelectedId}
-          />
+          <ChapterNav {...chapterNavProps} />
         </div>
+
         <section className="editor-workspace" aria-labelledby="chapter-title">
           <div className="editor-toolbar">
             <div>
@@ -345,17 +488,22 @@ export function ManualBuilder({ vm, canEdit = false }: { vm: ManualViewModel; ca
             </div>
             <div>
               <span className="block-count">
-                <FileText aria-hidden="true" size={15} /> {section?.blocks.length ?? 0} blok
+                {(section && blockCounts[section.id]) ?? section?.blocks.length ?? 0} blok
               </span>
-              {canEdit && (
-                <button className="secondary-button" disabled title="Block editor tersedia pada Phase 3">
-                  Tambah blok
-                </button>
-              )}
             </div>
           </div>
-          <div className="editor-canvas">{section && <SectionContent section={section} vm={vm} />}</div>
+          {section && (
+            <SectionEditor
+              key={section.id}
+              section={section}
+              vm={vm}
+              canEdit={canEdit}
+              ctx={editorCtx}
+              onBlocksChanged={handleBlocksChanged}
+            />
+          )}
         </section>
+
         <div className="builder-inspector-desktop">
           <Inspector
             identity={identity}
@@ -364,6 +512,7 @@ export function ManualBuilder({ vm, canEdit = false }: { vm: ManualViewModel; ca
             saveState={saveState}
             tab={tab}
             canEdit={canEdit}
+            completionBlockers={completionBlockers}
             onTab={setTab}
             onSetCompletion={setCompletion}
           />
@@ -374,14 +523,7 @@ export function ManualBuilder({ vm, canEdit = false }: { vm: ManualViewModel; ca
         <div className="panel-drawer-layer">
           <button className="drawer-scrim" aria-label="Tutup panel" onClick={() => setMobilePanel(null)} />
           {mobilePanel === "chapters" ? (
-            <ChapterPanel
-              sections={sections}
-              selectedId={selectedId}
-              progress={progress}
-              completedCount={completedCount}
-              onSelect={setSelectedId}
-              onClose={() => setMobilePanel(null)}
-            />
+            <ChapterNav {...chapterNavProps} onClose={() => setMobilePanel(null)} />
           ) : (
             <Inspector
               identity={identity}
@@ -390,6 +532,7 @@ export function ManualBuilder({ vm, canEdit = false }: { vm: ManualViewModel; ca
               saveState={saveState}
               tab={tab}
               canEdit={canEdit}
+              completionBlockers={completionBlockers}
               onTab={setTab}
               onSetCompletion={setCompletion}
               onClose={() => setMobilePanel(null)}

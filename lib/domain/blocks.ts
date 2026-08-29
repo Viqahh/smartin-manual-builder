@@ -7,20 +7,21 @@
  */
 
 import { z } from "zod";
+import { richTextSchema, emptyRichText, type RichText } from "@/lib/domain/rich-text";
 
 export const BLOCK_TYPES = ["text", "steps", "image", "callout", "parameterTable", "faq"] as const;
 export type BlockType = (typeof BLOCK_TYPES)[number];
 
 /**
- * Phase 2 rich text is a minimal, allow-listed document: an ordered list of paragraph
- * strings. Phase 3 replaces this with a TipTap JSON document behind the same block type.
+ * Rich text for `text` blocks, `callout` bodies, and `faq` answers.
+ *
+ * Phase 3: a restricted ProseMirror/TipTap `doc` JSON (schemaVersion 2), validated against a
+ * strict node/mark allowlist in `lib/domain/rich-text.ts`. The Phase 2 `plain-paragraphs`
+ * shape (schemaVersion 1) is still accepted for back-compat and upgraded on read. Raw HTML is
+ * never a storage format (PRD-SEC-010, AC-P3-3).
  */
-const richTextDocument = z.object({
-  schemaVersion: z.literal(1),
-  format: z.literal("plain-paragraphs"),
-  paragraphs: z.array(z.string().max(4000)).max(200),
-});
-export type RichTextDocument = z.infer<typeof richTextDocument>;
+const richTextDocument = richTextSchema;
+export type RichTextDocument = RichText;
 
 const stepSchema = z.object({
   title: z.string().min(1).max(200),
@@ -95,5 +96,37 @@ export function parseBlockPayload(input: unknown): ParseResult<BlockPayload> {
 }
 
 export function emptyTextBlock(): BlockPayload {
-  return { type: "text", schemaVersion: 1, content: { schemaVersion: 1, format: "plain-paragraphs", paragraphs: [] } };
+  return { type: "text", schemaVersion: 1, content: emptyRichText() };
+}
+
+/**
+ * A draft payload for a freshly added block. `steps`/`faq`/`image` drafts intentionally hold
+ * empty required fields — the editor keeps them as local draft state and only persists once
+ * `parseBlockPayload` succeeds, so an incomplete block is never written.
+ */
+export function draftBlockPayload(type: BlockType): Record<string, unknown> {
+  switch (type) {
+    case "text":
+      return { type: "text", schemaVersion: 1, content: emptyRichText() };
+    case "callout":
+      return { type: "callout", schemaVersion: 1, tone: "info", content: emptyRichText() };
+    case "faq":
+      return { type: "faq", schemaVersion: 1, question: "", answer: emptyRichText() };
+    case "steps":
+      return { type: "steps", schemaVersion: 1, steps: [{ title: "", instruction: "" }] };
+    case "image":
+      return { type: "image", schemaVersion: 1, imageAssetId: "" };
+    case "parameterTable":
+      return { type: "parameterTable", schemaVersion: 1, groupIds: [] };
+  }
+}
+
+/**
+ * Payload for a duplicated block (AC-P3-13): a deep copy of the ALLOWED payload only.
+ * `parameterTable` keeps the same EA-Version group id references (no parameter definitions are
+ * copied); `image` keeps the same `image_assets` id (no binary is duplicated). A new block id
+ * and adjacent position are assigned by the server action, not here.
+ */
+export function duplicateBlockPayload(payload: BlockPayload): BlockPayload {
+  return structuredClone(payload);
 }

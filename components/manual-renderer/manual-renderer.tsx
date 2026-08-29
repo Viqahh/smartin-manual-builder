@@ -2,6 +2,7 @@ import { AlertTriangle, Info, Lightbulb } from "lucide-react";
 import Image from "next/image";
 import { BROKER_MIN_LOT_NOTE_ID } from "@/lib/domain/setups";
 import { manualIdentity, type ManualViewModel } from "@/lib/manual/view-model";
+import { RichTextView } from "./rich-text-view";
 
 /**
  * The ONE shared manual renderer (spec §18). It consumes a typed ManualViewModel — no
@@ -11,12 +12,6 @@ import { manualIdentity, type ManualViewModel } from "@/lib/manual/view-model";
 
 type Section = ManualViewModel["sections"][number];
 type Block = Section["blocks"][number];
-
-function paragraphsOf(payload: Record<string, unknown>): string[] {
-  const content = (payload.content ?? payload.answer) as { paragraphs?: unknown } | undefined;
-  const list = content?.paragraphs;
-  return Array.isArray(list) ? list.filter((p): p is string => typeof p === "string") : [];
-}
 
 function CalloutIcon({ tone }: { tone: string }) {
   if (tone === "warning") return <AlertTriangle aria-hidden="true" />;
@@ -29,9 +24,7 @@ function BlockView({ block, vm }: { block: Block; vm: ManualViewModel }) {
     case "text":
       return (
         <div className="manual-content">
-          {paragraphsOf(block.payload).map((p, i) => (
-            <p key={i}>{p}</p>
-          ))}
+          <RichTextView value={block.payload.content} />
         </div>
       );
     case "callout": {
@@ -40,9 +33,7 @@ function BlockView({ block, vm }: { block: Block; vm: ManualViewModel }) {
         <aside className={`manual-callout ${tone}`}>
           <CalloutIcon tone={tone} />
           <div>
-            {paragraphsOf(block.payload).map((p, i) => (
-              <p key={i}>{p}</p>
-            ))}
+            <RichTextView value={block.payload.content} />
           </div>
         </aside>
       );
@@ -137,9 +128,7 @@ function BlockView({ block, vm }: { block: Block; vm: ManualViewModel }) {
       return (
         <div className="manual-content">
           <h3>{String(block.payload.question ?? "")}</h3>
-          {paragraphsOf(block.payload).map((p, i) => (
-            <p key={i}>{p}</p>
-          ))}
+          <RichTextView value={block.payload.answer} />
         </div>
       );
     default:

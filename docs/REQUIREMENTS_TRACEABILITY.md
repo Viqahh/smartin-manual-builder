@@ -243,7 +243,7 @@
 | Requirement ID | Question | Needed by phase | Status |
 |---|---|---|---|
 | PRD-OQ-001 | Styling approach: bespoke CSS vs Tailwind utilities vs shadcn/ui | 2 | Open |
-| PRD-OQ-002 | Inspector tabs: 2 (shipped) vs 3 (RC) | 3–5 | Open |
+| PRD-OQ-002 | Inspector tabs: 2 (shipped) vs 3 (RC) | 3–5 | Resolved (Phase 3): keep 2 tabs (Validasi, Metadata); revisit at Phase 5 — see docs/PHASE_3.md §10 |
 | PRD-OQ-003 | Auth route group `app/(auth)/login/` vs `app/login/` (shipped) | 2 | Open |
 | PRD-OQ-004 | Exact checklist item set + rule keys (v1) | 5 | Open (draft in COMP §12) |
 | PRD-OQ-005 | Which chapters are truly `required` (15 in mock vs 13 in copy vs CR table) | 2 / 5 | Open (proposal in CR chapter map) |

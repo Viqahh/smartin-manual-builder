@@ -4,6 +4,12 @@ import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { requireActiveOrg, AuthError } from "@/lib/auth/context";
 import { assertCan, AuthorizationError } from "@/lib/permissions/actions";
 import { ok, fail, type ActionResult } from "@/lib/errors";
+import {
+  sectionCompletionBlockers,
+  eaDeclaresDangerMode,
+  type CompletionBlock,
+} from "@/lib/domain/section-completion";
+import type { BlockType } from "@/lib/domain/blocks";
 import { z } from "zod";
 
 const saveSectionSchema = z.object({
@@ -42,6 +48,56 @@ export async function saveSection(input: unknown): Promise<AutosaveResult> {
     const patch: Record<string, unknown> = {};
     if (parsed.data.patch.title !== undefined) patch.title = parsed.data.patch.title;
     if (parsed.data.patch.completionState !== undefined) patch.completion_state = parsed.data.patch.completionState;
+
+    // AC-P3-9 / AC-P3-11 — refuse "complete" while a chapter-completion blocker holds.
+    if (parsed.data.patch.completionState === "complete") {
+      const { data: sec } = await supabase
+        .from("manual_sections")
+        .select("section_key, manual_version_id, manual_blocks(block_type, payload, image_asset_id, deleted_at)")
+        .eq("organization_id", orgId)
+        .eq("id", parsed.data.sectionId)
+        .maybeSingle();
+      if (sec) {
+        const rawBlocks = ((sec.manual_blocks as Record<string, unknown>[]) ?? []).filter((b) => b.deleted_at == null);
+        const blocks: CompletionBlock[] = rawBlocks.map((b) => ({
+          type: b.block_type as BlockType,
+          payload: (b.payload as Record<string, unknown>) ?? {},
+          imageAssetId: (b.image_asset_id as string | null) ?? null,
+        }));
+        const assetIds = blocks.map((b) => b.imageAssetId).filter((x): x is string => Boolean(x));
+        const imageAltText: Record<string, string | null> = {};
+        if (assetIds.length) {
+          const { data: assets } = await supabase
+            .from("image_assets")
+            .select("id, alt_text")
+            .eq("organization_id", orgId)
+            .in("id", assetIds);
+          for (const a of assets ?? []) imageAltText[a.id as string] = (a.alt_text as string | null) ?? null;
+        }
+        const { data: mv } = await supabase
+          .from("manual_versions")
+          .select("ea_versions(requirements)")
+          .eq("organization_id", orgId)
+          .eq("id", sec.manual_version_id as string)
+          .maybeSingle();
+        const requirements =
+          ((mv?.ea_versions as { requirements?: Record<string, unknown> } | null)?.requirements) ?? null;
+
+        const blockers = sectionCompletionBlockers({
+          sectionKey: sec.section_key as string,
+          blocks,
+          imageAltText,
+          eaDangerMode: eaDeclaresDangerMode(requirements),
+        });
+        if (blockers.length) {
+          return fail(
+            "VALIDATION",
+            blockers[0],
+            blockers.map((b) => ({ path: "completionState", message: b })),
+          );
+        }
+      }
+    }
 
     const { data, error } = await supabase
       .from("manual_sections")

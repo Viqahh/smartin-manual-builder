@@ -12,6 +12,7 @@ import {
   blockIdSchema,
   createBlockSchema,
   reorderBlocksSchema,
+  sectionBlocksSchema,
   updateBlockSchema,
 } from "./schema";
 
@@ -44,7 +45,9 @@ async function sectionOrgOrNull(sectionId: string, orgId: string) {
   return data ? supabase : null;
 }
 
-export async function createBlock(input: unknown): Promise<ActionResult<{ id: string; position: number }>> {
+export async function createBlock(
+  input: unknown,
+): Promise<ActionResult<{ id: string; position: number; rowVersion: number }>> {
   try {
     const { orgId, userId, roles } = await requireActiveOrg();
     assertCan(roles, "manual:update");
@@ -83,14 +86,43 @@ export async function createBlock(input: unknown): Promise<ActionResult<{ id: st
         image_asset_id: payloadCheck.value.type === "image" ? payloadCheck.value.imageAssetId : null,
         parameter_group_ids: groupIdsFor(parsed.data.blockType, payloadCheck.value),
       })
-      .select("id, position")
+      .select("id, position, row_version")
       .single();
     if (error) return mapPostgrestError(error);
 
     await writeAudit(orgId, userId, "manual:update", "manual_block", data.id as string, { op: "create" });
-    return ok({ id: data.id as string, position: Number(data.position) });
+    return ok({
+      id: data.id as string,
+      position: Number(data.position),
+      rowVersion: Number(data.row_version ?? 1),
+    });
   } catch (e) {
     return authFail(e) ?? fail("INTERNAL", "Gagal menambah blok.");
+  }
+}
+
+/** Read-only: current row_version + payload of one block (conflict classification). */
+export async function getBlockState(
+  input: unknown,
+): Promise<ActionResult<{ exists: boolean; rowVersion: number; payload: unknown }>> {
+  try {
+    const { orgId, roles } = await requireActiveOrg();
+    assertCan(roles, "manual:read");
+    const parsed = blockIdSchema.safeParse(input);
+    if (!parsed.success) return validationFail([{ path: "blockId", message: "ID blok tidak valid." }]);
+
+    const supabase = await createSupabaseServerClient();
+    const { data, error } = await supabase
+      .from("manual_blocks")
+      .select("row_version, payload, deleted_at")
+      .eq("organization_id", orgId)
+      .eq("id", parsed.data.blockId)
+      .maybeSingle();
+    if (error) return mapPostgrestError(error);
+    if (!data || data.deleted_at != null) return ok({ exists: false, rowVersion: 0, payload: null });
+    return ok({ exists: true, rowVersion: Number(data.row_version ?? 1), payload: data.payload });
+  } catch (e) {
+    return authFail(e) ?? fail("INTERNAL", "Gagal memuat status blok.");
   }
 }
 
@@ -167,7 +199,9 @@ export async function softDeleteBlock(input: unknown): Promise<ActionResult<{ id
   }
 }
 
-export async function restoreBlock(input: unknown): Promise<ActionResult<{ id: string; position: number }>> {
+export async function restoreBlock(
+  input: unknown,
+): Promise<ActionResult<{ id: string; position: number; rowVersion: number }>> {
   try {
     const { orgId, userId, roles } = await requireActiveOrg();
     assertCan(roles, "manual:update");
@@ -177,12 +211,14 @@ export async function restoreBlock(input: unknown): Promise<ActionResult<{ id: s
     const supabase = await createSupabaseServerClient();
     const { data: block } = await supabase
       .from("manual_blocks")
-      .select("id, manual_section_id, deleted_at")
+      .select("id, manual_section_id, deleted_at, row_version")
       .eq("organization_id", orgId)
       .eq("id", parsed.data.blockId)
       .maybeSingle();
     if (!block) return fail("NOT_FOUND", "Blok tidak ditemukan.");
-    if (block.deleted_at == null) return ok({ id: parsed.data.blockId, position: -1 });
+    if (block.deleted_at == null) {
+      return ok({ id: parsed.data.blockId, position: -1, rowVersion: Number(block.row_version ?? 1) });
+    }
 
     const { data: live } = await supabase
       .from("manual_blocks")
@@ -191,16 +227,116 @@ export async function restoreBlock(input: unknown): Promise<ActionResult<{ id: s
       .is("deleted_at", null);
     const position = nextPosition((live ?? []).map((r) => Number(r.position)));
 
-    const { error } = await supabase
+    const { data: updated, error } = await supabase
       .from("manual_blocks")
       .update({ deleted_at: null, position })
       .eq("organization_id", orgId)
-      .eq("id", parsed.data.blockId);
+      .eq("id", parsed.data.blockId)
+      .select("row_version")
+      .single();
     if (error) return mapPostgrestError(error);
     await writeAudit(orgId, userId, "manual:update", "manual_block", parsed.data.blockId, { op: "restore" });
-    return ok({ id: parsed.data.blockId, position });
+    return ok({ id: parsed.data.blockId, position, rowVersion: Number(updated.row_version ?? 1) });
   } catch (e) {
     return authFail(e) ?? fail("INTERNAL", "Gagal memulihkan blok.");
+  }
+}
+
+/** Read-only: current row_version + position of every live block in a section (undo/redo resync). */
+export async function getBlockRowVersions(
+  input: unknown,
+): Promise<ActionResult<{ blocks: { id: string; rowVersion: number; position: number }[] }>> {
+  try {
+    const { orgId, roles } = await requireActiveOrg();
+    assertCan(roles, "manual:read");
+    const parsed = sectionBlocksSchema.safeParse(input);
+    if (!parsed.success) return validationFail([{ path: "sectionId", message: "ID bab tidak valid." }]);
+
+    const supabase = await createSupabaseServerClient();
+    const { data, error } = await supabase
+      .from("manual_blocks")
+      .select("id, row_version, position")
+      .eq("organization_id", orgId)
+      .eq("manual_section_id", parsed.data.sectionId)
+      .is("deleted_at", null)
+      .order("position");
+    if (error) return mapPostgrestError(error);
+    return ok({
+      blocks: (data ?? []).map((r) => ({
+        id: r.id as string,
+        rowVersion: Number(r.row_version ?? 1),
+        position: Number(r.position ?? 0),
+      })),
+    });
+  } catch (e) {
+    return authFail(e) ?? fail("INTERNAL", "Gagal memuat versi blok.");
+  }
+}
+
+export async function duplicateBlock(
+  input: unknown,
+): Promise<ActionResult<{ id: string; position: number }>> {
+  try {
+    const { orgId, userId, roles } = await requireActiveOrg();
+    assertCan(roles, "manual:update");
+    const parsed = blockIdSchema.safeParse(input);
+    if (!parsed.success) return validationFail([{ path: "blockId", message: "ID blok tidak valid." }]);
+
+    const supabase = await createSupabaseServerClient();
+    const { data: src } = await supabase
+      .from("manual_blocks")
+      .select("id, manual_section_id, block_type, payload, position, image_asset_id, parameter_group_ids")
+      .eq("organization_id", orgId)
+      .eq("id", parsed.data.blockId)
+      .is("deleted_at", null)
+      .maybeSingle();
+    if (!src) return fail("NOT_FOUND", "Blok tidak ditemukan.");
+
+    // Re-validate the copied payload at the write boundary — a duplicate is still a write.
+    const payloadCheck = parseBlockPayload(src.payload);
+    if (!payloadCheck.ok) return fail("VALIDATION", "Blok sumber tidak valid untuk digandakan.");
+
+    const { data: live } = await supabase
+      .from("manual_blocks")
+      .select("id, position")
+      .eq("manual_section_id", src.manual_section_id as string)
+      .is("deleted_at", null)
+      .order("position");
+    const liveIds = (live ?? []).map((r) => r.id as string);
+    const insertPos = nextPosition((live ?? []).map((r) => Number(r.position)));
+
+    const { data: copy, error } = await supabase
+      .from("manual_blocks")
+      .insert({
+        organization_id: orgId,
+        manual_section_id: src.manual_section_id,
+        block_type: src.block_type,
+        payload: payloadCheck.value, // deep copy of ALLOWED payload only
+        position: insertPos,
+        image_asset_id: src.image_asset_id, // same asset — no binary duplicated
+        parameter_group_ids: src.parameter_group_ids ?? [], // same EA-Version group refs
+      })
+      .select("id")
+      .single();
+    if (error) return mapPostgrestError(error);
+
+    // Place the copy immediately after the source; keep positions contiguous.
+    const srcIdx = liveIds.indexOf(parsed.data.blockId);
+    const ordered = liveIds.slice();
+    ordered.splice(srcIdx + 1, 0, copy.id as string);
+    const { error: reErr } = await supabase.rpc("reorder_manual_blocks", {
+      p_section_id: src.manual_section_id,
+      p_ordered_ids: ordered,
+    });
+    if (reErr) return mapPostgrestError(reErr);
+
+    await writeAudit(orgId, userId, "manual:update", "manual_block", copy.id as string, {
+      op: "duplicate",
+      from: parsed.data.blockId,
+    });
+    return ok({ id: copy.id as string, position: srcIdx + 1 });
+  } catch (e) {
+    return authFail(e) ?? fail("INTERNAL", "Gagal menggandakan blok.");
   }
 }
 

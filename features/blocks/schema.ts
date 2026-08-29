@@ -19,6 +19,8 @@ export type UpdateBlockInput = z.infer<typeof updateBlockSchema>;
 
 export const blockIdSchema = z.object({ blockId: z.uuid() });
 
+export const sectionBlocksSchema = z.object({ sectionId: z.uuid() });
+
 export const reorderBlocksSchema = z.object({
   sectionId: z.uuid(),
   orderedBlockIds: z.array(z.uuid()).min(1),

@@ -17,6 +17,7 @@ const tpl = () => read("supabase/migrations/20260901000350_system_template.sql")
 const fns = () => read("supabase/migrations/20260901000400_functions_triggers.sql");
 const rls = () => read("supabase/migrations/20260901000500_rls.sql");
 const rpc = () => read("supabase/migrations/20260901000600_rpc.sql");
+const sectionMgmt = () => read("supabase/migrations/20260901000800_phase3_section_management.sql");
 
 describe("SQL <-> TS parity", () => {
   it("system manual template = canonical section set; instantiation reads the table (AC-P2-10/26)", () => {
@@ -229,5 +230,46 @@ describe("SQL <-> TS parity", () => {
     }
     expect(blockAction).toMatch(/parseBlockPayload\(/);
     expect(blockAction).toMatch(/rpc\("reorder_manual_blocks"/);
+  });
+
+  it("Phase 3 — chapter management: transactional reorder RPC + rename/delete guards (AC-P3-5/6)", () => {
+    const sql = sectionMgmt();
+    // transactional reorder mirrors reorder_manual_blocks (assert_author + assert_reorder_list + two-phase)
+    expect(sql).toMatch(/create or replace function public\.reorder_manual_sections\(p_manual_version_id uuid, p_ordered_ids uuid\[\]\)/);
+    expect(sql).toMatch(/perform app\.assert_author\(v_org\)/);
+    expect(sql).toMatch(/perform app\.assert_reorder_list\(p_ordered_ids, v_actual\)/);
+    expect(sql).toMatch(/position = position \+ 1000000/);
+    // only custom sections may be renamed; required non-custom deletes stay blocked by Phase 2 guard
+    expect(sql).toMatch(/guard_section_title_immutable[\s\S]*not old\.is_custom and new\.title is distinct from old\.title/);
+    expect(fns()).toMatch(/guard_required_section_delete[\s\S]*old\.required and not old\.is_custom/);
+    // grant lockdown
+    expect(sql).toMatch(/revoke execute on function public\.reorder_manual_sections\(uuid, uuid\[\]\) from anon/);
+    expect(sql).toMatch(/grant execute on function public\.reorder_manual_sections\(uuid, uuid\[\]\) to authenticated, service_role/);
+
+    // server actions route through the RPC + require manual:update
+    const secAction = read("features/sections/actions.ts");
+    for (const fn of ["addCustomSection", "renameSection", "deleteCustomSection", "reorderSections"]) {
+      expect(secAction).toContain(`export async function ${fn}`);
+    }
+    expect(secAction).toMatch(/assertCan\(roles, "manual:update"\)/);
+    expect(secAction).toMatch(/rpc\("reorder_manual_sections"/);
+    expect(secAction).toMatch(/if \(!row\.is_custom\) return fail\("FORBIDDEN"/);
+  });
+
+  it("Phase 3 — duplicateBlock copies allowed payload only + reorders adjacent (AC-P3-13)", () => {
+    const blockAction = read("features/blocks/actions.ts");
+    expect(blockAction).toContain("export async function duplicateBlock");
+    expect(blockAction).toMatch(/parseBlockPayload\(src\.payload\)/); // re-validate the copy
+    expect(blockAction).toMatch(/parameter_group_ids: src\.parameter_group_ids/); // same EA-Version refs
+    expect(blockAction).toMatch(/rpc\("reorder_manual_blocks"/); // adjacent placement
+  });
+
+  it("Phase 3 — rich text persists as structured JSON, renderer has no dangerouslySetInnerHTML (AC-P3-3)", () => {
+    expect(read("lib/domain/blocks.ts")).toMatch(/richTextDocument = richTextSchema/);
+    // no actual JSX prop / object use of dangerouslySetInnerHTML (comments allowed)
+    expect(read("components/manual-renderer/rich-text-view.tsx")).not.toMatch(/dangerouslySetInnerHTML\s*[=:]/);
+    expect(read("components/manual-renderer/manual-renderer.tsx")).not.toMatch(/dangerouslySetInnerHTML\s*[=:]/);
+    // completion gate is enforced server-side too
+    expect(read("features/manuals/autosave-actions.ts")).toMatch(/sectionCompletionBlockers/);
   });
 });

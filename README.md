@@ -6,7 +6,9 @@ Architecture-first repository for **PT Smartin Advisor Sistem's EA Developer Too
 
 **Phase 2 — Data & CRUD is implemented** (Supabase Postgres + Auth + Storage, RLS, organisation/role model, EA product/version/supported-configuration/parameter CRUD, manual + manual-version + section + block persistence, private image upload, real dynamic manual routing, action-based server authorization, `row_version` autosave with conflict handling, unit tests, CI). `lint`, `typecheck`, `test`, and `build` all pass.
 
-The schema is applied to Supabase DEV and the live integration suite (`tests/integration/rls.test.ts`) passes **27 / 0 / 0** — RLS role enforcement, SECURITY DEFINER RPC authorisation (incl. anonymous denial), same-org relational integrity, private storage, template instantiation, parameter-ownership propagation and multi-role. Remaining acceptance work is browser/end-to-end (config forms, Polaris-vs-VMax render, two-session autosave), not a schema or credential gap — see [`docs/PHASE_2.md`](docs/PHASE_2.md). Phase 3 (document editor) has not started.
+The schema is applied to Supabase DEV and the Phase 2 live integration suite (`tests/integration/rls.test.ts`) passes **27 / 0 / 0** — see [`docs/PHASE_2.md`](docs/PHASE_2.md).
+
+**Phase 3 — Document editor is implemented** (TipTap for rich text only; structured React editors for steps / image / callout tone / parameterTable / faq; block add/edit/autosave/duplicate/reorder/soft-delete/restore; chapter reorder + custom-chapter CRUD; snapshot undo/redo; in-editor image upload; completion gates for empty ALT and danger-mode warnings). Persistence stays structured JSON — no raw HTML, no `dangerouslySetInnerHTML`. Serialization spike: [`docs/PHASE_3_SERIALIZATION_SPIKE.md`](docs/PHASE_3_SERIALIZATION_SPIKE.md). Full report: [`docs/PHASE_3.md`](docs/PHASE_3.md). `lint` / `typecheck` / `test` (111 pass) / `build` all pass. **Migration `20260901000800_phase3_section_management.sql` still needs applying to Supabase DEV** for chapter-reorder persistence.
 
 Phase 1 (mocked UI foundation) is recorded in [`docs/PHASE_1.md`](docs/PHASE_1.md).
 
@@ -37,6 +39,8 @@ The documentation is split into a **Product** layer (what the product is and mus
 | [Implementation Plan](docs/IMPLEMENTATION_PLAN.md) | Phase 0–8 roadmap, phase-gate policy, principal risks and mitigations. |
 | [Phase 1 completion report](docs/PHASE_1.md) | Delivered scope and acceptance verification for the UI foundation. |
 | [Phase 2 completion report](docs/PHASE_2.md) | Delivered scope, schema/migrations, ownership model, auth/RLS, autosave strategy, acceptance-criteria results, known limitations, external-credential limitations. |
+| [Phase 3 serialization spike](docs/PHASE_3_SERIALIZATION_SPIKE.md) | Mandatory pre-TipTap spike: 6-block-type round-trip through structured JSON, security treatment, architecture rationale. |
+| [Phase 3 completion report](docs/PHASE_3.md) | Document editor: editor architecture, TipTap schema, block model, image flow, parameter ownership, reorder + undo design, `@dnd-kit` + PRD-OQ-002 decisions, permissions, security, responsive + test evidence, AC-P3 matrix. |
 | [Design System](design-system/smartin-manual-builder/MASTER.md) | Colour, type, spacing, component specs, motion, anti-patterns, pre-delivery checklist. |
 
 ## Run locally
@@ -86,4 +90,4 @@ npm run build
 
 ## Next step
 
-Phase 2 awaits a live-Supabase verification pass (see `docs/PHASE_2.md` §14) and explicit review/approval before Phase 3 (document editor) begins.
+Phase 2 was verified live against Supabase DEV (`docs/PHASE_2.md` §0c). Phase 3 (document editor) is implemented — see `docs/PHASE_3.md`; it awaits review and applying migration `20260901000800` to DEV.

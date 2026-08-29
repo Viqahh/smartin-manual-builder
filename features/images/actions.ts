@@ -1,9 +1,10 @@
 "use server";
 
+import { z } from "zod";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { requireActiveOrg, AuthError } from "@/lib/auth/context";
 import { assertCan, AuthorizationError } from "@/lib/permissions/actions";
-import { ok, fail, type ActionResult } from "@/lib/errors";
+import { ok, fail, validationFail, type ActionResult } from "@/lib/errors";
 import { imageDimensions } from "@/lib/domain/image-dimensions";
 import { writeAudit } from "@/features/audit/write";
 
@@ -84,5 +85,77 @@ export async function uploadManualImage(formData: FormData): Promise<ActionResul
     if (e instanceof AuthError) return fail(e.code, e.message);
     if (e instanceof AuthorizationError) return fail("FORBIDDEN", e.message);
     return fail("UPLOAD", "Gagal mengunggah gambar.");
+  }
+}
+
+/** A fresh 30-minute signed URL for one org image (editor picker after an upload). */
+export async function signImageUrl(id: unknown): Promise<ActionResult<{ id: string; url: string | null }>> {
+  try {
+    const { orgId, roles } = await requireActiveOrg();
+    assertCan(roles, "manual:read");
+    const parsed = z.uuid().safeParse(id);
+    if (!parsed.success) return validationFail([{ path: "id", message: "ID gambar tidak valid." }]);
+    const supabase = await createSupabaseServerClient();
+    const { data: asset } = await supabase
+      .from("image_assets")
+      .select("storage_key")
+      .eq("organization_id", orgId)
+      .eq("id", parsed.data)
+      .maybeSingle();
+    if (!asset) return fail("NOT_FOUND", "Gambar tidak ditemukan.");
+    const { data: signed } = await supabase.storage
+      .from("manual-images")
+      .createSignedUrl(asset.storage_key as string, 60 * 30);
+    return ok({ id: parsed.data, url: signed?.signedUrl ?? null });
+  } catch (e) {
+    if (e instanceof AuthError) return fail(e.code, e.message);
+    if (e instanceof AuthorizationError) return fail("FORBIDDEN", e.message);
+    return fail("INTERNAL", "Gagal menandatangani URL gambar.");
+  }
+}
+
+const updateImageAssetSchema = z.object({
+  id: z.uuid(),
+  altText: z.string().trim().max(300).nullable().optional(),
+  caption: z.string().trim().max(500).nullable().optional(),
+});
+
+/**
+ * Edit an image asset's caption / alt text (AC-P3-9). Author-only (`image:upload`) and
+ * org-scoped by RLS. Alt text lives on the asset, not the block payload, so every image block
+ * referencing the asset stays consistent.
+ */
+export async function updateImageAsset(input: unknown): Promise<ActionResult<{ id: string }>> {
+  try {
+    const { orgId, userId, roles } = await requireActiveOrg();
+    assertCan(roles, "image:upload");
+    const parsed = updateImageAssetSchema.safeParse(input);
+    if (!parsed.success) {
+      return validationFail(parsed.error.issues.map((i) => ({ path: i.path.join("."), message: i.message })));
+    }
+    const patch: Record<string, unknown> = {};
+    if (parsed.data.altText !== undefined) patch.alt_text = parsed.data.altText || null;
+    if (parsed.data.caption !== undefined) patch.caption = parsed.data.caption || null;
+    if (Object.keys(patch).length === 0) return ok({ id: parsed.data.id });
+
+    const supabase = await createSupabaseServerClient();
+    const { data, error } = await supabase
+      .from("image_assets")
+      .update(patch)
+      .eq("organization_id", orgId)
+      .eq("id", parsed.data.id)
+      .select("id")
+      .maybeSingle();
+    if (error) {
+      if (error.code === "42501" || error.code === "PGRST301") return fail("FORBIDDEN", "Akses ditolak.");
+      return fail("INTERNAL", "Gagal memperbarui gambar.");
+    }
+    if (!data) return fail("NOT_FOUND", "Gambar tidak ditemukan.");
+    await writeAudit(orgId, userId, "image:upload", "image_asset", parsed.data.id, { op: "update_meta" });
+    return ok({ id: parsed.data.id });
+  } catch (e) {
+    if (e instanceof AuthError) return fail(e.code, e.message);
+    if (e instanceof AuthorizationError) return fail("FORBIDDEN", e.message);
+    return fail("INTERNAL", "Gagal memperbarui gambar.");
   }
 }
