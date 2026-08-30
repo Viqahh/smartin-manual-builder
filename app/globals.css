@@ -446,7 +446,10 @@ button, a, input, select, textarea { touch-action: manipulation; }
 .manual-content code { padding: 1px 4px; color: #1e3a8a; background: #eff6ff; border-radius: 3px; font-size: .9em; }
 .manual-image-block { margin: 22px 0; overflow: hidden; border: 1px solid #cbd5e1; border-radius: 5px; }
 .manual-image-block img { width: 100%; height: auto; }
-.manual-image-block figcaption { padding: 8px 11px; color: #64748b; background: #f8fafc; border-top: 1px solid #dfe5ec; font-size: 9px; }
+.manual-image-block figcaption { padding: 8px 11px; color: #64748b; background: #f8fafc; border-top: 1px solid #dfe5ec; font-size: 9px; overflow-wrap: anywhere; }
+.manual-step-image { margin: 8px 0 0; overflow: hidden; border: 1px solid #dfe5ec; border-radius: 5px; }
+.manual-step-image img { width: 100%; height: auto; }
+.manual-step-image figcaption { padding: 6px 9px; color: #64748b; background: #f8fafc; border-top: 1px solid #edf0f3; font-size: 9px; overflow-wrap: anywhere; }
 .manual-callout { display: flex; gap: 10px; margin-top: 22px; padding: 12px; border: 1px solid; border-radius: 5px; }
 .manual-callout svg { width: 18px; flex: none; }
 .manual-callout strong { font-size: 11px; }
@@ -512,6 +515,87 @@ button, a, input, select, textarea { touch-action: manipulation; }
 .manual-page .step-list p { font-size: 9px; }
 .manual-page .manual-image-block { margin: 14px 0; }
 .manual-page .manual-callout { margin-top: 13px; padding: 9px; }
+
+/* Phase 7 slices 1–2 — public reading shell: header (search + versions) + TOC sidebar + document.
+   Minimal on purpose; final public UX styling is a later slice. */
+/* deep-link / TOC jumps land instantly on the public route (no dependency on smooth-scroll) */
+html:has(.pm-shell) { scroll-behavior: auto; }
+.pm-shell { min-height: 100dvh; background: #e7ebf0; }
+.pm-skip { position: absolute; left: 8px; top: 8px; z-index: 40; padding: 8px 14px; background: #0f172a; color: #fff; border-radius: 6px; transform: translateY(-160%); transition: transform 120ms ease; }
+.pm-skip:focus { transform: translateY(0); }
+
+.pm-header { position: sticky; top: 0; z-index: 30; background: #fff; border-bottom: 1px solid #d4dbe4; }
+.pm-header-top { max-width: 1180px; margin: 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; padding: 10px 20px; }
+.pm-header-title { margin: 0; font-size: 13px; font-weight: 700; color: #0f172a; }
+.pm-header-title .mono { color: #475569; font-weight: 600; }
+
+.pm-versions { max-width: 1180px; margin: 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 0 20px 10px; font-size: 12px; }
+.pm-versions-label { margin: 0; color: #64748b; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; font-size: 10px; }
+.pm-versions-viewing { margin: 0; color: #475569; }
+.pm-versions-empty { margin: 0; color: #64748b; }
+.pm-versions ul { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.pm-versions a { display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 3px 10px; border: 1px solid #cbd5e1; border-radius: 999px; color: #334155; text-decoration: none; }
+.pm-versions a:hover { background: #f1f5f9; }
+.pm-versions a.is-current { border-color: #2563eb; background: #eff6ff; color: #1e3a8a; font-weight: 700; }
+.pm-versions-num { font-variant-numeric: tabular-nums; }
+.pm-versions-tag { font-size: 9px; text-transform: uppercase; letter-spacing: .04em; color: #2563eb; }
+
+/* search */
+.pm-search { position: relative; flex: 1 1 260px; max-width: 420px; }
+.pm-search-field { display: flex; align-items: center; gap: 6px; min-height: 38px; padding: 0 8px; background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; }
+.pm-search-field:focus-within { border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, .15); }
+.pm-search-field > svg { color: #64748b; flex: 0 0 auto; }
+.pm-search input { flex: 1; min-width: 0; height: 34px; border: 0; background: transparent; font-size: 13px; outline: none; }
+.pm-search-kbd { flex: 0 0 auto; padding: 1px 5px; font-size: 10px; color: #64748b; background: #fff; border: 1px solid #cbd5e1; border-radius: 4px; }
+.pm-search-clear { flex: 0 0 auto; display: grid; place-items: center; width: 26px; height: 26px; border: 0; border-radius: 6px; background: transparent; color: #475569; cursor: pointer; }
+.pm-search-clear:hover { background: #e2e8f0; }
+.pm-search-count { margin: 2px 0 0; font-size: 11px; color: #64748b; }
+.pm-search-results { position: absolute; left: 0; right: 0; top: calc(100% + 4px); z-index: 35; max-height: min(60vh, 460px); overflow-y: auto; background: #fff; border: 1px solid #cbd5e1; border-radius: 10px; box-shadow: 0 12px 32px rgba(15, 23, 42, .18); }
+.pm-search-empty { margin: 0; padding: 14px; color: #64748b; font-size: 13px; }
+.pm-search-results ul { margin: 0; padding: 4px; list-style: none; }
+.pm-search-results a { display: grid; gap: 2px; padding: 8px 10px; border-radius: 7px; color: #0f172a; text-decoration: none; }
+.pm-search-results a:hover, .pm-search-results a:focus-visible { background: #eff6ff; }
+.pm-search-kind { font-size: 9px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; color: #2563eb; }
+.pm-search-chapter { font-size: 12px; font-weight: 700; }
+.pm-search-snippet { font-size: 12px; color: #475569; overflow-wrap: anywhere; }
+.pm-search-snippet mark { background: #fde68a; color: inherit; padding: 0 1px; border-radius: 2px; }
+
+/* layout: TOC sidebar + document */
+.pm-body { max-width: 1180px; margin: 0 auto; display: grid; grid-template-columns: minmax(0, 232px) minmax(0, 1fr); gap: 26px; padding: 20px; align-items: start; }
+.pm-toc-desktop { position: sticky; top: 96px; max-height: calc(100dvh - 120px); overflow-y: auto; background: #fff; border: 1px solid #d4dbe4; border-radius: 10px; padding: 14px 12px; }
+.pm-toc-mobile { display: none; }
+.pm-toc-heading { margin: 0 0 8px; font-size: 10px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; color: #64748b; }
+.pm-toc-list { margin: 0; padding: 0; list-style: none; counter-reset: none; }
+.pm-toc-list a { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: baseline; padding: 6px 8px; border-left: 2px solid transparent; border-radius: 0 6px 6px 0; color: #334155; text-decoration: none; font-size: 12.5px; }
+.pm-toc-list a:hover { background: #f1f5f9; }
+/* active chapter: NOT colour alone — left border + bold weight + aria-current="location" */
+.pm-toc-list a.is-active { border-left-color: #2563eb; background: #eff6ff; color: #1e3a8a; font-weight: 700; }
+.pm-toc-num { font-variant-numeric: tabular-nums; color: #94a3b8; font-weight: 700; }
+.pm-toc-title { overflow-wrap: anywhere; }
+
+.public-manual { min-width: 0; padding: 4px 0 64px; }
+.public-manual .a4-document { margin: 0; }
+.manual-page { scroll-margin-top: 104px; }
+.public-manual-banner { margin: 0 0 18px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 10px 14px; color: #475569; background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 12px; }
+.public-manual-banner p { margin: 0; font-weight: 600; }
+.public-manual-banner a { color: #2563eb; }
+
+.pm-shell a:focus-visible, .pm-shell summary:focus-visible, .pm-shell input:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
+
+@media (max-width: 900px) {
+  .pm-body { grid-template-columns: 1fr; gap: 14px; }
+  .pm-toc-desktop { display: none; }
+  .pm-toc-mobile { display: block; background: #fff; border: 1px solid #d4dbe4; border-radius: 10px; }
+  .pm-toc-mobile > summary { min-height: 44px; display: flex; align-items: center; padding: 0 14px; font-size: 13px; font-weight: 700; cursor: pointer; list-style: none; }
+  .pm-toc-mobile > summary::-webkit-details-marker { display: none; }
+  .pm-toc-mobile > summary::after { content: "▾"; margin-left: auto; color: #64748b; }
+  .pm-toc-mobile[open] > summary::after { content: "▴"; }
+  .pm-toc-mobile nav { padding: 4px 8px 10px; border-top: 1px solid #edf0f3; }
+  .pm-toc-mobile .pm-toc-list a { min-height: 40px; align-items: center; }
+  .pm-header-top { padding: 8px 14px; }
+  .pm-versions { padding: 0 14px 8px; }
+  .pm-body { padding: 14px; }
+}
 
 .login-page { min-height: 100dvh; display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(360px, .9fr); }
 .login-brand-panel { display: flex; flex-direction: column; justify-content: space-between; padding: clamp(28px, 5vw, 70px); color: white; background: #101c31; }
@@ -654,6 +738,67 @@ button, a, input, select, textarea { touch-action: manipulation; }
   .preview-page { padding: 0; background: white; }
   .a4-document { width: 210mm; max-width: none; gap: 0; }
   .manual-cover, .manual-page { width: 210mm; height: 297mm; aspect-ratio: auto; box-shadow: none; page-break-after: always; }
+}
+
+/* ============================================================
+   Phase 7 slice 4 — A4 PDF print styles (signed print page only).
+   The PDF route drives Playwright `page.pdf({ format: A4, margin, header/footer })`; these rules
+   make chapters FLOW across pages instead of one fixed page each, repeat long-table headers, and
+   keep figures / steps / callouts / table rows intact across a page boundary.
+   ============================================================ */
+.pdf-shell { background: white; color: #0f172a; }
+.pdf-shell .a4-document { width: auto; max-width: none; gap: 0; display: block; box-shadow: none; }
+
+@page { size: A4; }
+
+@media print {
+  .pdf-shell { display: block; }
+  /* cancel the generic `.manual-page { page-break-after: always }` from the block above — it would
+     force a blank page after the LAST chapter. */
+  .pdf-shell .manual-cover, .pdf-shell .manual-page { page-break-after: auto; break-after: auto; }
+  .pdf-shell .manual-cover {
+    width: auto; height: auto; min-height: 250mm; aspect-ratio: auto;
+    padding: 40mm 24mm; box-shadow: none; border: 0; overflow: visible; break-after: page;
+  }
+  .pdf-shell .manual-page {
+    width: auto; height: auto; min-height: 0; aspect-ratio: auto;
+    padding: 0; box-shadow: none; border: 0; overflow: visible; break-before: page;
+  }
+  .pdf-shell .manual-page > header, .pdf-shell .manual-page > footer { display: none; }
+  .pdf-shell .manual-page-body { padding: 0; }
+  .pdf-shell .manual-page-body > h2 { break-after: avoid; margin-bottom: 14px; }
+  .pdf-shell .chapter-kicker { break-after: avoid; }
+
+  /* long parameter / config tables: repeat the column header on every page */
+  .pdf-shell .parameter-table { break-inside: auto; }
+  .pdf-shell .parameter-table thead { display: table-header-group; }
+  .pdf-shell .parameter-table tfoot { display: table-footer-group; }
+  .pdf-shell .parameter-table tr { break-inside: avoid; }
+  .pdf-shell .manual-table-wrap { overflow: visible; }
+
+  /* keep a figure with its caption, a step intact, a callout intact */
+  .pdf-shell figure, .pdf-shell .manual-image-block, .pdf-shell .manual-step-image { break-inside: avoid; }
+  .pdf-shell .step-list article { break-inside: avoid; }
+  .pdf-shell .manual-callout { break-inside: avoid; }
+  .pdf-shell .parameter-group-heading { break-after: avoid; }
+
+  /* legibility + no horizontal overflow */
+  .pdf-shell { font-size: 11px; }
+  .pdf-shell .manual-page-body > h2 { font-size: 20px; }
+  .pdf-shell .manual-content, .pdf-shell p, .pdf-shell li, .pdf-shell td, .pdf-shell code,
+  .pdf-shell figcaption { overflow-wrap: anywhere; word-break: break-word; }
+  .pdf-shell img { max-width: 100%; height: auto; }
+  .pdf-shell .manual-image-block img { max-height: 150mm; width: auto; }
+  .pdf-shell .manual-step-image img { max-height: 90mm; width: auto; }
+
+  /* preserve backgrounds Playwright is told to print */
+  .pdf-shell * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+
+  /* trim trailing whitespace so a hairline overflow doesn't spill onto an extra near-blank page */
+  .pdf-shell .a4-document > :last-child { margin-bottom: 0; }
+  .pdf-shell .manual-page:last-of-type .manual-page-body > :last-child,
+  .pdf-shell .generic-chapter > :last-child { margin-bottom: 0; padding-bottom: 0; }
+  .pdf-shell figure:empty, .pdf-shell .manual-image-block:empty { display: none; }
 }
 
 /* ============================================================

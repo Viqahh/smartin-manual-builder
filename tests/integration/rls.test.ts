@@ -20,6 +20,9 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { REVIEW_QUEUE_STATUS } from "@/features/reviews/queue-contract";
 import { computeSnapshotHash } from "@/lib/publication/snapshot";
+import { snapshotImageDescriptors, mimeForStorageKey } from "@/lib/publication/snapshot-image";
+import { snapshotToViewModel } from "@/lib/publication/snapshot-view-model";
+import { createHash } from "node:crypto";
 
 const URL = process.env.SUPABASE_TEST_URL;
 const ANON = process.env.SUPABASE_TEST_ANON_KEY;
@@ -54,6 +57,14 @@ const PNG_1x1 = Uint8Array.from([
   0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
   0x42, 0x60, 0x82,
 ]);
+
+// 1x1 transparent GIF89a — a distinct second object (different bytes AND different MIME)
+const GIF_1x1 = Uint8Array.from([
+  0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0xff, 0xff, 0xff, 0x21, 0xf9, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x2c, 0x00, 0x00, 0x00, 0x00,
+  0x01, 0x00, 0x01, 0x00, 0x00, 0x02, 0x02, 0x44, 0x01, 0x00, 0x3b,
+]);
+const sha256 = (u8: Uint8Array) => createHash("sha256").update(u8).digest("hex");
 
 // Memoised per email: one authenticated client per identity for the whole process. The suite
 // otherwise issues ~27 sign-ins per run, and two back-to-back runs trip Supabase Auth's
@@ -3882,5 +3893,653 @@ describe.skipIf(!HAS_SERVICE)("Phase 6 slice 7 — review history + template/mem
     // (d) the row is byte-for-byte unchanged
     const after = (await svc().from("audit_events").select("id, action, metadata").eq("id", row.id).single()).data!;
     expect(JSON.stringify(after), "audit row byte-identical after every failed mutation").toBe(beforeJson);
+  });
+});
+
+// ===========================================================================
+// Phase 7 slice 1 — global public namespace + publication-safe index (20260901002500).
+// The public slug is a LINEAGE identity: claimed on FIRST publication and FROZEN there even if the
+// mutable EA-product slug later changes. `publish_manual_version` / `archive_manual_version` now
+// also maintain `public_manuals` + `public_manual_versions` inside the SAME transaction. The index
+// tables have SELECT-only grants (org-member RLS) — the ONLY writer is the publication RPC pair.
+// AC-P7-2. Every fixture entity id is per-run random so retained append-only audit rows never
+// collide across runs.
+// ===========================================================================
+describe.skipIf(!HAS_SERVICE)("Phase 7 slice 1 — global publication namespace", () => {
+  const CT1 = "c5000000-0000-4000-8000-000000000001";
+  const HASH = "a".repeat(64);
+
+  let admin: SupabaseClient, outsider: SupabaseClient, anon: SupabaseClient;
+  let ADMIN_A = "", ADMIN_B = "", OWNER_A = "", OWNER_B = "";
+  let ITEMS: { check_key: string; category: string; required: boolean }[] = [];
+  const fixtureProducts: string[] = [];
+  const fixtureManuals: string[] = [];
+  const fixtureMvs: string[] = [];
+
+  const svc = () => service();
+
+  // Build an isolated publication lineage. `opts.prod`/`opts.ver` reuse an existing EA product
+  // (org A reuses the seeded VMax product — creating one needs a real profile owner id); otherwise
+  // a throwaway product is created for `opts.ownerId`. Every insert is checked so a fixture failure
+  // is LOUD, not a later "manual version not found".
+  const mkLineage = async (
+    orgId: string,
+    opts: { prod?: string; ver?: string; slug?: string; ownerId?: string; versions: string[] },
+  ) => {
+    let prod = opts.prod;
+    let ver = opts.ver;
+    let slug = opts.slug ?? "";
+    if (!prod) {
+      prod = crypto.randomUUID();
+      ver = crypto.randomUUID();
+      slug = `p7-${crypto.randomUUID().slice(0, 12)}`;
+      const e1 = await svc().from("ea_products").insert({ id: prod, organization_id: orgId, owner_id: opts.ownerId, name: `P7 ${slug}`, slug, description: "phase7 fixture" }).select("id").single();
+      if (e1.error) throw new Error(`mkLineage ea_products: ${e1.error.message}`);
+      const e2 = await svc().from("ea_versions").insert({ id: ver, organization_id: orgId, ea_product_id: prod, version: "1.0.0", platform: "MT5", release_date: "2026-01-01", requirements: {}, support: {} }).select("id").single();
+      if (e2.error) throw new Error(`mkLineage ea_versions: ${e2.error.message}`);
+      fixtureProducts.push(prod);
+    }
+    const manual = crypto.randomUUID();
+    const m = await svc().from("manuals").insert({ id: manual, organization_id: orgId, ea_product_id: prod, template_id: SYSTEM_TEMPLATE, locale: "id" }).select("id").single();
+    if (m.error) throw new Error(`mkLineage manuals: ${m.error.message}`);
+    fixtureManuals.push(manual);
+    const mvs: { id: string; version: string }[] = [];
+    for (const v of opts.versions) {
+      const id = crypto.randomUUID();
+      const mv = await svc().from("manual_versions").insert({ id, organization_id: orgId, manual_id: manual, ea_version_id: ver, version: v, status: "DRAFT", review_round: 0, template_id: SYSTEM_TEMPLATE, template_version: 1 }).select("id").single();
+      if (mv.error) throw new Error(`mkLineage manual_versions: ${mv.error.message}`);
+      mvs.push({ id, version: v });
+      fixtureMvs.push(id);
+    }
+    return { prod: prod!, slug, ver: ver!, manual, mvs };
+  };
+
+  // Force a manual version into a clean, publishable APPROVED state (bypasses the review workflow;
+  // the publish RPC's own gates are exercised elsewhere). Deleting the snapshot cascades away any
+  // prior `public_manual_versions` row, so this is retry-safe; a `public_manuals` claim legitimately
+  // survives — it belongs to the lineage, not the version.
+  const forceApproved = async (mvId: string, orgId: string, reviewerId: string) => {
+    await svc().from("published_snapshots").delete().eq("manual_version_id", mvId);
+    await svc().from("reviews").delete().eq("manual_version_id", mvId);
+    await svc().from("checklist_results").delete().eq("manual_version_id", mvId);
+    await svc().from("manual_versions").update({ status: "APPROVED", review_round: 1, submitted_content_hash: HASH, published_at: null, archived_at: null }).eq("id", mvId);
+    await svc().from("reviews").insert([
+      { organization_id: orgId, manual_version_id: mvId, round_number: 1, review_type: "TECHNICAL", reviewer_id: reviewerId, decision: "APPROVE", summary: "", reviewed_content_hash: HASH },
+      { organization_id: orgId, manual_version_id: mvId, round_number: 1, review_type: "COMPLIANCE", reviewer_id: reviewerId, decision: "APPROVE", summary: "", reviewed_content_hash: HASH },
+    ]);
+    await svc().from("checklist_results").insert(ITEMS.map((it) => ({
+      organization_id: orgId, manual_version_id: mvId, checklist_template_id: CT1, checklist_template_version: 1,
+      check_key: it.check_key, category: it.category, required: it.required, state: "PASS", evaluator: "system",
+    })));
+  };
+
+  type SnapImage = { storageKey: string; altText?: string | null; caption?: string | null };
+  const rjson = (slug: string, version: string, images: SnapImage[] = []) => ({
+    snapshotVersion: 2,
+    public: { slug, version },
+    template: { id: SYSTEM_TEMPLATE, version: 1 },
+    content: {
+      manual: { locale: "id" }, manualVersion: { version }, organization: { name: "Org" },
+      eaProduct: { name: "P7", slug, description: "" },
+      eaVersion: { version: "1.0.0", platform: "MT5", releaseDate: "2026-01-01", requirements: {}, support: {} },
+      developer: null, supportedSetups: [], parameterGroups: [], sections: [], images: [], changelog: [],
+    },
+    images: images.map((m) => ({ storageKey: m.storageKey, altText: m.altText ?? null, caption: m.caption ?? null })),
+  });
+  // `o.snapSlug` / `o.snapVersion` let a test deliberately hand the RPC a render_json whose public
+  // identity disagrees with `p_public_slug` / `p_public_version` (stale-snapshot / lost-race case).
+  const publishRPC = (
+    mvId: string,
+    actorId: string,
+    slug: string,
+    version: string,
+    o: { storageKey?: string; images?: SnapImage[]; snapSlug?: string; snapVersion?: string } = {},
+  ) => {
+    const imgs = o.images ?? (o.storageKey ? [{ storageKey: o.storageKey }] : []);
+    const rj = rjson(o.snapSlug ?? slug, o.snapVersion ?? version, imgs);
+    return svc().rpc("publish_manual_version", {
+      p_manual_version_id: mvId, p_actor_id: actorId, p_expected_content_hash: HASH,
+      p_render_json: rj, p_snapshot_hash: computeSnapshotHash(rj), p_public_slug: slug, p_public_version: version,
+    });
+  };
+
+  const pmRow = async (slug: string) => (await svc().from("public_manuals").select("*").eq("public_slug", slug).maybeSingle()).data as Record<string, unknown> | null;
+  const pmvRows = async (pmId: string) => ((await svc().from("public_manual_versions").select("*").eq("public_manual_id", pmId).order("published_at")).data ?? []) as Record<string, unknown>[];
+  const snapRow = async (mvId: string) => (await svc().from("published_snapshots").select("*").eq("manual_version_id", mvId).maybeSingle()).data as Record<string, unknown> | null;
+  const pubAudit = async (mvId: string) => (await svc().from("audit_events").select("id", { count: "exact", head: true }).eq("entity_id", mvId).eq("action", "manual_version:publish")).count ?? 0;
+  const archiveAudit = async (mvId: string) => (await svc().from("audit_events").select("id", { count: "exact", head: true }).eq("entity_id", mvId).eq("action", "manual_version:archive")).count ?? 0;
+
+  const VMAX = { prod: VMAX_PRODUCT, ver: VMAX_EA_VERSION };
+  // Every test builds its OWN fresh lineage(s): a lineage's public slug is claimed permanently on
+  // first publication, so "first publication" assertions must never reuse a lineage across retries.
+
+  beforeAll(async () => {
+    admin = await signIn("admin@smartin.demo");
+    outsider = await signIn("outsider@smartin.demo");
+    anon = createClient(URL!, ANON!, { global: { fetch: boundFetch } });
+    ADMIN_A = (await admin.auth.getUser()).data.user!.id;
+    ADMIN_B = (await outsider.auth.getUser()).data.user!.id;
+    OWNER_B = ADMIN_B; // outsider owns the throwaway org-B product
+    const profs = (await svc().from("profiles").select("id, email")).data ?? [];
+    OWNER_A = (profs.find((p) => p.email === "developer@smartin.demo")?.id as string) ?? "";
+    expect(OWNER_A, "org-A product owner profile").toBeTruthy();
+    ITEMS = ((await svc().from("checklist_items").select("check_key, category, required").eq("checklist_template_id", CT1)).data ?? []) as typeof ITEMS;
+    expect(ITEMS.length, "checklist template CT1 loaded").toBeGreaterThan(0);
+  });
+
+  afterAll(async () => {
+    // bulk + fault-tolerant: a transient network error on one row must not strand the rest.
+    const tryOp = async (fn: () => PromiseLike<unknown>) => { try { await fn(); } catch { /* best effort */ } };
+    if (fixtureMvs.length) {
+      await tryOp(() => svc().from("published_snapshots").delete().in("manual_version_id", fixtureMvs));
+      await tryOp(() => svc().from("manual_versions").update({ status: "DRAFT" }).in("id", fixtureMvs));
+      await tryOp(() => svc().from("manual_versions").delete().in("id", fixtureMvs));
+    }
+    for (const id of fixtureManuals) await tryOp(() => svc().from("manuals").delete().eq("id", id)); // cascades public_manuals
+    for (const p of fixtureProducts) await tryOp(() => svc().from("ea_products").delete().eq("id", p));
+    // append-only `audit_events` rows (per-run random entity ids) are retained DEV/QA evidence.
+  });
+
+  // resolve the frozen slug the way the trusted server action does (pre-read the index)
+  const frozenSlug = async (orgId: string, manualId: string, fallback: string) =>
+    ((await svc().from("public_manuals").select("public_slug").eq("organization_id", orgId).eq("manual_id", manualId).maybeSingle()).data?.public_slug as string | undefined) ?? fallback;
+
+  // -------------------------------------------------------------------------
+  it("EA-product rename: public_manuals + published_snapshots + render_json.public.slug + audit + RPC return all stay coherent under the FROZEN slug", { retry: 2 }, async () => {
+    // throwaway ORG-A product so the real rename is isolated
+    const L = await mkLineage(ORG_A, { ownerId: OWNER_A, versions: ["1.0.0", "2.0.0"] });
+    const [mv1, mv2] = L.mvs;
+    const alpha = L.slug; // the product's real slug at first publication
+
+    await forceApproved(mv1.id, ORG_A, ADMIN_A);
+    const r1 = await publishRPC(mv1.id, ADMIN_A, alpha, "1.0.0");
+    expect(r1.error, "v1 publishes").toBeNull();
+    expect((r1.data as { publicSlug: string }).publicSlug).toBe(alpha);
+
+    // RENAME the EA product with the real column semantics (updateEaProduct recomputes slug)
+    const beta = `p7-beta-${crypto.randomUUID().slice(0, 8)}`;
+    expect((await svc().from("ea_products").update({ slug: beta }).eq("id", L.prod).select("id")).error, "rename ea_products.slug").toBeNull();
+
+    // the server action pre-resolves the frozen slug from the index -> passes `alpha`, not `beta`
+    await forceApproved(mv2.id, ORG_A, ADMIN_A);
+    const slugForSnapshot = await frozenSlug(ORG_A, L.manual, beta);
+    expect(slugForSnapshot, "pre-resolved slug is the frozen one").toBe(alpha);
+    const r2 = await publishRPC(mv2.id, ADMIN_A, slugForSnapshot, "2.0.0");
+    expect(r2.error, "v2 publishes").toBeNull();
+
+    // ---- full coherence: everything agrees on `alpha` ----
+    expect((r2.data as { publicSlug: string }).publicSlug, "RPC return publicSlug").toBe(alpha);
+    const pm = await pmRow(alpha);
+    expect(pm!.public_slug, "public_manuals.public_slug").toBe(alpha);
+    expect(pm!.manual_id).toBe(L.manual);
+    expect(await pmRow(beta), "nothing under the renamed slug").toBeNull();
+
+    for (const [mv, ver] of [[mv1, "1.0.0"], [mv2, "2.0.0"]] as const) {
+      const s = await snapRow(mv.id);
+      expect(s!.public_slug, `published_snapshots.public_slug ${ver}`).toBe(alpha);
+      expect((s!.render_json as { public?: { slug?: string; version?: string } }).public?.slug, `render_json.public.slug ${ver}`).toBe(alpha);
+      expect((s!.render_json as { public?: { version?: string } }).public?.version, `render_json.public.version ${ver}`).toBe(ver);
+      expect(computeSnapshotHash(s!.render_json as Record<string, unknown>), `hash ${ver}`).toBe(s!.content_hash);
+      const meta = (await svc().from("audit_events").select("metadata").eq("entity_id", mv.id).eq("action", "manual_version:publish").order("created_at", { ascending: false }).limit(1).single()).data!.metadata as Record<string, unknown>;
+      expect(meta.publicSlug, `audit metadata publicSlug ${ver}`).toBe(alpha);
+    }
+
+    const versions = await pmvRows(pm!.id as string);
+    expect(versions.map((v) => v.public_version).sort()).toEqual(["1.0.0", "2.0.0"]);
+    expect(versions.every((v) => v.publication_state === "PUBLISHED"), "both index rows PUBLISHED").toBe(true);
+  });
+
+  // -------------------------------------------------------------------------
+  it("RPC identity guard: a render_json whose public slug / version disagrees with the frozen lineage identity is rejected and rolls back; a rebuilt snapshot with the frozen slug then succeeds", { retry: 2 }, async () => {
+    const L = await mkLineage(ORG_A, { ownerId: OWNER_A, versions: ["1.0.0", "2.0.0"] });
+    const [mv1, mv2] = L.mvs;
+    const frozen = L.slug;
+
+    await forceApproved(mv1.id, ORG_A, ADMIN_A);
+    expect((await publishRPC(mv1.id, ADMIN_A, frozen, "1.0.0")).error, "v1 claims the slug").toBeNull();
+
+    await forceApproved(mv2.id, ORG_A, ADMIN_A);
+    const auditBefore = await pubAudit(mv2.id);
+
+    // (a) stale snapshot slug — render_json.public.slug says a different slug than the frozen one
+    const bad1 = await publishRPC(mv2.id, ADMIN_A, frozen, "2.0.0", { snapSlug: `p7-stale-${crypto.randomUUID().slice(0, 8)}` });
+    expect(bad1.error?.message ?? "", "stale snapshot slug rejected").toMatch(/stale content/i);
+
+    // (b) stale snapshot version — render_json.public.version != the actual manual version
+    const bad2 = await publishRPC(mv2.id, ADMIN_A, frozen, "2.0.0", { snapVersion: "9.9.9" });
+    expect(bad2.error?.message ?? "", "stale snapshot version rejected").toMatch(/stale content/i);
+
+    // (c) publish version != the locked manual_versions.version
+    const bad3 = await publishRPC(mv2.id, ADMIN_A, frozen, "9.9.9");
+    expect(bad3.error?.message ?? "", "wrong publish version rejected").toMatch(/stale content/i);
+
+    // every rejected attempt rolled back fully
+    expect((await svc().from("manual_versions").select("status").eq("id", mv2.id).single()).data!.status, "still APPROVED").toBe("APPROVED");
+    expect(await snapRow(mv2.id), "no snapshot from a rejected attempt").toBeNull();
+    expect(await pubAudit(mv2.id), "no publish audit from a rejected attempt").toBe(auditBefore);
+    const pm = await pmRow(frozen);
+    expect((await pmvRows(pm!.id as string)).length, "only v1 indexed").toBe(1);
+
+    // rebuilt snapshot with the frozen slug + correct version -> succeeds
+    const good = await publishRPC(mv2.id, ADMIN_A, frozen, "2.0.0");
+    expect(good.error, "rebuilt snapshot publishes").toBeNull();
+    expect((good.data as { publicSlug: string }).publicSlug).toBe(frozen);
+    expect((await pmvRows(pm!.id as string)).length, "now v1 + v2 indexed").toBe(2);
+  });
+
+  // -------------------------------------------------------------------------
+  it("a PUBLISHED version resolves through the index only; anon + cross-org have no DB access; every direct index write is rejected", { retry: 2 }, async () => {
+    const L2 = await mkLineage(ORG_A, { ...VMAX, versions: ["1.0.0"] });
+    const mv = L2.mvs[0];
+    await forceApproved(mv.id, ORG_A, ADMIN_A);
+    const claimed = `p7-pub-${crypto.randomUUID().slice(0, 8)}`;
+    expect((await publishRPC(mv.id, ADMIN_A, claimed, "1.0.0")).error).toBeNull();
+
+    const pm = await pmRow(claimed);
+    const [v] = await pmvRows(pm!.id as string);
+    expect(v.publication_state).toBe("PUBLISHED");
+    expect(v.published_at).toBeTruthy();
+    expect(v.archived_at).toBeNull();
+
+    // slug -> public_manuals -> public_manual_versions -> published_snapshots (the ONLY public path)
+    const snap = (await svc().from("published_snapshots").select("render_json, content_hash").eq("id", v.published_snapshot_id as string).single()).data!;
+    expect(computeSnapshotHash(snap.render_json as Record<string, unknown>), "stored snapshot re-verifies").toBe(snap.content_hash);
+
+    // anon: nothing on any of the three tables
+    expect((await anon.from("public_manuals").select("id").eq("public_slug", claimed)).data ?? [], "anon public_manuals").toHaveLength(0);
+    expect((await anon.from("public_manual_versions").select("id").eq("public_manual_id", pm!.id as string)).data ?? [], "anon public_manual_versions").toHaveLength(0);
+    expect((await anon.from("published_snapshots").select("id").eq("id", v.published_snapshot_id as string)).data ?? [], "anon published_snapshots").toHaveLength(0);
+    // org-B authenticated user: org-scoped RLS hides it
+    expect((await outsider.from("public_manuals").select("id").eq("public_slug", claimed)).data ?? [], "org B public_manuals").toHaveLength(0);
+
+    // direct service_role writes to the index are all rejected (SELECT-only grant); RPC is sole writer
+    const iIns = await svc().from("public_manuals").insert({ public_slug: `x-${crypto.randomUUID().slice(0, 8)}`, organization_id: ORG_A, manual_id: L2.manual }).select("id");
+    expect((iIns.data ?? []).length === 0 || iIns.error, "direct public_manuals INSERT rejected").toBeTruthy();
+    const vUpd = await svc().from("public_manual_versions").update({ publication_state: "ARCHIVED" }).eq("id", v.id as string).select("id");
+    expect((vUpd.data ?? []).length === 0 || vUpd.error, "direct public_manual_versions UPDATE rejected").toBeTruthy();
+    const vDel = await svc().from("public_manual_versions").delete().eq("id", v.id as string).select("id");
+    expect((vDel.data ?? []).length === 0 || vDel.error, "direct public_manual_versions DELETE rejected").toBeTruthy();
+    const mDel = await svc().from("public_manuals").delete().eq("id", pm!.id as string).select("id");
+    expect((mDel.data ?? []).length === 0 || mDel.error, "direct public_manuals DELETE rejected").toBeTruthy();
+
+    const [again] = await pmvRows(pm!.id as string);
+    expect(again.publication_state, "index row untouched by rejected writes").toBe("PUBLISHED");
+  });
+
+  // -------------------------------------------------------------------------
+  it("archive flips exactly its own public index row to ARCHIVED (with archived_at) and leaves sibling versions PUBLISHED; snapshot bytes unchanged", { retry: 2 }, async () => {
+    const L1 = await mkLineage(ORG_A, { ...VMAX, versions: ["1.0.0", "2.0.0"] });
+    const [mv1, mv2] = L1.mvs;
+    const claimed = `p7-arch-${crypto.randomUUID().slice(0, 8)}`;
+    for (const [mv, ver] of [[mv1, "1.0.0"], [mv2, "2.0.0"]] as const) {
+      await forceApproved(mv.id, ORG_A, ADMIN_A);
+      expect((await publishRPC(mv.id, ADMIN_A, claimed, ver)).error, `re-publish ${ver}`).toBeNull();
+    }
+    const pm = await pmRow(claimed);
+    const archBefore = await archiveAudit(mv1.id);
+
+    const a = await svc().rpc("archive_manual_version", { p_manual_version_id: mv1.id, p_actor_id: ADMIN_A });
+    expect(a.error, "admin archives v1").toBeNull();
+
+    const rows = await pmvRows(pm!.id as string);
+    const byVer = Object.fromEntries(rows.map((r) => [r.public_version, r]));
+    expect(byVer["1.0.0"].publication_state).toBe("ARCHIVED");
+    expect(byVer["1.0.0"].archived_at, "archived_at set").toBeTruthy();
+    expect(byVer["2.0.0"].publication_state, "sibling stays PUBLISHED").toBe("PUBLISHED");
+
+    const s = await snapRow(mv1.id);
+    expect(computeSnapshotHash(s!.render_json as Record<string, unknown>), "archived snapshot still verifies").toBe(s!.content_hash);
+    expect(await archiveAudit(mv1.id), "exactly one NEW archive audit").toBe(archBefore + 1);
+  });
+
+  // -------------------------------------------------------------------------
+  it("a second organisation cannot claim a public slug already owned by another org's lineage; the loser rolls back completely", { retry: 2 }, async () => {
+    const slug = `p7-collide-${crypto.randomUUID().slice(0, 8)}`;
+    const la = await mkLineage(ORG_A, { ...VMAX, versions: ["1.0.0"] });
+    const lb = await mkLineage(ORG_B, { ownerId: OWNER_B, versions: ["1.0.0"] });
+
+    await forceApproved(la.mvs[0].id, ORG_A, ADMIN_A);
+    expect((await publishRPC(la.mvs[0].id, ADMIN_A, slug, "1.0.0")).error, "org A claims the slug").toBeNull();
+
+    await forceApproved(lb.mvs[0].id, ORG_B, ADMIN_B);
+    const bAuditBefore = await pubAudit(lb.mvs[0].id);
+    const rB = await publishRPC(lb.mvs[0].id, ADMIN_B, slug, "1.0.0");
+    expect(rB.error, "org B is rejected").toBeTruthy();
+    expect(((rB.error!.message ?? "") + (rB.error!.details ?? "")).toLowerCase()).toMatch(/already claimed|conflict|unique/);
+
+    expect((await svc().from("manual_versions").select("status").eq("id", lb.mvs[0].id).single()).data!.status, "org B version still APPROVED").toBe("APPROVED");
+    expect(await snapRow(lb.mvs[0].id), "no org-B snapshot").toBeNull();
+    const pm = await pmRow(slug);
+    expect(pm!.organization_id, "slug owned by org A only").toBe(ORG_A);
+    expect(pm!.manual_id).toBe(la.manual);
+    expect(await pubAudit(lb.mvs[0].id), "no org-B publish audit").toBe(bAuditBefore);
+    expect((await pmvRows(pm!.id as string)).length, "only org A's version indexed").toBe(1);
+  });
+
+  // -------------------------------------------------------------------------
+  it("a concurrent first-publication race for one global slug yields exactly one winner; the loser rolls back completely", { retry: 2 }, async () => {
+    const slug = `p7-race-${crypto.randomUUID().slice(0, 8)}`;
+    const la = await mkLineage(ORG_A, { ...VMAX, versions: ["1.0.0"] });
+    const lb = await mkLineage(ORG_B, { ownerId: OWNER_B, versions: ["2.0.0"] });
+    await forceApproved(la.mvs[0].id, ORG_A, ADMIN_A);
+    await forceApproved(lb.mvs[0].id, ORG_B, ADMIN_B);
+    const aAuditBefore = await pubAudit(la.mvs[0].id);
+    const bAuditBefore = await pubAudit(lb.mvs[0].id);
+
+    const [rA, rB] = await Promise.all([
+      publishRPC(la.mvs[0].id, ADMIN_A, slug, "1.0.0"),
+      publishRPC(lb.mvs[0].id, ADMIN_B, slug, "2.0.0"),
+    ]);
+    expect([rA.error, rB.error].filter((e) => e == null), "exactly one winner").toHaveLength(1);
+    expect([rA.error, rB.error].filter((e) => e != null), "exactly one loser").toHaveLength(1);
+
+    const aWon = rA.error == null;
+    const win = aWon ? { l: la, mv: la.mvs[0].id, org: ORG_A, before: aAuditBefore } : { l: lb, mv: lb.mvs[0].id, org: ORG_B, before: bAuditBefore };
+    const lose = aWon ? { l: lb, mv: lb.mvs[0].id, org: ORG_B, before: bAuditBefore } : { l: la, mv: la.mvs[0].id, org: ORG_A, before: aAuditBefore };
+
+    const pm = await pmRow(slug);
+    expect(pm, "exactly one namespace owner").toBeTruthy();
+    expect(pm!.organization_id).toBe(win.org);
+    expect(pm!.manual_id).toBe(win.l.manual);
+    expect(await snapRow(win.mv), "winner has a snapshot").toBeTruthy();
+    expect(await pubAudit(win.mv), "winner: one new publish audit").toBe(win.before + 1);
+
+    expect((await svc().from("manual_versions").select("status").eq("id", lose.mv).single()).data!.status, "loser still APPROVED").toBe("APPROVED");
+    expect(await snapRow(lose.mv), "loser has no snapshot").toBeNull();
+    expect(await pubAudit(lose.mv), "loser has no publish audit").toBe(lose.before);
+    expect((await svc().from("public_manuals").select("id").eq("organization_id", lose.org).eq("manual_id", lose.l.manual)).data ?? [], "loser lineage claimed no slug").toHaveLength(0);
+    expect((await pmvRows(pm!.id as string)).length, "winner has exactly one indexed version").toBe(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // Slice 2 — the version-switcher query: PUBLISHED-only, publication-chronology order, older
+  // published URLs stay addressable, and every version's snapshot public_slug stays frozen after
+  // an EA-product rename (spec §17/§18/§21/§31/§32).
+  it("published-version list is PUBLISHED-only in published_at DESC order; ARCHIVED excluded; slug frozen across all versions after an EA rename", { retry: 2 }, async () => {
+    const L = await mkLineage(ORG_A, { ownerId: OWNER_A, versions: ["1.0.0", "1.1.0", "2.0.0"] });
+    const alpha = L.slug;
+    const byVer = Object.fromEntries(L.mvs.map((m) => [m.version, m.id]));
+
+    for (const v of ["1.0.0", "1.1.0", "2.0.0"]) {
+      await forceApproved(byVer[v], ORG_A, ADMIN_A);
+      expect((await publishRPC(byVer[v], ADMIN_A, alpha, v)).error, `publish ${v}`).toBeNull();
+    }
+    // archive the middle version
+    expect((await svc().rpc("archive_manual_version", { p_manual_version_id: byVer["1.1.0"], p_actor_id: ADMIN_A })).error, "archive 1.1.0").toBeNull();
+
+    // rename the EA product — public identity must not move
+    const beta = `p7-beta-${crypto.randomUUID().slice(0, 8)}`;
+    await svc().from("ea_products").update({ slug: beta }).eq("id", L.prod);
+
+    const pm = await pmRow(alpha);
+    // this is exactly the query getPublicManual runs for the switcher
+    const pub = (await svc().from("public_manual_versions")
+      .select("public_version, publication_state, published_at")
+      .eq("public_manual_id", pm!.id as string)
+      .eq("publication_state", "PUBLISHED")
+      .order("published_at", { ascending: false })).data ?? [];
+    expect(pub.map((r) => r.public_version), "PUBLISHED only, newest first").toEqual(["2.0.0", "1.0.0"]);
+    expect(pub.some((r) => r.public_version === "1.1.0"), "archived version excluded").toBe(false);
+
+    // the archived row still exists and is directly addressable (state ARCHIVED)
+    const arch = (await svc().from("public_manual_versions").select("publication_state")
+      .eq("public_manual_id", pm!.id as string).eq("public_version", "1.1.0").single()).data!;
+    expect(arch.publication_state).toBe("ARCHIVED");
+
+    // every version's frozen public_slug is `alpha`, not the renamed `beta`
+    for (const v of ["1.0.0", "1.1.0", "2.0.0"]) {
+      const s = (await svc().from("published_snapshots").select("public_slug, render_json").eq("manual_version_id", byVer[v]).single()).data!;
+      expect(s.public_slug, `snapshot public_slug ${v}`).toBe(alpha);
+      expect((s.render_json as { public?: { slug?: string } }).public?.slug, `render_json slug ${v}`).toBe(alpha);
+    }
+    expect(await pmRow(beta), "nothing under the renamed slug").toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // Slice 3 — published image delivery. Proves the boundary the /image/[idx] proxy runs on:
+  // snapshot-membership resolution via the SHARED `snapshotImageDescriptors`, real DEV-Storage
+  // bytes/MIME, cross-version + cross-org isolation, archived access, snapshot-frozen metadata,
+  // the bucket stays private, and no storage key / sentinel escapes the sanitized model. The HTTP
+  // route wiring + headers + out-of-range + unknown-publication are browser-verified. (Spec §38.)
+  it("published image delivery: membership resolution, real bytes/MIME, isolation, archived access, frozen metadata, private bucket, no storage-key leak", { retry: 2 }, async () => {
+    const rand = crypto.randomUUID().slice(0, 8);
+    const SENT = "PRIVATE-STORAGE-P7-S3-SENTINEL";
+    const keyA = `${ORG_A}/p7s3-${SENT}-${rand}-a.png`;
+    const keyB = `${ORG_A}/p7s3-${SENT}-${rand}-b.gif`;
+    const keyOrgB = `${ORG_B}/p7s3-${rand}-c.png`;
+    const store = svc().storage.from("manual-images");
+    expect((await store.upload(keyA, PNG_1x1, { contentType: "image/png", upsert: true })).error, "upload A").toBeNull();
+    expect((await store.upload(keyB, GIF_1x1, { contentType: "image/gif", upsert: true })).error, "upload B").toBeNull();
+    expect((await store.upload(keyOrgB, PNG_1x1, { contentType: "image/png", upsert: true })).error, "upload org-B").toBeNull();
+
+    // an `image_assets` row for keyA whose LIVE alt/caption differ from the frozen snapshot values
+    const assetA = crypto.randomUUID();
+    await svc().from("image_assets").insert({
+      id: assetA, organization_id: ORG_A, owner_id: OWNER_A, storage_key: keyA,
+      mime_type: "image/png", byte_size: PNG_1x1.byteLength, width: 1, height: 1,
+      alt_text: "LIVE ALT — MUST NOT SURFACE", caption: "LIVE CAPTION — MUST NOT SURFACE", scan_status: "clean",
+    });
+
+    const L = await mkLineage(ORG_A, { ownerId: OWNER_A, versions: ["1.0.0", "2.0.0"] });
+    const slug = L.slug;
+    const [mv1, mv2] = L.mvs;
+
+    await forceApproved(mv1.id, ORG_A, ADMIN_A);
+    expect((await publishRPC(mv1.id, ADMIN_A, slug, "1.0.0", { images: [
+      { storageKey: keyA, altText: "Diagram alur", caption: "Gambar 1" },
+      { storageKey: keyB, altText: "Langkah pasang", caption: null },
+    ] })).error, "publish v1").toBeNull();
+    await forceApproved(mv2.id, ORG_A, ADMIN_A);
+    expect((await publishRPC(mv2.id, ADMIN_A, slug, "2.0.0", { images: [
+      { storageKey: keyB, altText: "Hanya di v2", caption: "cap v2" },
+    ] })).error, "publish v2").toBeNull();
+
+    const rj1 = (await svc().from("published_snapshots").select("render_json, content_hash").eq("manual_version_id", mv1.id).single()).data!;
+    const rj2 = (await svc().from("published_snapshots").select("render_json, content_hash").eq("manual_version_id", mv2.id).single()).data!;
+
+    // hash re-verifies (the loader boundary), storageKey stored server-side
+    expect(computeSnapshotHash(rj1.render_json as Record<string, unknown>)).toBe(rj1.content_hash);
+    expect(JSON.stringify(rj1.render_json)).toContain(SENT);
+
+    // sanitized adapter output: no storageKey / sentinel / Supabase URL — only same-origin proxy URLs
+    const vm1 = snapshotToViewModel(rj1.render_json, { slug, version: "1.0.0", status: "PUBLISHED" });
+    const vm1json = JSON.stringify(vm1);
+    expect(vm1json).not.toContain(SENT);
+    expect(vm1json).not.toMatch(/storageKey|supabase|\/object\/sign|\/object\/authenticated|token=/i);
+    expect(vm1.images["img-0"].signedUrl).toBe(`/manual/${slug}/1.0.0/image/0`);
+    expect(vm1.images["img-1"].signedUrl).toBe(`/manual/${slug}/1.0.0/image/1`);
+    // frozen metadata — NOT the live image_assets values
+    expect(vm1.images["img-0"]).toMatchObject({ altText: "Diagram alur", caption: "Gambar 1" });
+    expect(vm1json).not.toMatch(/MUST NOT SURFACE/);
+
+    // descriptor resolution == what the route does; download real bytes; check MIME
+    const d1 = snapshotImageDescriptors(rj1.render_json);
+    expect(d1.map((x) => x.storageKey)).toEqual([keyA, keyB]);
+    const b0 = await store.download(d1[0].storageKey!);
+    expect(b0.error).toBeNull();
+    expect(sha256(new Uint8Array(await b0.data!.arrayBuffer())), "img-0 == uploaded PNG").toBe(sha256(PNG_1x1));
+    expect(mimeForStorageKey(d1[0].storageKey!)).toBe("image/png");
+    const b1 = await store.download(d1[1].storageKey!);
+    expect(sha256(new Uint8Array(await b1.data!.arrayBuffer())), "img-1 == uploaded GIF").toBe(sha256(GIF_1x1));
+    expect(mimeForStorageKey(d1[1].storageKey!)).toBe("image/gif");
+
+    // cross-version isolation: v2 image 0 is B, never v1's A
+    const d2 = snapshotImageDescriptors(rj2.render_json);
+    expect(d2.map((x) => x.storageKey)).toEqual([keyB]);
+    expect(d2.length).toBe(1); // /image/1+ on v2 is out of range -> 404 (HTTP-verified)
+
+    // cross-org isolation: org-A descriptors never reference an org-B object; only selector is snapshot+idx
+    expect([...d1, ...d2].every((x) => x.storageKey!.startsWith(`${ORG_A}/`))).toBe(true);
+    expect(JSON.stringify([rj1.render_json, rj2.render_json])).not.toContain(ORG_B);
+
+    // archived access: archive v1 -> snapshot + descriptors byte-identical
+    expect((await svc().rpc("archive_manual_version", { p_manual_version_id: mv1.id, p_actor_id: ADMIN_A })).error).toBeNull();
+    const rj1b = (await svc().from("published_snapshots").select("render_json").eq("manual_version_id", mv1.id).single()).data!;
+    expect(JSON.stringify(rj1b.render_json)).toBe(JSON.stringify(rj1.render_json));
+    expect(snapshotImageDescriptors(rj1b.render_json).map((x) => x.storageKey)).toEqual([keyA, keyB]);
+
+    // the bucket stays private: an anon storage client cannot download the object
+    const anonStore = createClient(URL!, ANON!, { global: { fetch: boundFetch } });
+    const anonDl = await anonStore.storage.from("manual-images").download(keyA);
+    expect(anonDl.error, "anon cannot download the private object").toBeTruthy();
+    expect(anonDl.data, "anon gets no bytes").toBeFalsy();
+
+    // cleanup: storage objects + the extra image_assets row (fixture products handled by afterAll)
+    await store.remove([keyA, keyB, keyOrgB]);
+    await svc().from("image_assets").delete().eq("id", assetA);
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 7 slice 4B — immutable PDF artifact lifecycle (20260901002700).
+  //   ensure_pdf_artifact / claim_pdf_artifact_generation / complete_/fail_ RPCs, the
+  //   PENDING->GENERATING->READY lifecycle, the DB generation lock, READY immutability, the
+  //   private `manual-pdf-artifacts` bucket, cross-org isolation, and the "no anon/public write"
+  //   boundary. Chromium generation + download concurrency are exercised by the deployed e2e.
+  // -------------------------------------------------------------------------
+  const HEX64 = "a".repeat(64); // valid ^[0-9a-f]{64}$
+  const artRow = async (snapId: string) =>
+    (await svc().from("published_pdf_artifacts").select("*").eq("published_snapshot_id", snapId).maybeSingle())
+      .data as Record<string, unknown> | null;
+
+  it("PDF artifact: lifecycle, DB generation lock, READY immutability, private bucket, cross-org + anon isolation", { retry: 2 }, async () => {
+    const L = await mkLineage(ORG_A, { ownerId: OWNER_A, versions: ["1.0.0", "2.0.0"] });
+    const [mv1] = L.mvs;
+    await forceApproved(mv1.id, ORG_A, ADMIN_A);
+    expect((await publishRPC(mv1.id, ADMIN_A, L.slug, "1.0.0")).error, "publish v1").toBeNull();
+
+    const snap = (await svc().from("published_snapshots").select("id, content_hash").eq("manual_version_id", mv1.id).single()).data!;
+    const snapId = snap.id as string;
+    const contentHash = snap.content_hash as string;
+    const storageKey = `pdf/v1/${contentHash}.pdf`;
+
+    // ---- (a) ensure_pdf_artifact is idempotent: exactly ONE PENDING artifact row per snapshot ----
+    // (this test drives the RPCs directly — publishRPC is the raw RPC, not the server action, so
+    //  no artifact exists until ensure creates one).
+    expect((await svc().rpc("ensure_pdf_artifact", { p_published_snapshot_id: snapId })).error).toBeNull();
+    expect((await svc().rpc("ensure_pdf_artifact", { p_published_snapshot_id: snapId })).error).toBeNull();
+    expect((await svc().from("published_pdf_artifacts").select("id", { count: "exact", head: true }).eq("published_snapshot_id", snapId)).count).toBe(1);
+    expect((await artRow(snapId))!.status).toBe("PENDING");
+
+    // The FIRST claim grants a lease (PENDING -> GENERATING).
+    const c1 = await svc().rpc("claim_pdf_artifact_generation", { p_published_snapshot_id: snapId, p_lease_seconds: 300 });
+    expect(c1.error).toBeNull();
+    expect((c1.data as { outcome: string }).outcome, "first claim").toBe("claimed");
+    const lease = (c1.data as { leaseToken: string }).leaseToken;
+    const afterClaim = await artRow(snapId);
+    expect(afterClaim!.status).toBe("GENERATING");
+    expect(afterClaim!.lease_token).toBe(lease);
+    const attemptAfterClaim = afterClaim!.attempt_count as number;
+    expect(attemptAfterClaim).toBeGreaterThanOrEqual(1);
+
+    // ---- (b) a live GENERATING lease cannot be stolen: 2nd claim -> in_progress, attempt unchanged ----
+    const c2 = await svc().rpc("claim_pdf_artifact_generation", { p_published_snapshot_id: snapId, p_lease_seconds: 300 });
+    expect((c2.data as { outcome: string }).outcome).toBe("in_progress");
+    expect((await artRow(snapId))!.attempt_count).toBe(attemptAfterClaim);
+
+    // ---- (c) complete rejects a wrong lease token / wrong snapshot hash ----
+    const badLease = await svc().rpc("complete_pdf_artifact_generation", {
+      p_published_snapshot_id: snapId, p_lease_token: crypto.randomUUID(),
+      p_snapshot_content_hash: contentHash, p_storage_key: storageKey,
+      p_pdf_sha256: HEX64, p_byte_size: 1000, p_page_count: 3,
+    });
+    expect(badLease.error, "wrong lease cannot complete").toBeTruthy();
+    const badHash = await svc().rpc("complete_pdf_artifact_generation", {
+      p_published_snapshot_id: snapId, p_lease_token: lease,
+      p_snapshot_content_hash: "b".repeat(64), p_storage_key: storageKey,
+      p_pdf_sha256: HEX64, p_byte_size: 1000, p_page_count: 3,
+    });
+    expect(badHash.error, "wrong snapshot hash cannot complete").toBeTruthy();
+    // fail rejects a wrong lease token too
+    expect((await svc().rpc("fail_pdf_artifact_generation", {
+      p_published_snapshot_id: snapId, p_lease_token: crypto.randomUUID(),
+      p_failure_code: "x", p_failure_message: "y",
+    })).error, "wrong lease cannot fail").toBeTruthy();
+    // a mismatched storage-key shape is rejected
+    expect((await svc().rpc("complete_pdf_artifact_generation", {
+      p_published_snapshot_id: snapId, p_lease_token: lease, p_snapshot_content_hash: contentHash,
+      p_storage_key: "pdf/v1/not-a-hash.pdf", p_pdf_sha256: HEX64, p_byte_size: 1000, p_page_count: 3,
+    })).error, "bad storage key shape rejected").toBeTruthy();
+
+    // ---- (d) FAILED -> claim retry increments attempt_count ----
+    expect((await svc().rpc("fail_pdf_artifact_generation", {
+      p_published_snapshot_id: snapId, p_lease_token: lease,
+      p_failure_code: "generation_error", p_failure_message: "chromium OOM (sanitized)",
+    })).error).toBeNull();
+    expect((await artRow(snapId))!.status).toBe("FAILED");
+    expect((await artRow(snapId))!.lease_token).toBeNull();
+    const cRetry = await svc().rpc("claim_pdf_artifact_generation", { p_published_snapshot_id: snapId, p_lease_seconds: 300 });
+    expect((cRetry.data as { outcome: string }).outcome).toBe("claimed");
+    const lease2 = (cRetry.data as { leaseToken: string }).leaseToken;
+    expect((await artRow(snapId))!.attempt_count).toBe(attemptAfterClaim + 1);
+
+    // ---- (e) complete -> READY ----
+    const done = await svc().rpc("complete_pdf_artifact_generation", {
+      p_published_snapshot_id: snapId, p_lease_token: lease2, p_snapshot_content_hash: contentHash,
+      p_storage_key: storageKey, p_pdf_sha256: HEX64, p_byte_size: 123456, p_page_count: 24,
+    });
+    expect(done.error).toBeNull();
+    const ready = await artRow(snapId);
+    expect(ready!.status).toBe("READY");
+    expect(ready!.storage_key).toBe(storageKey);
+    expect(ready!.pdf_sha256).toBe(HEX64);
+    expect(ready!.byte_size).toBe(123456);
+    expect(ready!.page_count).toBe(24);
+    expect(ready!.lease_token).toBeNull();
+    expect(ready!.generated_at).toBeTruthy();
+
+    // ---- (f) READY is immutable: claim returns 'ready' (never regenerates), complete/fail rejected ----
+    const cReady = await svc().rpc("claim_pdf_artifact_generation", { p_published_snapshot_id: snapId, p_lease_seconds: 300 });
+    expect((cReady.data as { outcome: string }).outcome).toBe("ready");
+    expect((await artRow(snapId))!.attempt_count, "READY claim does not bump attempt").toBe(attemptAfterClaim + 1);
+    expect((await svc().rpc("complete_pdf_artifact_generation", {
+      p_published_snapshot_id: snapId, p_lease_token: lease2, p_snapshot_content_hash: contentHash,
+      p_storage_key: storageKey, p_pdf_sha256: HEX64, p_byte_size: 999, p_page_count: 1,
+    })).error, "cannot re-complete a READY artifact").toBeTruthy();
+
+    // ---- (g) READY row cannot be mutated even by service (no UPDATE grant; trigger is belt) ----
+    const svcUpd = await svc().from("published_pdf_artifacts")
+      .update({ pdf_sha256: "c".repeat(64), byte_size: 1 }).eq("published_snapshot_id", snapId).select("id");
+    expect(svcUpd.error, "service has no UPDATE grant on published_pdf_artifacts").toBeTruthy();
+
+    // ---- (h) archived version keeps its READY artifact byte-identical ----
+    expect((await svc().rpc("archive_manual_version", { p_manual_version_id: mv1.id, p_actor_id: ADMIN_A })).error).toBeNull();
+    const afterArchive = await artRow(snapId);
+    expect(afterArchive!.status).toBe("READY");
+    expect(afterArchive!.pdf_sha256).toBe(HEX64);
+    expect(afterArchive!.byte_size).toBe(123456);
+    expect(afterArchive!.storage_key).toBe(storageKey);
+
+    // ---- (i) cross-org: an org-B authed member cannot SELECT the org-A artifact (RLS) ----
+    const bSee = await outsider.from("published_pdf_artifacts").select("id").eq("published_snapshot_id", snapId);
+    expect((bSee.data ?? []).length, "org-B cannot see org-A artifact").toBe(0);
+
+    // ---- (j) no anon / authenticated direct writes to the artifact table ----
+    for (const [name, client] of [["anon", anon], ["org-B authed", outsider]] as const) {
+      const ins = await client.from("published_pdf_artifacts").insert({
+        organization_id: ORG_A, published_snapshot_id: crypto.randomUUID(),
+        manual_version_id: mv1.id, snapshot_content_hash: HEX64,
+      }).select("id");
+      expect(ins.error, `${name} cannot INSERT published_pdf_artifacts`).toBeTruthy();
+      const upd = await client.from("published_pdf_artifacts")
+        .update({ status: "READY" }).eq("published_snapshot_id", snapId).select("id");
+      expect((upd.error || (upd.data ?? []).length === 0), `${name} cannot UPDATE published_pdf_artifacts`).toBeTruthy();
+    }
+    // anon cannot execute the lifecycle RPCs
+    expect((await anon.rpc("claim_pdf_artifact_generation", { p_published_snapshot_id: snapId, p_lease_seconds: 300 })).error,
+      "anon cannot execute claim_pdf_artifact_generation").toBeTruthy();
+
+    // ---- (k) the manual-pdf-artifacts bucket is private: anon cannot read or write it ----
+    const realKey = `pdf/v1/${"e".repeat(64)}.pdf`;
+    expect((await svc().storage.from("manual-pdf-artifacts").upload(realKey, new Uint8Array([1, 2, 3]), { upsert: true, contentType: "application/pdf" })).error,
+      "service can write the private bucket").toBeNull();
+    const anonStore = createClient(URL!, ANON!, { global: { fetch: boundFetch } }).storage.from("manual-pdf-artifacts");
+    const anonDl = await anonStore.download(realKey);
+    expect(anonDl.error, "anon cannot download a pdf artifact").toBeTruthy();
+    expect(anonDl.data, "anon gets no artifact bytes").toBeFalsy();
+    const anonUp = await anonStore.upload(`pdf/v1/${"f".repeat(64)}.pdf`, new Uint8Array([9]), { contentType: "application/pdf" });
+    expect(anonUp.error, "anon cannot upload to the pdf artifact bucket").toBeTruthy();
+
+    // cleanup
+    await svc().storage.from("manual-pdf-artifacts").remove([realKey, storageKey]);
   });
 });

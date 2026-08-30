@@ -14,6 +14,8 @@ export default defineConfig({
     environment: "node",
     globals: true,
     include: ["tests/**/*.test.{ts,tsx}"],
+    // `tests/e2e/**` needs a live deployment + server-side Chromium; it runs only via `npm run test:e2e`.
+    exclude: ["node_modules/**", "dist/**", ".next/**", "tests/e2e/**"],
     setupFiles: ["tests/setup.ts"],
     // The live integration suite makes many sequential round-trips to the remote DEV project
     // (workflow RPCs). A generous ceiling never slows a passing test.

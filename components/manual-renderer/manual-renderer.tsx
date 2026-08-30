@@ -1,7 +1,6 @@
 import { AlertTriangle, Info, Lightbulb } from "lucide-react";
-import Image from "next/image";
 import { BROKER_MIN_LOT_NOTE_ID } from "@/lib/domain/setups";
-import { manualIdentity, type ManualViewModel } from "@/lib/manual/view-model";
+import { chapterAnchor, manualIdentity, type ManualViewModel } from "@/lib/manual/view-model";
 import { RichTextView } from "./rich-text-view";
 
 /**
@@ -39,23 +38,41 @@ function BlockView({ block, vm }: { block: Block; vm: ManualViewModel }) {
       );
     }
     case "steps": {
-      const steps = (block.payload.steps as { title?: string; instruction?: string; menuPath?: string }[]) ?? [];
+      const steps =
+        (block.payload.steps as {
+          title?: string;
+          instruction?: string;
+          menuPath?: string;
+          imageAssetId?: string;
+        }[]) ?? [];
       return (
         <div className="step-list">
-          {steps.map((s, i) => (
-            <article key={i}>
-              <span>{i + 1}</span>
-              <div>
-                <h3>{s.title}</h3>
-                <p>{s.instruction}</p>
-                {s.menuPath && (
-                  <p>
-                    <code>{s.menuPath}</code>
-                  </p>
-                )}
-              </div>
-            </article>
-          ))}
+          {steps.map((s, i) => {
+            // same publication-local image namespace as image blocks; missing object => no image,
+            // the surrounding step still renders (never crashes the manual).
+            const img = s.imageAssetId ? vm.images[s.imageAssetId] : undefined;
+            return (
+              <article key={i}>
+                <span>{i + 1}</span>
+                <div>
+                  <h3>{s.title}</h3>
+                  <p>{s.instruction}</p>
+                  {s.menuPath && (
+                    <p>
+                      <code>{s.menuPath}</code>
+                    </p>
+                  )}
+                  {img?.signedUrl && (
+                    <figure className="manual-step-image">
+                      {/* eslint-disable-next-line @next/next/no-img-element -- proxy/signed URL, no optimization; natural aspect ratio */}
+                      <img src={img.signedUrl} alt={img.altText ?? ""} />
+                      {img.caption && <figcaption>{img.caption}</figcaption>}
+                    </figure>
+                  )}
+                </div>
+              </article>
+            );
+          })}
         </div>
       );
     }
@@ -66,7 +83,8 @@ function BlockView({ block, vm }: { block: Block; vm: ManualViewModel }) {
       }
       return (
         <figure className="manual-image-block">
-          <Image src={asset.signedUrl} width={960} height={540} alt={asset.altText ?? ""} unoptimized />
+          {/* eslint-disable-next-line @next/next/no-img-element -- proxy/signed URL, no optimization; natural aspect ratio */}
+          <img src={asset.signedUrl} alt={asset.altText ?? ""} />
           {(asset.caption || (block.payload.caption as string)) && (
             <figcaption>{asset.caption ?? (block.payload.caption as string)}</figcaption>
           )}
@@ -255,7 +273,9 @@ export function ManualRenderer({ vm }: { vm: ManualViewModel }) {
       </section>
 
       {vm.sections.map((section, index) => (
-        <section className="manual-page" key={section.id}>
+        // `id` is a deterministic, publication-safe chapter anchor (no DB identity); harmless in
+        // the workspace preview and future PDF. TOC + search deep-link to it.
+        <section className="manual-page" key={section.id} id={chapterAnchor(index)}>
           <header>
             <span>{id.eaName} · User Manual</span>
             <span>Version {id.manualVersion}</span>

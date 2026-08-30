@@ -1,0 +1,9 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "app/manual/[eaSlug]/[version]/pdf/route.ts": {
+      "memory": 2048,
+      "maxDuration": 300
+    }
+  }
+}

@@ -167,9 +167,21 @@ export class SupabaseManualDataSource implements ManualDataSource {
       })),
     };
 
-    // Sign URLs for images referenced by blocks (private bucket).
+    // Sign URLs for every image referenced by a block — image blocks AND steps[].imageAssetId
+    // (private bucket). The shared renderer resolves both from vm.images.
     const assetIds = Array.from(
-      new Set(vm.sections.flatMap((s) => s.blocks.map((b) => b.imageAssetId).filter((x): x is string => Boolean(x)))),
+      new Set(
+        vm.sections.flatMap((s) =>
+          s.blocks.flatMap((b) => {
+            const ids = b.imageAssetId ? [b.imageAssetId] : [];
+            const steps = (b.payload as { steps?: { imageAssetId?: string }[] }).steps;
+            if (Array.isArray(steps)) {
+              for (const st of steps) if (typeof st.imageAssetId === "string") ids.push(st.imageAssetId);
+            }
+            return ids;
+          }),
+        ),
+      ),
     );
     if (assetIds.length) {
       const { data: assets } = await supabase

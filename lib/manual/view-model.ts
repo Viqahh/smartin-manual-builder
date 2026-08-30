@@ -125,6 +125,13 @@ export async function assembleManualViewModel(
   return vm;
 }
 
+/**
+ * Deterministic public DOM anchor for the Nth rendered chapter (0-based). Stable within one
+ * immutable snapshot and carries no database identity. THE single source of chapter anchors —
+ * `ManualRenderer`, the public TOC and public search all use this helper.
+ */
+export const chapterAnchor = (index: number): string => `chapter-${index}`;
+
 /** Cover / metadata projection used by the builder header, inspector, preview, and cover. */
 export function manualIdentity(vm: ManualViewModel) {
   return {
