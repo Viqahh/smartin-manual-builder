@@ -16,12 +16,23 @@
  *   compliance@smartin.demo  COMPLIANCE_REVIEWER              org A
  *   outsider@smartin.demo    ADMIN                            org B
  */
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { REVIEW_QUEUE_STATUS } from "@/features/reviews/queue-contract";
+import { computeSnapshotHash } from "@/lib/publication/snapshot";
 
 const URL = process.env.SUPABASE_TEST_URL;
 const ANON = process.env.SUPABASE_TEST_ANON_KEY;
 const SECRET = process.env.SUPABASE_SECRET_KEY;
+
+// node 20's global fetch (undici) can wedge a pooled connection after a PL/pgSQL RAISE, leaving a
+// later request hanging with no timeout — vitest's per-test timeout then can't abort it. Bound
+// every Supabase HTTP call so a stuck request rejects instead of stalling the whole run.
+const boundFetch: typeof fetch = (input, init) => {
+  const timeout = AbortSignal.timeout(25_000);
+  const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
+  return fetch(input as RequestInfo, { ...(init ?? {}), signal });
+};
 
 const HAS_API = Boolean(URL && ANON);
 const HAS_SERVICE = Boolean(URL && ANON && SECRET);
@@ -44,13 +55,25 @@ const PNG_1x1 = Uint8Array.from([
   0x42, 0x60, 0x82,
 ]);
 
+// Memoised per email: one authenticated client per identity for the whole process. The suite
+// otherwise issues ~27 sign-ins per run, and two back-to-back runs trip Supabase Auth's
+// per-IP rate limit for /token (causing supabase-js to retry-with-backoff and stall). Tests
+// only READ with these clients (no signOut / setSession — asserted), so sharing is safe.
+const _clients = new Map<string, Promise<SupabaseClient>>();
 async function signIn(email: string): Promise<SupabaseClient> {
-  const c = createClient(URL!, ANON!);
-  const { error } = await c.auth.signInWithPassword({ email, password: PW });
-  if (error) throw error;
-  return c;
+  let p = _clients.get(email);
+  if (!p) {
+    p = (async () => {
+      const c = createClient(URL!, ANON!, { global: { fetch: boundFetch } });
+      const { error } = await c.auth.signInWithPassword({ email, password: PW });
+      if (error) throw error;
+      return c;
+    })();
+    _clients.set(email, p);
+  }
+  return p;
 }
-const service = () => createClient(URL!, SECRET!, { auth: { persistSession: false } });
+const service = () => createClient(URL!, SECRET!, { auth: { persistSession: false }, global: { fetch: boundFetch } });
 
 const ALL_MUTATING_RPCS: [string, Record<string, unknown>][] = [
   ["create_ea_version_with_setups", {
@@ -80,7 +103,7 @@ const ALL_MUTATING_RPCS: [string, Record<string, unknown>][] = [
 // ---------------------------------------------------------------------------
 describe.skipIf(!HAS_API)("Finding 1 — anonymous client cannot invoke ANY mutating RPC", () => {
   it("every mutating public RPC is denied to an unauthenticated (anon) caller", async () => {
-    const anon = createClient(URL!, ANON!); // no sign-in
+    const anon = createClient(URL!, ANON!, { global: { fetch: boundFetch } }); // no sign-in
     for (const [name, args] of ALL_MUTATING_RPCS) {
       const { error } = await anon.rpc(name, args);
       expect(error, `${name} should reject an anonymous caller`).toBeTruthy();
@@ -1320,7 +1343,7 @@ describe.skipIf(!HAS_API)("Phase 4 — ai_revisions RLS + idempotency", () => {
   });
 
   beforeAll(async () => {
-    anon = createClient(URL!, ANON!);
+    anon = createClient(URL!, ANON!, { global: { fetch: boundFetch } });
     dev = await signIn("developer@smartin.demo");
     technical = await signIn("reviewer@smartin.demo");
     compliance = await signIn("compliance@smartin.demo");
@@ -1415,9 +1438,12 @@ describe.skipIf(!HAS_SERVICE)("Phase 5 — checklist RLS", () => {
     dev = await signIn("developer@smartin.demo");
     technical = await signIn("reviewer@smartin.demo");
     outsider = await signIn("outsider@smartin.demo");
-    anon = createClient(URL!, ANON!);
+    anon = createClient(URL!, ANON!, { global: { fetch: boundFetch } });
 
-    // seed one Org A result row via the service role (the only path that may write)
+    // seed one Org A result row via the service role (the only path that may write).
+    // Defensive: this suite runs against a shared DEV project — clear any row this key left behind
+    // by an earlier interrupted run so the seed is deterministic (no 23505 on a stale duplicate).
+    await service().from("checklist_results").delete().eq("manual_version_id", VMAX_MV).eq("check_key", "CHK-VERSI-MATCH");
     const ins = await service()
       .from("checklist_results")
       .insert({
@@ -1577,5 +1603,2284 @@ describe.skipIf(!HAS_SERVICE)("Phase 5 — checklist RLS", () => {
       evaluator: "system",
     });
     expect(dup.error?.code, "duplicate item per manual version rejected").toBe("23505");
+  });
+});
+
+// ===========================================================================
+// Phase 6 slice 1 — foundation: contributors, reviews/comments/changelog/
+// published_snapshots schema, RLS, cross-org integrity. (AC-P6-6 groundwork,
+// AC-P6-13 groundwork; full workflow is slices 2-6.)
+// ===========================================================================
+describe.skipIf(!HAS_SERVICE)("Phase 6 slice 1 — foundation schema + RLS + provenance", () => {
+  const MISSING_UUID = "00000000-0000-4000-8000-0000000000ff";
+  let dev: SupabaseClient;
+  let outsider: SupabaseClient;
+  let reviewer: SupabaseClient;
+  let anon: SupabaseClient;
+  let DEV = "";
+  let OUT = "";
+  let REV = "";
+  let coverSectionId: string;
+
+  beforeAll(async () => {
+    dev = await signIn("developer@smartin.demo");
+    outsider = await signIn("outsider@smartin.demo");
+    reviewer = await signIn("reviewer@smartin.demo");
+    anon = createClient(URL!, ANON!, { global: { fetch: boundFetch } });
+    DEV = (await dev.auth.getUser()).data.user!.id;
+    OUT = (await outsider.auth.getUser()).data.user!.id;
+    REV = (await reviewer.auth.getUser()).data.user!.id;
+    const s = await service().from("manual_sections").select("id").eq("manual_version_id", VMAX_MV).eq("section_key", "cover").single();
+    coverSectionId = s.data!.id as string;
+    // clean slate for this manual version
+    await service().from("manual_version_contributors").delete().eq("manual_version_id", VMAX_MV);
+    await service().from("published_snapshots").delete().eq("manual_version_id", VMAX_MV);
+  });
+
+  afterAll(async () => {
+    await service().from("manual_version_contributors").delete().eq("manual_version_id", VMAX_MV);
+    await service().from("published_snapshots").delete().eq("manual_version_id", VMAX_MV);
+    await service().from("manual_blocks").delete().eq("manual_section_id", coverSectionId);
+    const left = await service().from("manual_version_contributors").select("id").eq("manual_version_id", VMAX_MV);
+    expect(left.data ?? [], "slice-1 contributor fixtures cleaned").toHaveLength(0);
+  });
+
+  // --- new columns exist ---
+  it("manual_versions gained reviewer / round / submitted-hash columns", async () => {
+    const { data, error } = await service()
+      .from("manual_versions")
+      .select("technical_reviewer_id, compliance_reviewer_id, review_round, submitted_content_hash")
+      .eq("id", VMAX_MV)
+      .single();
+    expect(error).toBeNull();
+    expect(data!.review_round).toBe(0);
+    expect(data!.technical_reviewer_id).toBeNull();
+    expect(data!.submitted_content_hash).toBeNull();
+  });
+
+  // --- contributor provenance (AC-P6-6 groundwork) ---
+  it("an authenticated author edit records exactly one durable contributor row", async () => {
+    const ins = await dev.from("manual_blocks").insert({
+      organization_id: ORG_A,
+      manual_section_id: coverSectionId,
+      block_type: "text",
+      payload: { type: "text", schemaVersion: 1, content: { schemaVersion: 1, format: "plain-paragraphs", paragraphs: ["p6 slice1 probe"] } },
+      position: 900,
+    }).select("id").single();
+    expect(ins.error, "developer may author a block").toBeNull();
+
+    const rows = await service().from("manual_version_contributors").select("user_id, contribution_count").eq("manual_version_id", VMAX_MV);
+    expect((rows.data ?? []).map((r) => r.user_id)).toEqual([DEV]);
+
+    // a second edit by the same user bumps the count, still one row (unique identity)
+    await dev.from("manual_blocks").update({ payload: { type: "text", schemaVersion: 1, content: { schemaVersion: 1, format: "plain-paragraphs", paragraphs: ["edited"] } } }).eq("id", ins.data!.id);
+    const rows2 = await service().from("manual_version_contributors").select("user_id, contribution_count").eq("manual_version_id", VMAX_MV);
+    expect(rows2.data).toHaveLength(1);
+    expect(Number(rows2.data![0].contribution_count)).toBeGreaterThanOrEqual(2);
+
+    await service().from("manual_blocks").delete().eq("id", ins.data!.id);
+  });
+
+  it("unique (manual_version_id, user_id) is enforced", async () => {
+    await service().from("manual_version_contributors").insert({ organization_id: ORG_A, manual_version_id: VMAX_MV, user_id: DEV });
+    const dup = await service().from("manual_version_contributors").insert({ organization_id: ORG_A, manual_version_id: VMAX_MV, user_id: DEV });
+    expect(dup.error?.code).toBe("23505");
+    await service().from("manual_version_contributors").delete().eq("manual_version_id", VMAX_MV);
+  });
+
+  it("checklist evaluation does NOT create contributor provenance", async () => {
+    await service().from("manual_version_contributors").delete().eq("manual_version_id", VMAX_MV);
+    await service().from("checklist_results").insert({
+      organization_id: ORG_A, manual_version_id: VMAX_MV,
+      checklist_template_id: "c5000000-0000-4000-8000-000000000001", checklist_template_version: 1,
+      check_key: "CHK-VERSI-DUA", category: "identity", required: true, state: "MISSING", evidence: {}, evaluator: "system",
+    });
+    const rows = await service().from("manual_version_contributors").select("id").eq("manual_version_id", VMAX_MV);
+    expect(rows.data ?? [], "checklist write is not authorship").toHaveLength(0);
+    await service().from("checklist_results").delete().eq("manual_version_id", VMAX_MV);
+  });
+
+  it("a service-role (no auth.uid) write does not fabricate a contributor", async () => {
+    await service().from("manual_version_contributors").delete().eq("manual_version_id", VMAX_MV);
+    const b = await service().from("manual_blocks").insert({
+      organization_id: ORG_A, manual_section_id: coverSectionId, block_type: "text",
+      payload: { type: "text", schemaVersion: 1, content: { schemaVersion: 1, format: "plain-paragraphs", paragraphs: ["svc"] } },
+      position: 901,
+    }).select("id").single();
+    const rows = await service().from("manual_version_contributors").select("id").eq("manual_version_id", VMAX_MV);
+    expect(rows.data ?? [], "no auth.uid -> no fabricated history").toHaveLength(0);
+    await service().from("manual_blocks").delete().eq("id", b.data!.id);
+  });
+
+  it("a non-service caller cannot write manual_version_contributors directly (no INSERT policy)", async () => {
+    const ins = await dev.from("manual_version_contributors").insert({ organization_id: ORG_A, manual_version_id: VMAX_MV, user_id: DEV }).select("id");
+    expect(ins.data ?? [], "developer cannot forge contributor rows").toHaveLength(0);
+  });
+
+  it("a cross-org contributor row is impossible (composite FK)", async () => {
+    const bad = await service().from("manual_version_contributors").insert({ organization_id: ORG_B, manual_version_id: VMAX_MV, user_id: OUT });
+    expect(bad.error?.code, "wrong-org parent reference rejected").toBe("23503");
+  });
+
+  // --- reviews / review_comments / changelog cross-org + immutability ---
+  it("reviews decision rows: UPDATE blocked for everyone; app-caller DELETE blocked; constraints hold", async () => {
+    const r = await service().from("reviews").insert({
+      organization_id: ORG_A, manual_version_id: VMAX_MV, round_number: 1, review_type: "TECHNICAL",
+      reviewer_id: REV, decision: "APPROVE", summary: "", reviewed_content_hash: "deadbeef",
+    }).select("id").single();
+    expect(r.error, "seed a review row").toBeNull();
+    // §39 — a decision can never be rewritten, not even by service-role
+    const upd = await service().from("reviews").update({ decision: "REQUEST_CHANGES" }).eq("id", r.data!.id).select("id");
+    expect(upd.error, "review decision cannot be rewritten").toBeTruthy();
+    // an authenticated non-service caller cannot delete it (no client write policy)
+    const appDel = await dev.from("reviews").delete().eq("id", r.data!.id).select("id");
+    expect(appDel.data ?? [], "app caller cannot delete a review decision").toHaveLength(0);
+    const stillThere = await service().from("reviews").select("id").eq("id", r.data!.id);
+    expect(stillThere.data ?? [], "review decision survived the app-caller delete").toHaveLength(1);
+    // constraints: REQUEST_CHANGES needs a summary; one decision per (version, round, type)
+    const noSummary = await service().from("reviews").insert({
+      organization_id: ORG_A, manual_version_id: VMAX_MV, round_number: 2, review_type: "TECHNICAL",
+      reviewer_id: REV, decision: "REQUEST_CHANGES", summary: "   ", reviewed_content_hash: "x",
+    });
+    expect(noSummary.error, "REQUEST_CHANGES needs a non-empty summary").toBeTruthy();
+    const dupRound = await service().from("reviews").insert({
+      organization_id: ORG_A, manual_version_id: VMAX_MV, round_number: 1, review_type: "TECHNICAL",
+      reviewer_id: REV, decision: "APPROVE", summary: "", reviewed_content_hash: "y",
+    });
+    expect(dupRound.error?.code, "one technical decision per round").toBe("23505");
+    // DELETE is permitted only for a trusted service request (cascade / infra cleanup)
+    const cleaned = await service().from("reviews").delete().eq("manual_version_id", VMAX_MV).select("id");
+    expect(cleaned.error, "service-role may remove the fixture review row").toBeNull();
+    const gone = await service().from("reviews").select("id").eq("manual_version_id", VMAX_MV);
+    expect(gone.data ?? [], "reviews fixture cleaned").toHaveLength(0);
+  });
+
+  it("review_comments: foreign / cross-org anchors are rejected", async () => {
+    const foreignSection = await service().from("review_comments").insert({
+      organization_id: ORG_A, manual_version_id: VMAX_MV, round_number: 1, review_type: "TECHNICAL",
+      author_id: REV, section_id: MISSING_UUID, body: "x",
+    });
+    expect(foreignSection.error, "unknown section anchor rejected").toBeTruthy();
+    const wrongOrg = await service().from("review_comments").insert({
+      organization_id: ORG_B, manual_version_id: VMAX_MV, round_number: 1, review_type: "TECHNICAL",
+      author_id: REV, body: "x",
+    });
+    expect(wrongOrg.error?.code, "wrong-org manual_version reference rejected").toBe("23503");
+    const bothAnchors = await service().from("review_comments").insert({
+      organization_id: ORG_A, manual_version_id: VMAX_MV, round_number: 1, review_type: "TECHNICAL",
+      author_id: REV, section_id: coverSectionId, block_id: coverSectionId, body: "x",
+    });
+    expect(bothAnchors.error, "at most one anchor").toBeTruthy();
+  });
+
+  it("changelog_entries: cross-org manual_version reference rejected", async () => {
+    const bad = await service().from("changelog_entries").insert({
+      organization_id: ORG_B, manual_version_id: VMAX_MV, position: 0, entry_type: "ADDED", body: "x", source_ea_version_id: VMAX_EA_VERSION,
+    });
+    expect(bad.error?.code).toBe("23503");
+    const badType = await service().from("changelog_entries").insert({
+      organization_id: ORG_A, manual_version_id: VMAX_MV, position: 0, entry_type: "REMOVED", body: "x", source_ea_version_id: VMAX_EA_VERSION,
+    });
+    expect(badType.error, "entry_type check constraint").toBeTruthy();
+  });
+
+  // --- published_snapshots uniqueness ---
+  it("only one published_snapshot per manual version", async () => {
+    const row = {
+      organization_id: ORG_A, manual_version_id: VMAX_MV, render_json: { v: 1 }, content_hash: "abc",
+      public_slug: "vmax-ea-demo", public_version: "1.0.0",
+    };
+    const first = await service().from("published_snapshots").insert(row).select("id").single();
+    expect(first.error, "first snapshot inserts").toBeNull();
+    const second = await service().from("published_snapshots").insert({ ...row, content_hash: "def", public_version: "1.0.1" });
+    expect(second.error?.code, "second snapshot for same version rejected").toBe("23505");
+    await service().from("published_snapshots").delete().eq("manual_version_id", VMAX_MV);
+  });
+
+  it("a non-service caller cannot write published_snapshots (no policy)", async () => {
+    const ins = await dev.from("published_snapshots").insert({
+      organization_id: ORG_A, manual_version_id: VMAX_MV, render_json: {}, content_hash: "x", public_slug: "s", public_version: "1.0.0",
+    }).select("id");
+    expect(ins.data ?? [], "developer cannot forge a snapshot").toHaveLength(0);
+  });
+
+  // --- RLS read isolation ---
+  it("org B cannot read any org A foundation rows", async () => {
+    // seed one org-A row of each readable kind
+    await service().from("manual_version_contributors").insert({ organization_id: ORG_A, manual_version_id: VMAX_MV, user_id: DEV });
+    for (const t of ["manual_version_contributors", "reviews", "review_comments", "changelog_entries", "published_snapshots"]) {
+      const { data } = await outsider.from(t).select("id").eq("organization_id", ORG_A);
+      expect(data ?? [], `${t}: org B reads nothing of org A`).toHaveLength(0);
+    }
+    // the same org-A member DOES see its own contributor rows
+    const mine = await dev.from("manual_version_contributors").select("id").eq("manual_version_id", VMAX_MV);
+    expect((mine.data ?? []).length).toBeGreaterThan(0);
+    await service().from("manual_version_contributors").delete().eq("manual_version_id", VMAX_MV);
+  });
+
+  it("anon cannot read or write any foundation table", async () => {
+    for (const t of ["manual_version_contributors", "reviews", "review_comments", "changelog_entries", "published_snapshots"]) {
+      const rd = await anon.from(t).select("id");
+      expect(rd.data ?? [], `anon reads nothing from ${t}`).toHaveLength(0);
+    }
+    const wr = await anon.from("changelog_entries").insert({ organization_id: ORG_A, manual_version_id: VMAX_MV, position: 0, entry_type: "ADDED", body: "x" });
+    expect(wr.error, "anon insert denied").toBeTruthy();
+  });
+});
+
+// ===========================================================================
+// Phase 6 slice 2 — workflow commands + assignment + queues (AC-P6-2/3/5/6/7/8).
+// Uses a DEDICATED throwaway manual version so the shared demo (VMAX_MV) is never
+// left in a review state. All RPC calls go through authenticated clients except
+// fixture setup/reset (service-role). afterAll drops the fixture + its audit trail.
+// ===========================================================================
+describe.skipIf(!HAS_SERVICE)("Phase 6 slice 2 — review workflow", () => {
+  const MANUAL_ID = "60000000-0000-4000-8000-0000000000a2";
+  const MV = "60000000-0000-4000-8000-0000000000b2";
+  const H1 = "1".repeat(64);
+  const H2 = "2".repeat(64);
+  let dev: SupabaseClient; // developer@ = DEVELOPER + TECHNICAL_REVIEWER (multi-role)
+  let admin: SupabaseClient;
+  let reviewer: SupabaseClient; // reviewer@ = TECHNICAL_REVIEWER only
+  let compliance: SupabaseClient; // compliance@ = COMPLIANCE_REVIEWER only
+  let outsider: SupabaseClient; // org B
+  let DEV = "", ADMIN = "", REV = "", COMP = "", OUT = "";
+  let coverSectionId = "";
+
+  const svc = () => service();
+  const mvRow = async () =>
+    (await svc().from("manual_versions").select("status, review_round, submitted_content_hash, technical_reviewer_id, compliance_reviewer_id").eq("id", MV).single()).data!;
+  const auditCountFor = async (action?: string) => {
+    let q = svc().from("audit_events").select("id", { count: "exact", head: true }).eq("entity_id", MV);
+    if (action) q = q.eq("action", action);
+    return (await q).count ?? 0;
+  };
+
+  beforeAll(async () => {
+    dev = await signIn("developer@smartin.demo");
+    admin = await signIn("admin@smartin.demo");
+    reviewer = await signIn("reviewer@smartin.demo");
+    compliance = await signIn("compliance@smartin.demo");
+    outsider = await signIn("outsider@smartin.demo");
+    DEV = (await dev.auth.getUser()).data.user!.id;
+    ADMIN = (await admin.auth.getUser()).data.user!.id;
+    REV = (await reviewer.auth.getUser()).data.user!.id;
+    COMP = (await compliance.auth.getUser()).data.user!.id;
+    OUT = (await outsider.auth.getUser()).data.user!.id;
+
+    await svc().from("manual_versions").delete().eq("id", MV);
+    await svc().from("manuals").delete().eq("id", MANUAL_ID);
+    await svc().from("manuals").insert({
+      id: MANUAL_ID, organization_id: ORG_A, ea_product_id: VMAX_PRODUCT, template_id: SYSTEM_TEMPLATE, locale: "id",
+    });
+    await svc().from("manual_versions").insert({
+      id: MV, organization_id: ORG_A, manual_id: MANUAL_ID, ea_version_id: VMAX_EA_VERSION,
+      version: "9.9.1", status: "DRAFT", template_id: SYSTEM_TEMPLATE, template_version: 1,
+    });
+    const s = await svc().from("manual_sections").insert({
+      organization_id: ORG_A, manual_version_id: MV, section_key: "cover", title: "Sampul", required: true, position: 0,
+    }).select("id").single();
+    coverSectionId = s.data!.id as string;
+  });
+
+  afterAll(async () => {
+    await svc().from("reviews").delete().eq("manual_version_id", MV);
+    await svc().from("manual_versions").delete().eq("id", MV);
+    await svc().from("manuals").delete().eq("id", MANUAL_ID);
+    await svc().from("audit_events").delete().eq("entity_id", MV); // throwaway fixture audit trail
+    await svc().from("memberships").delete().eq("organization_id", ORG_A).eq("user_id", ADMIN).eq("role", "TECHNICAL_REVIEWER");
+  });
+
+  // reset to a clean assigned DRAFT before each test
+  beforeEach(async () => {
+    await svc().from("reviews").delete().eq("manual_version_id", MV);
+    await svc().from("manual_version_contributors").delete().eq("manual_version_id", MV);
+    await svc().from("manual_blocks").delete().eq("manual_section_id", coverSectionId);
+    await svc().from("manual_versions").update({
+      status: "DRAFT", review_round: 0, submitted_content_hash: null,
+      technical_reviewer_id: REV, compliance_reviewer_id: COMP,
+    }).eq("id", MV);
+  });
+
+  // --- assignment ---
+  it("admin assigns valid reviewers -> one audit event; reassignment -> another", { retry: 2 }, async () => {
+    await svc().from("manual_versions").update({ technical_reviewer_id: null, compliance_reviewer_id: null }).eq("id", MV);
+    const before = await auditCountFor("manual_version:assign_reviewers");
+    const r1 = await admin.rpc("assign_reviewers", { p_manual_version_id: MV, p_technical_reviewer_id: REV, p_compliance_reviewer_id: COMP });
+    expect(r1.error, "admin assigns").toBeNull();
+    expect(await auditCountFor("manual_version:assign_reviewers")).toBe(before + 1);
+    expect((await mvRow()).technical_reviewer_id).toBe(REV);
+
+    const r2 = await admin.rpc("assign_reviewers", { p_manual_version_id: MV, p_technical_reviewer_id: DEV, p_compliance_reviewer_id: COMP });
+    expect(r2.error, "reassign technical reviewer").toBeNull();
+    expect(await auditCountFor("manual_version:assign_reviewers")).toBe(before + 2);
+    const meta = (await svc().from("audit_events").select("metadata").eq("entity_id", MV).eq("action", "manual_version:assign_reviewers").order("created_at", { ascending: false }).limit(1).single()).data!.metadata as Record<string, unknown>;
+    expect(meta.previousTechnicalReviewerId).toBe(REV);
+    expect(meta.technicalReviewerId).toBe(DEV);
+    expect(JSON.stringify(meta)).not.toMatch(/paragraph|content|payload/i); // no manual body
+  });
+
+  it("wrong-role / cross-org / inactive assignees are rejected (RPC + DB guard)", { retry: 2 }, async () => {
+    expect((await admin.rpc("assign_reviewers", { p_manual_version_id: MV, p_technical_reviewer_id: COMP, p_compliance_reviewer_id: COMP })).error, "compliance user as technical reviewer").toBeTruthy();
+    expect((await admin.rpc("assign_reviewers", { p_manual_version_id: MV, p_technical_reviewer_id: REV, p_compliance_reviewer_id: REV })).error, "technical user as compliance reviewer").toBeTruthy();
+    expect((await admin.rpc("assign_reviewers", { p_manual_version_id: MV, p_technical_reviewer_id: OUT, p_compliance_reviewer_id: COMP })).error, "org B user").toBeTruthy();
+    // DB-level: a direct forged UPDATE with a wrong-role reviewer id is rejected by the guard trigger
+    const forged = await svc().from("manual_versions").update({ technical_reviewer_id: COMP }).eq("id", MV).select("id");
+    expect(forged.error?.message ?? "", "guard trigger rejects wrong-role reviewer").toMatch(/must be an active TECHNICAL_REVIEWER/i);
+    // inactive member: give admin@ an INACTIVE technical-reviewer membership, then try to assign
+    await svc().from("memberships").upsert({ organization_id: ORG_A, user_id: ADMIN, role: "TECHNICAL_REVIEWER", is_active: false }, { onConflict: "organization_id,user_id,role" });
+    expect((await admin.rpc("assign_reviewers", { p_manual_version_id: MV, p_technical_reviewer_id: ADMIN, p_compliance_reviewer_id: COMP })).error, "inactive member rejected").toBeTruthy();
+    await svc().from("memberships").delete().eq("organization_id", ORG_A).eq("user_id", ADMIN).eq("role", "TECHNICAL_REVIEWER");
+  });
+
+  it("a non-admin cannot assign reviewers", { retry: 2 }, async () => {
+    expect((await dev.rpc("assign_reviewers", { p_manual_version_id: MV, p_technical_reviewer_id: REV, p_compliance_reviewer_id: COMP })).error, "developer cannot assign").toBeTruthy();
+    expect((await reviewer.rpc("assign_reviewers", { p_manual_version_id: MV, p_technical_reviewer_id: REV, p_compliance_reviewer_id: COMP })).error, "reviewer cannot assign").toBeTruthy();
+  });
+
+  // --- queue scoping (mirrors listReviewQueue's filter) ---
+  it("review queues are assignment-scoped; admin sees the whole org queue; cross-org sees nothing", { retry: 2 }, async () => {
+    await dev.rpc("submit_for_technical_review", { p_manual_version_id: MV, p_expected_round: 0, p_content_hash: H1 });
+    const q = (c: SupabaseClient, uid: string, admin = false) =>
+      admin
+        ? c.from("manual_versions").select("id").eq("organization_id", ORG_A).eq("status", "TECHNICAL_REVIEW")
+        : c.from("manual_versions").select("id").eq("organization_id", ORG_A).eq("status", "TECHNICAL_REVIEW").eq("technical_reviewer_id", uid);
+    expect(((await q(reviewer, REV)).data ?? []).some((r) => r.id === MV), "assigned technical reviewer sees it").toBe(true);
+    expect(((await q(dev, DEV)).data ?? []).some((r) => r.id === MV), "same-role but unassigned reviewer does not").toBe(false);
+    expect(((await q(admin, ADMIN, true)).data ?? []).some((r) => r.id === MV), "admin sees the org queue").toBe(true);
+    expect(((await outsider.from("manual_versions").select("id").eq("id", MV)).data ?? []), "org B sees nothing").toHaveLength(0);
+    expect(((await compliance.from("manual_versions").select("id").eq("id", MV).eq("compliance_reviewer_id", COMP).eq("status", "COMPLIANCE_REVIEW")).data ?? []), "compliance queue is empty pre-technical-approval").toHaveLength(0);
+  });
+
+  // --- stage-specific queue visibility follows the workflow (FINAL QUEUE SEMANTICS CORRECTION) ---
+  it("a manual is visible in exactly the queue matching its current review stage; it moves between queues on approve and leaves both on CHANGES_REQUESTED", { retry: 2 }, async () => {
+    // Replays listReviewQueue's filter EXACTLY, driven by the shared REVIEW_QUEUE_STATUS contract:
+    // one status per queue type; ADMIN drops only the assignment filter, never the status filter.
+    const seesMV = async (
+      c: SupabaseClient,
+      uid: string,
+      type: "technical" | "compliance",
+      isAdmin: boolean,
+    ) => {
+      let q = c
+        .from("manual_versions")
+        .select("id")
+        .eq("organization_id", ORG_A)
+        .eq("status", REVIEW_QUEUE_STATUS[type]);
+      if (!isAdmin) {
+        q = q.eq(type === "technical" ? "technical_reviewer_id" : "compliance_reviewer_id", uid);
+      }
+      return (((await q).data ?? []) as { id: string }[]).some((r) => r.id === MV);
+    };
+
+    // A. status = TECHNICAL_REVIEW
+    await dev.rpc("submit_for_technical_review", { p_manual_version_id: MV, p_expected_round: 0, p_content_hash: H1 });
+    expect(await seesMV(reviewer, REV, "technical", false), "A: tech reviewer sees it in the technical queue").toBe(true);
+    expect(await seesMV(compliance, COMP, "compliance", false), "A: compliance reviewer does NOT see it yet").toBe(false);
+    expect(await seesMV(admin, ADMIN, "technical", true), "A: admin sees it in the technical queue").toBe(true);
+    expect(await seesMV(admin, ADMIN, "compliance", true), "A: admin does NOT see it in the compliance queue").toBe(false);
+    expect((await outsider.from("manual_versions").select("id").eq("id", MV)).data ?? [], "D: org B sees nothing").toHaveLength(0);
+
+    // B. technical APPROVE -> status = COMPLIANCE_REVIEW
+    const appr = await reviewer.rpc("record_technical_decision", { p_manual_version_id: MV, p_expected_round: 1, p_decision: "APPROVE", p_summary: "", p_current_hash: H1 });
+    expect(appr.error, "technical approve succeeds").toBeNull();
+    expect((await mvRow()).status).toBe("COMPLIANCE_REVIEW");
+    expect(await seesMV(reviewer, REV, "technical", false), "B: manual left the technical queue").toBe(false);
+    expect(await seesMV(compliance, COMP, "compliance", false), "B: manual entered the compliance queue").toBe(true);
+    expect(await seesMV(admin, ADMIN, "technical", true), "B: admin technical queue no longer shows it").toBe(false);
+    expect(await seesMV(admin, ADMIN, "compliance", true), "B: admin compliance queue now shows it").toBe(true);
+    expect((await outsider.from("manual_versions").select("id").eq("id", MV)).data ?? [], "D: org B still sees nothing").toHaveLength(0);
+
+    // C. COMPLIANCE_REVIEW -> CHANGES_REQUESTED
+    const rc = await compliance.rpc("record_compliance_decision", { p_manual_version_id: MV, p_expected_round: 1, p_decision: "REQUEST_CHANGES", p_summary: "lengkapi bagian risiko", p_current_hash: H1 });
+    expect(rc.error, "compliance request-changes succeeds").toBeNull();
+    expect((await mvRow()).status).toBe("CHANGES_REQUESTED");
+    expect(await seesMV(reviewer, REV, "technical", false), "C: not in technical queue").toBe(false);
+    expect(await seesMV(compliance, COMP, "compliance", false), "C: not in compliance queue").toBe(false);
+    expect(await seesMV(admin, ADMIN, "technical", true), "C: not in admin technical queue").toBe(false);
+    expect(await seesMV(admin, ADMIN, "compliance", true), "C: not in admin compliance queue").toBe(false);
+  });
+
+  // --- submission ---
+  it("submit: happy path -> TECHNICAL_REVIEW round 1, one audit event; hash stored", { retry: 2 }, async () => {
+    const before = await auditCountFor("manual_version:submit_review");
+    const r = await dev.rpc("submit_for_technical_review", { p_manual_version_id: MV, p_expected_round: 0, p_content_hash: H1 });
+    expect(r.error, "developer submits a ready DRAFT").toBeNull();
+    const row = await mvRow();
+    expect(row.status).toBe("TECHNICAL_REVIEW");
+    expect(row.review_round).toBe(1);
+    expect(row.submitted_content_hash).toBe(H1);
+    expect(await auditCountFor("manual_version:submit_review")).toBe(before + 1);
+  });
+
+  it("submit is blocked without both reviewers, on a stale round, and for a non-author; a forged direct transition is blocked", { retry: 2 }, async () => {
+    await svc().from("manual_versions").update({ technical_reviewer_id: null }).eq("id", MV);
+    expect((await dev.rpc("submit_for_technical_review", { p_manual_version_id: MV, p_expected_round: 0, p_content_hash: H1 })).error?.message).toMatch(/technical reviewer not assigned/i);
+    await svc().from("manual_versions").update({ technical_reviewer_id: REV, compliance_reviewer_id: null }).eq("id", MV);
+    expect((await dev.rpc("submit_for_technical_review", { p_manual_version_id: MV, p_expected_round: 0, p_content_hash: H1 })).error?.message).toMatch(/compliance reviewer not assigned/i);
+    await svc().from("manual_versions").update({ compliance_reviewer_id: COMP }).eq("id", MV);
+    expect((await dev.rpc("submit_for_technical_review", { p_manual_version_id: MV, p_expected_round: 5, p_content_hash: H1 })).error?.message).toMatch(/stale review round/i);
+    expect((await reviewer.rpc("submit_for_technical_review", { p_manual_version_id: MV, p_expected_round: 0, p_content_hash: H1 })).error?.message).toMatch(/DEVELOPER or ADMIN/i);
+    const forged = await dev.from("manual_versions").update({ status: "TECHNICAL_REVIEW" }).eq("id", MV).select("id");
+    expect(forged.error?.message ?? "", "direct status write blocked by guard").toMatch(/review commands|insufficient/i);
+    expect((await mvRow()).status).toBe("DRAFT");
+  });
+
+  // --- server-side read-only guard ---
+  it("manual content is read-only in every non-DRAFT state; begin_revision reopens it", { retry: 2 }, async () => {
+    await dev.rpc("submit_for_technical_review", { p_manual_version_id: MV, p_expected_round: 0, p_content_hash: H1 });
+    const blockPayload = { type: "text", schemaVersion: 1, content: { schemaVersion: 1, format: "plain-paragraphs", paragraphs: ["x"] } };
+    // TECHNICAL_REVIEW
+    expect((await dev.from("manual_blocks").insert({ organization_id: ORG_A, manual_section_id: coverSectionId, block_type: "text", payload: blockPayload, position: 0 }).select("id")).error?.message).toMatch(/read-only unless the version is DRAFT/i);
+    expect((await dev.from("manual_sections").update({ completion_state: "complete" }).eq("id", coverSectionId).select("id")).error?.message).toMatch(/read-only/i);
+    // -> CHANGES_REQUESTED
+    await reviewer.rpc("record_technical_decision", { p_manual_version_id: MV, p_expected_round: 1, p_decision: "REQUEST_CHANGES", p_summary: "perbaiki bab X", p_current_hash: H1 });
+    expect((await mvRow()).status).toBe("CHANGES_REQUESTED");
+    expect((await dev.from("manual_blocks").insert({ organization_id: ORG_A, manual_section_id: coverSectionId, block_type: "text", payload: blockPayload, position: 0 }).select("id")).error?.message).toMatch(/read-only/i);
+    // begin revision -> DRAFT -> now writable
+    const br = await dev.rpc("begin_revision", { p_manual_version_id: MV, p_expected_round: 1 });
+    expect(br.error).toBeNull();
+    expect((await mvRow()).status).toBe("DRAFT");
+    const ok = await dev.from("manual_blocks").insert({ organization_id: ORG_A, manual_section_id: coverSectionId, block_type: "text", payload: blockPayload, position: 0 }).select("id");
+    expect(ok.error, "DRAFT is writable again").toBeNull();
+  });
+
+  // --- self-approval ---
+  it("self-approval: a reviewer who authored the version cannot APPROVE (technical + compliance); an independent reviewer can", { retry: 2 }, async () => {
+    // dev@ authors a block -> becomes a contributor -> then is assigned technical reviewer
+    await dev.from("manual_blocks").insert({ organization_id: ORG_A, manual_section_id: coverSectionId, block_type: "text", payload: { type: "text", schemaVersion: 1, content: { schemaVersion: 1, format: "plain-paragraphs", paragraphs: ["authored by dev"] } }, position: 0 });
+    await svc().from("manual_versions").update({ technical_reviewer_id: DEV }).eq("id", MV);
+    await dev.rpc("submit_for_technical_review", { p_manual_version_id: MV, p_expected_round: 0, p_content_hash: H1 });
+
+    const selfApprove = await dev.rpc("record_technical_decision", { p_manual_version_id: MV, p_expected_round: 1, p_decision: "APPROVE", p_summary: "", p_current_hash: H1 });
+    expect(selfApprove.error?.message, "author cannot self-approve").toMatch(/self approval forbidden/i);
+    // but a contributor reviewer MAY request changes
+    const rc = await dev.rpc("record_technical_decision", { p_manual_version_id: MV, p_expected_round: 1, p_decision: "REQUEST_CHANGES", p_summary: "kembalikan ke draf", p_current_hash: H1 });
+    expect(rc.error, "contributor reviewer may request changes").toBeNull();
+
+    // re-open, reassign an INDEPENDENT technical reviewer (reviewer@ never authored), approve succeeds
+    await dev.rpc("begin_revision", { p_manual_version_id: MV, p_expected_round: 1 });
+    await svc().from("manual_versions").update({ technical_reviewer_id: REV }).eq("id", MV);
+    await dev.rpc("submit_for_technical_review", { p_manual_version_id: MV, p_expected_round: 1, p_content_hash: H1 });
+    const indepApprove = await reviewer.rpc("record_technical_decision", { p_manual_version_id: MV, p_expected_round: 2, p_decision: "APPROVE", p_summary: "", p_current_hash: H1 });
+    expect(indepApprove.error, "independent reviewer approves").toBeNull();
+    expect((await mvRow()).status).toBe("COMPLIANCE_REVIEW");
+
+    // compliance self-approval: plant compliance@ as a contributor, APPROVE -> rejected
+    await svc().from("manual_version_contributors").insert({ organization_id: ORG_A, manual_version_id: MV, user_id: COMP });
+    const compSelf = await compliance.rpc("record_compliance_decision", { p_manual_version_id: MV, p_expected_round: 2, p_decision: "APPROVE", p_summary: "", p_current_hash: H1 });
+    expect(compSelf.error?.message, "compliance author cannot self-approve").toMatch(/self approval forbidden/i);
+    await svc().from("manual_version_contributors").delete().eq("manual_version_id", MV).eq("user_id", COMP);
+    const compOk = await compliance.rpc("record_compliance_decision", { p_manual_version_id: MV, p_expected_round: 2, p_decision: "APPROVE", p_summary: "", p_current_hash: H1 });
+    expect(compOk.error, "independent compliance reviewer approves").toBeNull();
+    expect((await mvRow()).status).toBe("APPROVED");
+  });
+
+  // --- decisions ---
+  it("technical decisions transition correctly; wrong reviewer / role / round / summary / hash are rejected", { retry: 2 }, async () => {
+    await dev.rpc("submit_for_technical_review", { p_manual_version_id: MV, p_expected_round: 0, p_content_hash: H1 });
+    // wrong reviewer (compliance@ has no technical permission AND is not assigned)
+    expect((await compliance.rpc("record_technical_decision", { p_manual_version_id: MV, p_expected_round: 1, p_decision: "APPROVE", p_summary: "", p_current_hash: H1 })).error?.message).toMatch(/technical review permission|assigned technical/i);
+    // dev@ HAS the technical role but is not the assigned reviewer (reviewer@ is)
+    expect((await dev.rpc("record_technical_decision", { p_manual_version_id: MV, p_expected_round: 1, p_decision: "APPROVE", p_summary: "", p_current_hash: H1 })).error?.message).toMatch(/not the assigned technical reviewer/i);
+    // stale round
+    expect((await reviewer.rpc("record_technical_decision", { p_manual_version_id: MV, p_expected_round: 9, p_decision: "APPROVE", p_summary: "", p_current_hash: H1 })).error?.message).toMatch(/stale review round/i);
+    // blank summary on REQUEST_CHANGES
+    expect((await reviewer.rpc("record_technical_decision", { p_manual_version_id: MV, p_expected_round: 1, p_decision: "REQUEST_CHANGES", p_summary: "   ", p_current_hash: H1 })).error?.message).toMatch(/summary/i);
+    // changed fingerprint on APPROVE
+    expect((await reviewer.rpc("record_technical_decision", { p_manual_version_id: MV, p_expected_round: 1, p_decision: "APPROVE", p_summary: "", p_current_hash: H2 })).error?.message).toMatch(/stale content/i);
+    // valid APPROVE -> COMPLIANCE_REVIEW, one reviews row, one audit
+    const before = await auditCountFor("manual_version:technical_approve");
+    const ok = await reviewer.rpc("record_technical_decision", { p_manual_version_id: MV, p_expected_round: 1, p_decision: "APPROVE", p_summary: "", p_current_hash: H1 });
+    expect(ok.error).toBeNull();
+    expect((await mvRow()).status).toBe("COMPLIANCE_REVIEW");
+    expect((await svc().from("reviews").select("id").eq("manual_version_id", MV).eq("round_number", 1).eq("review_type", "TECHNICAL")).data ?? []).toHaveLength(1);
+    expect(await auditCountFor("manual_version:technical_approve")).toBe(before + 1);
+  });
+
+  it("compliance is unreachable without a recorded technical approval; then APPROVE -> APPROVED / REQUEST_CHANGES -> CHANGES_REQUESTED", { retry: 2 }, async () => {
+    await dev.rpc("submit_for_technical_review", { p_manual_version_id: MV, p_expected_round: 0, p_content_hash: H1 });
+    // acting compliance while still in TECHNICAL_REVIEW
+    expect((await compliance.rpc("record_compliance_decision", { p_manual_version_id: MV, p_expected_round: 1, p_decision: "APPROVE", p_summary: "", p_current_hash: H1 })).error?.message).toMatch(/not in COMPLIANCE_REVIEW/i);
+    // force status to COMPLIANCE_REVIEW without a technical review row (service bypass)
+    await svc().from("manual_versions").update({ status: "COMPLIANCE_REVIEW" }).eq("id", MV);
+    expect((await compliance.rpc("record_compliance_decision", { p_manual_version_id: MV, p_expected_round: 1, p_decision: "APPROVE", p_summary: "", p_current_hash: H1 })).error?.message).toMatch(/unreachable without a recorded technical approval/i);
+    // do it properly
+    await svc().from("manual_versions").update({ status: "TECHNICAL_REVIEW" }).eq("id", MV);
+    await reviewer.rpc("record_technical_decision", { p_manual_version_id: MV, p_expected_round: 1, p_decision: "APPROVE", p_summary: "", p_current_hash: H1 });
+    const rc = await compliance.rpc("record_compliance_decision", { p_manual_version_id: MV, p_expected_round: 1, p_decision: "REQUEST_CHANGES", p_summary: "kutipan bab risiko kurang", p_current_hash: H1 });
+    expect(rc.error).toBeNull();
+    expect((await mvRow()).status).toBe("CHANGES_REQUESTED");
+  });
+
+  // --- concurrency ---
+  it("concurrent technical decisions converge: one decision, one transition, one audit; loser gets a typed error", { retry: 2 }, async () => {
+    await dev.rpc("submit_for_technical_review", { p_manual_version_id: MV, p_expected_round: 0, p_content_hash: H1 });
+    const before = await auditCountFor();
+    const [a, b] = await Promise.all([
+      reviewer.rpc("record_technical_decision", { p_manual_version_id: MV, p_expected_round: 1, p_decision: "APPROVE", p_summary: "", p_current_hash: H1 }),
+      reviewer.rpc("record_technical_decision", { p_manual_version_id: MV, p_expected_round: 1, p_decision: "APPROVE", p_summary: "", p_current_hash: H1 }),
+    ]);
+    const errs = [a.error, b.error].filter(Boolean);
+    expect(errs, "exactly one request loses").toHaveLength(1);
+    expect((await svc().from("reviews").select("id").eq("manual_version_id", MV).eq("round_number", 1).eq("review_type", "TECHNICAL")).data ?? [], "one decision row").toHaveLength(1);
+    expect((await mvRow()).status, "one transition").toBe("COMPLIANCE_REVIEW");
+    expect((await auditCountFor()) - before, "one audit event for the winning decision").toBe(1);
+
+    // approve vs request-changes race on a fresh round
+    await svc().from("manual_versions").update({ status: "TECHNICAL_REVIEW" }).eq("id", MV);
+    await svc().from("reviews").delete().eq("manual_version_id", MV);
+    const [c, d] = await Promise.all([
+      reviewer.rpc("record_technical_decision", { p_manual_version_id: MV, p_expected_round: 1, p_decision: "APPROVE", p_summary: "", p_current_hash: H1 }),
+      reviewer.rpc("record_technical_decision", { p_manual_version_id: MV, p_expected_round: 1, p_decision: "REQUEST_CHANGES", p_summary: "x", p_current_hash: H1 }),
+    ]);
+    expect([c.error, d.error].filter(Boolean), "one of approve/request-changes loses").toHaveLength(1);
+    expect((await svc().from("reviews").select("id").eq("manual_version_id", MV).eq("round_number", 1).eq("review_type", "TECHNICAL")).data ?? []).toHaveLength(1);
+  });
+
+  // --- two rounds ---
+  it("two review rounds: resubmission re-enters TECHNICAL_REVIEW (never straight to compliance); prior round persists", { retry: 2 }, async () => {
+    // round 1
+    await dev.rpc("submit_for_technical_review", { p_manual_version_id: MV, p_expected_round: 0, p_content_hash: H1 });
+    await reviewer.rpc("record_technical_decision", { p_manual_version_id: MV, p_expected_round: 1, p_decision: "REQUEST_CHANGES", p_summary: "bab risiko", p_current_hash: H1 });
+    expect((await mvRow()).status).toBe("CHANGES_REQUESTED");
+    await dev.rpc("begin_revision", { p_manual_version_id: MV, p_expected_round: 1 });
+    expect((await mvRow()).review_round, "begin_revision does not change the round").toBe(1);
+    expect((await mvRow()).submitted_content_hash, "stale submitted hash is cleared").toBeNull();
+    // edit content in DRAFT
+    await dev.from("manual_blocks").insert({ organization_id: ORG_A, manual_section_id: coverSectionId, block_type: "text", payload: { type: "text", schemaVersion: 1, content: { schemaVersion: 1, format: "plain-paragraphs", paragraphs: ["round 2 edit"] } }, position: 0 });
+    // round 2 — a DIFFERENT hash, and it lands in TECHNICAL_REVIEW not COMPLIANCE_REVIEW
+    await dev.rpc("submit_for_technical_review", { p_manual_version_id: MV, p_expected_round: 1, p_content_hash: H2 });
+    const row = await mvRow();
+    expect(row.status).toBe("TECHNICAL_REVIEW");
+    expect(row.review_round).toBe(2);
+    expect(row.submitted_content_hash).toBe(H2);
+    // round 1 decision still present; round 2 has none yet
+    expect((await svc().from("reviews").select("round_number, decision").eq("manual_version_id", MV).order("round_number")).data ?? []).toEqual([
+      { round_number: 1, decision: "REQUEST_CHANGES" },
+    ]);
+    // reviewer assignments retained across the round
+    expect((await mvRow()).technical_reviewer_id).toBe(REV);
+  });
+
+  // --- audit exactly once for every privileged command ---
+  it("every workflow command writes exactly one audit event", { retry: 2 }, async () => {
+    const step = async (label: string, fn: () => PromiseLike<{ error: unknown }>) => {
+      const before = await auditCountFor();
+      const r = await fn();
+      expect(r.error, `${label} succeeds`).toBeNull();
+      expect((await auditCountFor()) - before, `${label} -> exactly one audit event`).toBe(1);
+    };
+    await step("assign_reviewers", () => admin.rpc("assign_reviewers", { p_manual_version_id: MV, p_technical_reviewer_id: REV, p_compliance_reviewer_id: COMP }));
+    await step("submit_for_technical_review", () => dev.rpc("submit_for_technical_review", { p_manual_version_id: MV, p_expected_round: 0, p_content_hash: H1 }));
+    await step("record_technical_decision (approve)", () => reviewer.rpc("record_technical_decision", { p_manual_version_id: MV, p_expected_round: 1, p_decision: "APPROVE", p_summary: "", p_current_hash: H1 }));
+    await step("record_compliance_decision (request_changes)", () => compliance.rpc("record_compliance_decision", { p_manual_version_id: MV, p_expected_round: 1, p_decision: "REQUEST_CHANGES", p_summary: "revisi", p_current_hash: H1 }));
+    await step("begin_revision", () => dev.rpc("begin_revision", { p_manual_version_id: MV, p_expected_round: 1 }));
+  });
+});
+
+// ===========================================================================
+// Phase 6 slice 3 — review comments (anchored, resolve/reopen, cross-round).
+// Dedicated throwaway manual version (MV3) + a second same-org version (MV3B) + a minimal
+// org-B chain, all built with the service role and dropped in afterAll. Comments are created
+// only through create_review_comment / set_review_comment_resolved (SECURITY DEFINER); direct
+// table writes are used only to prove the immutability + anchor guards.
+// AC-P6-4 (comments) and the comment half of AC-P6-8 (cross-round).
+// ===========================================================================
+describe.skipIf(!HAS_SERVICE)("Phase 6 slice 3 — review comments", () => {
+  const M3 = "60000000-0000-4000-8000-0000000000a3";
+  const MV3 = "60000000-0000-4000-8000-0000000000b3";
+  const MV3B = "60000000-0000-4000-8000-0000000000c3"; // second same-org version (cross-version anchor)
+  const EAP_B = "60000000-0000-4000-8000-0000000000d3";
+  const EAV_B = "60000000-0000-4000-8000-0000000000e3";
+  const MID_B = "60000000-0000-4000-8000-0000000000f3";
+  const MVB = "60000000-0000-4000-8000-000000000a13";
+  const H1 = "3".repeat(64);
+  const H2 = "4".repeat(64);
+  const RANDOM_UUID = "99999999-9999-4999-8999-999999999993";
+
+  let dev: SupabaseClient; // developer@ = DEVELOPER + TECHNICAL_REVIEWER
+  let reviewer: SupabaseClient; // reviewer@ = TECHNICAL_REVIEWER only
+  let compliance: SupabaseClient; // compliance@ = COMPLIANCE_REVIEWER only
+  let admin: SupabaseClient; // admin@ = ADMIN (org A), never assigned as a reviewer here
+  let outsider: SupabaseClient; // outsider@ = ADMIN of org B
+  let anon: SupabaseClient;
+  let REV = "", COMP = "", OUT = "";
+  let sec3 = "", blk3a = "";
+  let sec3b = "", blk3b2 = "";
+  let secB = "", blkB = "";
+
+  const svc = () => service();
+  const mv3 = async () =>
+    (await svc().from("manual_versions").select("status, review_round, submitted_content_hash").eq("id", MV3).single()).data!;
+  const commentsOf = async (mvId: string) =>
+    (await svc().from("review_comments").select("*").eq("manual_version_id", mvId).order("round_number").order("created_at")).data ?? [];
+  const checklistCount = async () =>
+    (await svc().from("checklist_results").select("id", { count: "exact", head: true }).eq("manual_version_id", MV3)).count ?? 0;
+
+  const textPayload = { type: "text", schemaVersion: 1, content: { schemaVersion: 1, format: "plain-paragraphs", paragraphs: ["x"] } };
+
+  const toTechReview = async () => {
+    const r = await dev.rpc("submit_for_technical_review", { p_manual_version_id: MV3, p_expected_round: 0, p_content_hash: H1 });
+    expect(r.error, "submit MV3 to TECHNICAL_REVIEW").toBeNull();
+  };
+  const toComplianceReview = async () => {
+    await toTechReview();
+    const r = await reviewer.rpc("record_technical_decision", { p_manual_version_id: MV3, p_expected_round: 1, p_decision: "APPROVE", p_summary: "", p_current_hash: H1 });
+    expect(r.error, "technical approve -> COMPLIANCE_REVIEW").toBeNull();
+  };
+
+  beforeAll(async () => {
+    dev = await signIn("developer@smartin.demo");
+    reviewer = await signIn("reviewer@smartin.demo");
+    compliance = await signIn("compliance@smartin.demo");
+    admin = await signIn("admin@smartin.demo");
+    outsider = await signIn("outsider@smartin.demo");
+    anon = createClient(URL!, ANON!, { global: { fetch: boundFetch } });
+    REV = (await reviewer.auth.getUser()).data.user!.id;
+    COMP = (await compliance.auth.getUser()).data.user!.id;
+    OUT = (await outsider.auth.getUser()).data.user!.id;
+
+    // clean any earlier run
+    for (const id of [MV3, MV3B]) await svc().from("manual_versions").delete().eq("id", id);
+    await svc().from("manuals").delete().eq("id", M3);
+    await svc().from("manual_versions").delete().eq("id", MVB);
+    await svc().from("manuals").delete().eq("id", MID_B);
+    await svc().from("ea_versions").delete().eq("id", EAV_B);
+    await svc().from("ea_products").delete().eq("id", EAP_B);
+
+    // --- org A: manual + two versions, sections + blocks ---
+    await svc().from("manuals").insert({ id: M3, organization_id: ORG_A, ea_product_id: VMAX_PRODUCT, template_id: SYSTEM_TEMPLATE, locale: "id" });
+    await svc().from("manual_versions").insert([
+      { id: MV3, organization_id: ORG_A, manual_id: M3, ea_version_id: VMAX_EA_VERSION, version: "8.8.1", status: "DRAFT", template_id: SYSTEM_TEMPLATE, template_version: 1 },
+      { id: MV3B, organization_id: ORG_A, manual_id: M3, ea_version_id: VMAX_EA_VERSION, version: "8.8.2", status: "DRAFT", template_id: SYSTEM_TEMPLATE, template_version: 1 },
+    ]);
+    sec3 = (await svc().from("manual_sections").insert({ organization_id: ORG_A, manual_version_id: MV3, section_key: "cover", title: "Sampul", required: true, position: 0 }).select("id").single()).data!.id as string;
+    blk3a = (await svc().from("manual_blocks").insert({ organization_id: ORG_A, manual_section_id: sec3, block_type: "text", payload: textPayload, position: 0 }).select("id").single()).data!.id as string;
+    sec3b = (await svc().from("manual_sections").insert({ organization_id: ORG_A, manual_version_id: MV3B, section_key: "cover", title: "Sampul B", required: true, position: 0 }).select("id").single()).data!.id as string;
+    blk3b2 = (await svc().from("manual_blocks").insert({ organization_id: ORG_A, manual_section_id: sec3b, block_type: "text", payload: textPayload, position: 0 }).select("id").single()).data!.id as string;
+
+    // --- org B: minimal chain so we have a genuine cross-org section + block ---
+    await svc().from("ea_products").insert({ id: EAP_B, organization_id: ORG_B, owner_id: OUT, name: "Cmt B3 (DEMO)", slug: "cmt-b3-demo", description: "x" });
+    await svc().from("ea_versions").insert({ id: EAV_B, organization_id: ORG_B, ea_product_id: EAP_B, version: "1.0.0", platform: "MT5", release_date: "2026-01-01", requirements: {}, support: {} });
+    await svc().from("manuals").insert({ id: MID_B, organization_id: ORG_B, ea_product_id: EAP_B, template_id: SYSTEM_TEMPLATE, locale: "id" });
+    await svc().from("manual_versions").insert({ id: MVB, organization_id: ORG_B, manual_id: MID_B, ea_version_id: EAV_B, version: "1.0.0", status: "DRAFT", template_id: SYSTEM_TEMPLATE, template_version: 1 });
+    secB = (await svc().from("manual_sections").insert({ organization_id: ORG_B, manual_version_id: MVB, section_key: "cover", title: "Org B", required: true, position: 0 }).select("id").single()).data!.id as string;
+    blkB = (await svc().from("manual_blocks").insert({ organization_id: ORG_B, manual_section_id: secB, block_type: "text", payload: textPayload, position: 0 }).select("id").single()).data!.id as string;
+  });
+
+  afterAll(async () => {
+    await svc().from("review_comments").delete().in("manual_version_id", [MV3, MV3B, MVB]);
+    for (const id of [MV3, MV3B]) await svc().from("manual_versions").delete().eq("id", id);
+    await svc().from("manuals").delete().eq("id", M3);
+    await svc().from("manual_versions").delete().eq("id", MVB);
+    await svc().from("manuals").delete().eq("id", MID_B);
+    await svc().from("ea_versions").delete().eq("id", EAV_B);
+    await svc().from("ea_products").delete().eq("id", EAP_B);
+    await svc().from("audit_events").delete().in("entity_id", [MV3, MV3B]);
+  });
+
+  beforeEach(async () => {
+    await svc().from("review_comments").delete().eq("manual_version_id", MV3);
+    await svc().from("reviews").delete().eq("manual_version_id", MV3);
+    await svc().from("manual_versions").update({
+      status: "DRAFT", review_round: 0, submitted_content_hash: null,
+      technical_reviewer_id: REV, compliance_reviewer_id: COMP,
+    }).eq("id", MV3);
+  });
+
+  // ---- §21 create technical comments; §28 no workflow side effect ----
+  it("assigned technical reviewer creates manual / section / block comments in the current round; status + hash + checklist untouched", { retry: 2 }, async () => {
+    await toTechReview();
+    const beforeStatus = await mv3();
+    const beforeChecklist = await checklistCount();
+
+    const g = await reviewer.rpc("create_review_comment", { p_manual_version_id: MV3, p_review_type: "TECHNICAL", p_round: 1, p_section_id: null, p_block_id: null, p_body: "  komentar umum  " });
+    expect(g.error, "manual comment").toBeNull();
+    const s = await reviewer.rpc("create_review_comment", { p_manual_version_id: MV3, p_review_type: "TECHNICAL", p_round: 1, p_section_id: sec3, p_block_id: null, p_body: "komentar bab" });
+    expect(s.error, "section comment").toBeNull();
+    const b = await reviewer.rpc("create_review_comment", { p_manual_version_id: MV3, p_review_type: "TECHNICAL", p_round: 1, p_section_id: null, p_block_id: blk3a, p_body: "komentar blok" });
+    expect(b.error, "block comment").toBeNull();
+
+    const rows = await commentsOf(MV3);
+    expect(rows).toHaveLength(3);
+    for (const r of rows) {
+      expect(r.round_number).toBe(1);
+      expect(r.review_type).toBe("TECHNICAL");
+      expect(r.author_id).toBe(REV);
+      expect(r.resolved).toBe(false);
+    }
+    expect(rows.find((r) => r.section_id === null && r.block_id === null)!.body).toBe("komentar umum"); // trimmed
+    expect(rows.some((r) => r.section_id === sec3 && r.block_id === null)).toBe(true);
+    expect(rows.some((r) => r.block_id === blk3a && r.section_id === null)).toBe(true);
+
+    const afterStatus = await mv3();
+    expect(afterStatus.status).toBe(beforeStatus.status);
+    expect(afterStatus.submitted_content_hash).toBe(beforeStatus.submitted_content_hash);
+    expect(await checklistCount()).toBe(beforeChecklist);
+  });
+
+  // ---- §21 compliance comments ----
+  it("assigned compliance reviewer creates comments once the version is in COMPLIANCE_REVIEW", { retry: 2 }, async () => {
+    await toComplianceReview();
+    const g = await compliance.rpc("create_review_comment", { p_manual_version_id: MV3, p_review_type: "COMPLIANCE", p_round: 1, p_section_id: null, p_block_id: null, p_body: "kutipan kepatuhan" });
+    expect(g.error, "compliance manual comment").toBeNull();
+    const s = await compliance.rpc("create_review_comment", { p_manual_version_id: MV3, p_review_type: "COMPLIANCE", p_round: 1, p_section_id: sec3, p_block_id: null, p_body: "bab risiko" });
+    expect(s.error).toBeNull();
+    const rows = await commentsOf(MV3);
+    expect(rows).toHaveLength(2);
+    for (const r of rows) {
+      expect(r.review_type).toBe("COMPLIANCE");
+      expect(r.author_id).toBe(COMP);
+      expect(r.round_number).toBe(1);
+    }
+  });
+
+  // ---- §22 invalid anchors ----
+  it("invalid anchors are rejected: unknown / other-version / cross-org section or block, and both anchors at once", { retry: 2 }, async () => {
+    await toTechReview();
+    const bad = (over: Record<string, unknown>) =>
+      reviewer.rpc("create_review_comment", { p_manual_version_id: MV3, p_review_type: "TECHNICAL", p_round: 1, p_section_id: null, p_block_id: null, p_body: "x", ...over });
+
+    expect((await bad({ p_section_id: RANDOM_UUID })).error?.message, "unknown section").toMatch(/invalid anchor/i);
+    expect((await bad({ p_block_id: RANDOM_UUID })).error?.message, "unknown block").toMatch(/invalid anchor/i);
+    expect((await bad({ p_section_id: sec3b })).error?.message, "section from another version").toMatch(/invalid anchor/i);
+    expect((await bad({ p_block_id: blk3b2 })).error?.message, "block from another version").toMatch(/invalid anchor/i);
+    expect((await bad({ p_section_id: secB })).error?.message, "cross-org section").toMatch(/invalid anchor/i);
+    expect((await bad({ p_block_id: blkB })).error?.message, "cross-org block").toMatch(/invalid anchor/i);
+    expect((await bad({ p_section_id: sec3, p_block_id: blk3a })).error?.message, "both anchors").toMatch(/not more than one/i);
+    expect(await commentsOf(MV3), "no bad comment persisted").toHaveLength(0);
+
+    // belt-and-braces: the 001300 DB anchor trigger also rejects a forged cross-version section
+    const forged = await svc().from("review_comments").insert({
+      organization_id: ORG_A, manual_version_id: MV3, round_number: 1, review_type: "TECHNICAL",
+      author_id: REV, section_id: sec3b, body: "forged",
+    }).select("id");
+    expect(forged.error?.message ?? "", "DB anchor trigger").toMatch(/not part of this manual version/i);
+  });
+
+  // ---- §23 permissions ----
+  it("only the assigned reviewer of the active stage may create a comment; admin does not bypass assignment; outsider + anon rejected", { retry: 2 }, async () => {
+    await toTechReview(); // technical reviewer = REV, compliance reviewer = COMP
+
+    expect((await reviewer.rpc("create_review_comment", { p_manual_version_id: MV3, p_review_type: "TECHNICAL", p_round: 1, p_section_id: null, p_block_id: null, p_body: "ok" })).error, "assigned technical reviewer").toBeNull();
+
+    // dev@ HAS review:technical but is not the assigned reviewer
+    expect((await dev.rpc("create_review_comment", { p_manual_version_id: MV3, p_review_type: "TECHNICAL", p_round: 1, p_section_id: null, p_block_id: null, p_body: "x" })).error?.message).toMatch(/not the assigned technical reviewer/i);
+    // compliance@ has no technical permission
+    expect((await compliance.rpc("create_review_comment", { p_manual_version_id: MV3, p_review_type: "TECHNICAL", p_round: 1, p_section_id: null, p_block_id: null, p_body: "x" })).error?.message).toMatch(/technical review permission|not the assigned/i);
+    // admin@ is ADMIN but not the assigned technical reviewer -> no silent bypass
+    expect((await admin.rpc("create_review_comment", { p_manual_version_id: MV3, p_review_type: "TECHNICAL", p_round: 1, p_section_id: null, p_block_id: null, p_body: "x" })).error?.message).toMatch(/not the assigned technical reviewer/i);
+    // outsider (org B admin)
+    expect((await outsider.rpc("create_review_comment", { p_manual_version_id: MV3, p_review_type: "TECHNICAL", p_round: 1, p_section_id: null, p_block_id: null, p_body: "x" })).error?.message).toMatch(/permission required|not the assigned/i);
+    // anon
+    expect((await anon.rpc("create_review_comment", { p_manual_version_id: MV3, p_review_type: "TECHNICAL", p_round: 1, p_section_id: null, p_block_id: null, p_body: "x" })).error?.message).toMatch(/authentication required|permission|denied/i);
+
+    expect(await commentsOf(MV3), "only the one valid comment persisted").toHaveLength(1);
+  });
+
+  // ---- §24 wrong state / round; type must match stage ----
+  it("comment creation is rejected outside the matching review stage and on a stale round", { retry: 2 }, async () => {
+    // DRAFT
+    expect((await reviewer.rpc("create_review_comment", { p_manual_version_id: MV3, p_review_type: "TECHNICAL", p_round: 0, p_section_id: null, p_block_id: null, p_body: "x" })).error?.message).toMatch(/TECHNICAL_REVIEW/i);
+
+    await toTechReview();
+    // stale round
+    expect((await reviewer.rpc("create_review_comment", { p_manual_version_id: MV3, p_review_type: "TECHNICAL", p_round: 9, p_section_id: null, p_block_id: null, p_body: "x" })).error?.message).toMatch(/stale review round/i);
+    // a compliance comment while still in TECHNICAL_REVIEW
+    expect((await compliance.rpc("create_review_comment", { p_manual_version_id: MV3, p_review_type: "COMPLIANCE", p_round: 1, p_section_id: null, p_block_id: null, p_body: "x" })).error?.message).toMatch(/COMPLIANCE_REVIEW/i);
+
+    // COMPLIANCE_REVIEW: a technical comment is now rejected
+    await reviewer.rpc("record_technical_decision", { p_manual_version_id: MV3, p_expected_round: 1, p_decision: "APPROVE", p_summary: "", p_current_hash: H1 });
+    expect((await mv3()).status).toBe("COMPLIANCE_REVIEW");
+    expect((await reviewer.rpc("create_review_comment", { p_manual_version_id: MV3, p_review_type: "TECHNICAL", p_round: 1, p_section_id: null, p_block_id: null, p_body: "x" })).error?.message).toMatch(/TECHNICAL_REVIEW/i);
+
+    // forced terminal states
+    for (const st of ["CHANGES_REQUESTED", "APPROVED", "PUBLISHED", "ARCHIVED"] as const) {
+      await svc().from("manual_versions").update({ status: st }).eq("id", MV3);
+      expect((await reviewer.rpc("create_review_comment", { p_manual_version_id: MV3, p_review_type: "TECHNICAL", p_round: 1, p_section_id: null, p_block_id: null, p_body: "x" })).error, `rejected in ${st}`).toBeTruthy();
+      expect((await compliance.rpc("create_review_comment", { p_manual_version_id: MV3, p_review_type: "COMPLIANCE", p_round: 1, p_section_id: null, p_block_id: null, p_body: "x" })).error, `compliance rejected in ${st}`).toBeTruthy();
+    }
+    expect(await commentsOf(MV3)).toHaveLength(0);
+  });
+
+  // ---- §25 resolve / reopen; §28 no side effect ----
+  it("resolve sets resolver + timestamp, reopen clears them; only the assigned reviewer of the comment type may toggle; status + hash unchanged", { retry: 2 }, async () => {
+    await toTechReview();
+    const before = await mv3();
+    const c = await reviewer.rpc("create_review_comment", { p_manual_version_id: MV3, p_review_type: "TECHNICAL", p_round: 1, p_section_id: sec3, p_block_id: null, p_body: "temuan" });
+    const id = (c.data as { id: string }).id;
+
+    // developer (not the assigned technical reviewer) cannot resolve a reviewer finding
+    expect((await dev.rpc("set_review_comment_resolved", { p_comment_id: id, p_resolved: true })).error?.message).toMatch(/assigned technical reviewer/i);
+    // compliance reviewer cannot resolve a TECHNICAL comment
+    expect((await compliance.rpc("set_review_comment_resolved", { p_comment_id: id, p_resolved: true })).error?.message).toMatch(/assigned technical reviewer/i);
+
+    const r1 = await reviewer.rpc("set_review_comment_resolved", { p_comment_id: id, p_resolved: true });
+    expect(r1.error, "assigned technical reviewer resolves").toBeNull();
+    let row = (await svc().from("review_comments").select("resolved, resolved_by, resolved_at").eq("id", id).single()).data!;
+    expect(row.resolved).toBe(true);
+    expect(row.resolved_by).toBe(REV);
+    expect(row.resolved_at).not.toBeNull();
+
+    const r2 = await reviewer.rpc("set_review_comment_resolved", { p_comment_id: id, p_resolved: false });
+    expect(r2.error, "reopen").toBeNull();
+    row = (await svc().from("review_comments").select("resolved, resolved_by, resolved_at").eq("id", id).single()).data!;
+    expect(row.resolved).toBe(false);
+    expect(row.resolved_by).toBeNull();
+    expect(row.resolved_at).toBeNull();
+
+    const after = await mv3();
+    expect(after.status).toBe(before.status);
+    expect(after.submitted_content_hash).toBe(before.submitted_content_hash);
+
+    // compliance equivalent
+    await reviewer.rpc("record_technical_decision", { p_manual_version_id: MV3, p_expected_round: 1, p_decision: "APPROVE", p_summary: "", p_current_hash: H1 });
+    const cc = await compliance.rpc("create_review_comment", { p_manual_version_id: MV3, p_review_type: "COMPLIANCE", p_round: 1, p_section_id: null, p_block_id: null, p_body: "kepatuhan" });
+    const cid = (cc.data as { id: string }).id;
+    expect((await reviewer.rpc("set_review_comment_resolved", { p_comment_id: cid, p_resolved: true })).error?.message, "tech reviewer cannot resolve a compliance comment").toMatch(/assigned compliance reviewer/i);
+    expect((await compliance.rpc("set_review_comment_resolved", { p_comment_id: cid, p_resolved: true })).error, "assigned compliance reviewer resolves").toBeNull();
+    expect((await compliance.rpc("set_review_comment_resolved", { p_comment_id: cid, p_resolved: false })).error, "compliance reopen").toBeNull();
+  });
+
+  // ---- §26 body immutability ----
+  it("after creation only the resolved columns may change — body / author / round / type / anchor are locked", { retry: 2 }, async () => {
+    await toTechReview();
+    // anchor-free so every patch below is judged by the body-immutability guard (not the anchor
+    // trigger, which fires first and would mask a section/version change with its own message)
+    const c = await reviewer.rpc("create_review_comment", { p_manual_version_id: MV3, p_review_type: "TECHNICAL", p_round: 1, p_section_id: null, p_block_id: null, p_body: "asli" });
+    const id = (c.data as { id: string }).id;
+
+    for (const patch of [
+      { body: "diubah" },
+      { author_id: COMP },
+      { round_number: 2 },
+      { review_type: "COMPLIANCE" },
+      { block_id: blk3a },
+      { manual_version_id: MV3B },
+    ] as Record<string, unknown>[]) {
+      const res = await svc().from("review_comments").update(patch).eq("id", id).select("id");
+      expect(res.error?.message ?? "", `blocked: ${Object.keys(patch).join(",")}`).toMatch(/immutable review evidence/i);
+    }
+    // resolution metadata is the one allowed mutation surface (direct service write)
+    const okUpd = await svc().from("review_comments").update({ resolved: true, resolved_by: REV, resolved_at: new Date().toISOString() }).eq("id", id).select("id");
+    expect(okUpd.error, "resolution columns are mutable").toBeNull();
+    expect((await svc().from("review_comments").select("body").eq("id", id).single()).data!.body).toBe("asli");
+  });
+
+  // ---- §27 cross-round persistence (AC-P6-8 comment half, AC-P6-4) ----
+  it("round-1 comments survive CHANGES_REQUESTED -> revision -> resubmit unchanged; round-2 comments are stored under round 2", { retry: 2 }, async () => {
+    await toTechReview(); // round 1
+    const c1 = await reviewer.rpc("create_review_comment", { p_manual_version_id: MV3, p_review_type: "TECHNICAL", p_round: 1, p_section_id: sec3, p_block_id: null, p_body: "temuan ronde 1" });
+    const id1 = (c1.data as { id: string }).id;
+    await reviewer.rpc("set_review_comment_resolved", { p_comment_id: id1, p_resolved: true });
+    const c1b = await reviewer.rpc("create_review_comment", { p_manual_version_id: MV3, p_review_type: "TECHNICAL", p_round: 1, p_section_id: null, p_block_id: null, p_body: "belum selesai" });
+    const id1b = (c1b.data as { id: string }).id;
+
+    await reviewer.rpc("record_technical_decision", { p_manual_version_id: MV3, p_expected_round: 1, p_decision: "REQUEST_CHANGES", p_summary: "perbaiki bab", p_current_hash: H1 });
+    expect((await mv3()).status).toBe("CHANGES_REQUESTED");
+    await dev.rpc("begin_revision", { p_manual_version_id: MV3, p_expected_round: 1 });
+    expect((await mv3()).review_round).toBe(1);
+    await dev.rpc("submit_for_technical_review", { p_manual_version_id: MV3, p_expected_round: 1, p_content_hash: H2 });
+    expect((await mv3()).review_round).toBe(2);
+
+    // round-1 comments are byte-identical, still round 1, resolved state preserved
+    const r1a = (await svc().from("review_comments").select("*").eq("id", id1).single()).data!;
+    expect(r1a.round_number).toBe(1);
+    expect(r1a.body).toBe("temuan ronde 1");
+    expect(r1a.section_id).toBe(sec3);
+    expect(r1a.resolved).toBe(true);
+    expect(r1a.resolved_by).toBe(REV);
+    const r1b = (await svc().from("review_comments").select("round_number, resolved").eq("id", id1b).single()).data!;
+    expect(r1b.round_number).toBe(1);
+    expect(r1b.resolved).toBe(false);
+
+    // a round-2 comment lands under round 2
+    const c2 = await reviewer.rpc("create_review_comment", { p_manual_version_id: MV3, p_review_type: "TECHNICAL", p_round: 2, p_section_id: sec3, p_block_id: null, p_body: "temuan ronde 2" });
+    expect(c2.error).toBeNull();
+
+    const all = await commentsOf(MV3);
+    expect(all.map((r) => r.round_number)).toEqual([1, 1, 2]);
+    expect(all[2].body).toBe("temuan ronde 2");
+  });
+});
+
+// ===========================================================================
+// Phase 6 slice 4 — structured changelog (CRUD, ordering, DRAFT-only, contributor
+// provenance, source-EA-version lineage guard, BREAKING impact, no workflow side effect).
+// AC-P6-14. Dedicated manual version MV4 + sibling EA versions built with the service role.
+// ===========================================================================
+describe.skipIf(!HAS_SERVICE)("Phase 6 slice 4 — structured changelog", () => {
+  const M4 = "60000000-0000-4000-8000-000000000a41";
+  const MV4 = "60000000-0000-4000-8000-000000000b41";
+  const EAV2 = "60000000-0000-4000-8000-000000000c41"; // 2nd VMax EA version — a VALID source
+  const EAP_OTHER = "60000000-0000-4000-8000-000000000d41"; // unrelated ORG_A product
+  const EAV_OTHER = "60000000-0000-4000-8000-000000000e41"; // its version — a FORGED source
+  const EAP_B = "60000000-0000-4000-8000-000000000f41"; // ORG_B product
+  const EAV_B = "60000000-0000-4000-8000-000000000a51"; // its version — a cross-org FORGED source
+  const H = "6".repeat(64);
+
+  let dev: SupabaseClient; // developer@ (DEVELOPER + TECHNICAL_REVIEWER)
+  let reviewer: SupabaseClient; // reviewer@ (TECHNICAL_REVIEWER only)
+  let outsider: SupabaseClient; // ORG_B ADMIN
+  let anon: SupabaseClient;
+  let DEV = "", REV = "", COMP = "", OUT = "";
+
+  const svc = () => service();
+  const mv4 = async () =>
+    (await svc().from("manual_versions").select("status, review_round, submitted_content_hash").eq("id", MV4).single()).data!;
+  const entries = async () =>
+    (await svc().from("changelog_entries").select("id, position, entry_type, body, is_feature_change, open_position_impact, source_ea_version_id")
+      .eq("manual_version_id", MV4).order("position")).data ?? [];
+  const create = (c: SupabaseClient, over: Record<string, unknown> = {}) =>
+    c.rpc("create_changelog_entry", {
+      // MV4 is linked to VMAX_EA_VERSION → a valid same-org / same-product source (mandatory since 20260901001700)
+      p_manual_version_id: MV4, p_entry_type: "ADDED", p_body: "perubahan", p_source_ea_version_id: VMAX_EA_VERSION,
+      p_is_feature_change: false, p_open_position_impact: null, ...over,
+    });
+  const auditCount = async () =>
+    (await svc().from("audit_events").select("id", { count: "exact", head: true }).eq("entity_id", MV4)).count ?? 0;
+
+  beforeAll(async () => {
+    dev = await signIn("developer@smartin.demo");
+    reviewer = await signIn("reviewer@smartin.demo");
+    outsider = await signIn("outsider@smartin.demo");
+    anon = createClient(URL!, ANON!, { global: { fetch: boundFetch } });
+    DEV = (await dev.auth.getUser()).data.user!.id;
+    REV = (await reviewer.auth.getUser()).data.user!.id;
+    COMP = (await (await signIn("compliance@smartin.demo")).auth.getUser()).data.user!.id;
+    OUT = (await outsider.auth.getUser()).data.user!.id;
+
+    for (const id of [MV4]) await svc().from("manual_versions").delete().eq("id", id);
+    await svc().from("manuals").delete().eq("id", M4);
+    for (const id of [EAV2, EAV_OTHER]) await svc().from("ea_versions").delete().eq("id", id);
+    await svc().from("ea_products").delete().eq("id", EAP_OTHER);
+    await svc().from("ea_versions").delete().eq("id", EAV_B);
+    await svc().from("ea_products").delete().eq("id", EAP_B);
+
+    // ORG_A: a 2nd EA version of the SAME VMax product = a valid changelog source
+    await svc().from("ea_versions").insert({
+      id: EAV2, organization_id: ORG_A, ea_product_id: VMAX_PRODUCT, version: "2.0.0", platform: "MT5",
+      release_date: "2026-02-01", requirements: {}, support: {},
+    });
+    // ORG_A: an unrelated product + version = a forged source (right org, wrong lineage)
+    await svc().from("ea_products").insert({ id: EAP_OTHER, organization_id: ORG_A, owner_id: DEV, name: "Other A (DEMO)", slug: "other-a-demo", description: "x" });
+    await svc().from("ea_versions").insert({ id: EAV_OTHER, organization_id: ORG_A, ea_product_id: EAP_OTHER, version: "1.0.0", platform: "MT5", release_date: "2026-01-01", requirements: {}, support: {} });
+    // ORG_B: product + version = a cross-org forged source
+    await svc().from("ea_products").insert({ id: EAP_B, organization_id: ORG_B, owner_id: OUT, name: "B4 (DEMO)", slug: "b4-demo", description: "x" });
+    await svc().from("ea_versions").insert({ id: EAV_B, organization_id: ORG_B, ea_product_id: EAP_B, version: "1.0.0", platform: "MT5", release_date: "2026-01-01", requirements: {}, support: {} });
+
+    await svc().from("manuals").insert({ id: M4, organization_id: ORG_A, ea_product_id: VMAX_PRODUCT, template_id: SYSTEM_TEMPLATE, locale: "id" });
+    await svc().from("manual_versions").insert({
+      id: MV4, organization_id: ORG_A, manual_id: M4, ea_version_id: VMAX_EA_VERSION, version: "4.4.1",
+      status: "DRAFT", template_id: SYSTEM_TEMPLATE, template_version: 1,
+      technical_reviewer_id: REV, compliance_reviewer_id: COMP,
+    });
+  });
+
+  afterAll(async () => {
+    await svc().from("changelog_entries").delete().eq("manual_version_id", MV4);
+    await svc().from("manual_versions").delete().eq("id", MV4);
+    await svc().from("manuals").delete().eq("id", M4);
+    for (const id of [EAV2, EAV_OTHER]) await svc().from("ea_versions").delete().eq("id", id);
+    await svc().from("ea_products").delete().eq("id", EAP_OTHER);
+    await svc().from("ea_versions").delete().eq("id", EAV_B);
+    await svc().from("ea_products").delete().eq("id", EAP_B);
+    await svc().from("audit_events").delete().eq("entity_id", MV4);
+  });
+
+  beforeEach(async () => {
+    await svc().from("changelog_entries").delete().eq("manual_version_id", MV4);
+    await svc().from("manual_version_contributors").delete().eq("manual_version_id", MV4);
+    await svc().from("manual_versions").update({ status: "DRAFT", review_round: 0, submitted_content_hash: null }).eq("id", MV4);
+  });
+
+  // ---- CRUD + contiguous positions ----
+  it("create / update / delete / reorder keep positions contiguous (0..n-1)", { retry: 2 }, async () => {
+    const a = await create(dev, { p_body: "A" });
+    const b = await create(dev, { p_body: "B" });
+    const c = await create(dev, { p_body: "C" });
+    expect([a, b, c].map((r) => r.error)).toEqual([null, null, null]);
+    expect((await entries()).map((e) => [e.position, e.body])).toEqual([[0, "A"], [1, "B"], [2, "C"]]);
+
+    const bId = (b.data as { id: string }).id;
+    expect((await dev.rpc("update_changelog_entry", { p_id: bId, p_entry_type: "FIXED", p_body: "B2", p_source_ea_version_id: VMAX_EA_VERSION, p_is_feature_change: true, p_open_position_impact: null })).error).toBeNull();
+    let rows = await entries();
+    expect(rows.find((e) => e.id === bId)).toMatchObject({ entry_type: "FIXED", body: "B2", is_feature_change: true, position: 1 });
+
+    // delete the middle -> repack to 0,1
+    expect((await dev.rpc("delete_changelog_entry", { p_id: bId })).error).toBeNull();
+    rows = await entries();
+    expect(rows.map((e) => [e.position, e.body])).toEqual([[0, "A"], [1, "C"]]);
+
+    // reorder [C, A]
+    const ids = rows.map((e) => e.id).reverse();
+    expect((await dev.rpc("reorder_changelog_entries", { p_manual_version_id: MV4, p_ordered_ids: ids })).error).toBeNull();
+    expect((await entries()).map((e) => [e.position, e.body])).toEqual([[0, "C"], [1, "A"]]);
+  });
+
+  it("reorder rejects a wrong / short / duplicated id set", { retry: 2 }, async () => {
+    const a = (await create(dev, { p_body: "A" })).data as { id: string };
+    await create(dev, { p_body: "B" });
+    expect((await dev.rpc("reorder_changelog_entries", { p_manual_version_id: MV4, p_ordered_ids: [a.id] })).error, "short list").toBeTruthy();
+    expect((await dev.rpc("reorder_changelog_entries", { p_manual_version_id: MV4, p_ordered_ids: [a.id, a.id] })).error, "duplicate").toBeTruthy();
+    expect((await dev.rpc("reorder_changelog_entries", { p_manual_version_id: MV4, p_ordered_ids: [a.id, "99999999-9999-4999-8999-999999999941"] })).error, "foreign id").toBeTruthy();
+  });
+
+  // ---- contributor provenance ----
+  it("a changelog write records the author as a contributor; reading does not", { retry: 2 }, async () => {
+    await create(dev, { p_body: "X" });
+    const rows = await svc().from("manual_version_contributors").select("user_id, contribution_count").eq("manual_version_id", MV4);
+    expect(rows.data).toHaveLength(1);
+    expect(rows.data![0].user_id).toBe(DEV);
+    // reviewer reads the changelog -> still no contributor row for reviewer
+    await reviewer.from("changelog_entries").select("id").eq("manual_version_id", MV4);
+    const after = await svc().from("manual_version_contributors").select("user_id").eq("manual_version_id", MV4);
+    expect((after.data ?? []).map((r) => r.user_id)).toEqual([DEV]);
+  });
+
+  // ---- source EA version lineage ----
+  it("source EA version must be same-org AND same EA product lineage", { retry: 2 }, async () => {
+    expect((await create(dev, { p_source_ea_version_id: EAV2 })).error, "same product -> ok").toBeNull();
+    expect((await create(dev, { p_source_ea_version_id: null })).error?.message, "null -> rejected (mandatory)").toMatch(/source EA version is required/i);
+    expect((await create(dev, { p_source_ea_version_id: EAV_OTHER })).error?.message, "unrelated ORG_A product").toMatch(/invalid source/i);
+    expect((await create(dev, { p_source_ea_version_id: EAV_B })).error?.message, "cross-org").toMatch(/invalid source/i);
+  });
+
+  // ---- BREAKING impact ----
+  it("a BREAKING entry must describe the open-position impact (RPC + DB CHECK)", { retry: 2 }, async () => {
+    expect((await create(dev, { p_entry_type: "BREAKING", p_body: "ubah SL", p_open_position_impact: null })).error?.message).toMatch(/open positions|impact/i);
+    expect((await create(dev, { p_entry_type: "BREAKING", p_body: "ubah SL", p_open_position_impact: "   " })).error?.message).toMatch(/open positions|impact/i);
+    expect((await create(dev, { p_entry_type: "BREAKING", p_body: "ubah SL", p_open_position_impact: "Tutup posisi dulu." })).error).toBeNull();
+    // forged direct insert bypassing the RPC -> the DB CHECK still rejects
+    const forged = await svc().from("changelog_entries").insert({
+      organization_id: ORG_A, manual_version_id: MV4, position: 9, entry_type: "BREAKING", body: "x", source_ea_version_id: VMAX_EA_VERSION, open_position_impact: null,
+    }).select("id");
+    expect(forged.error?.code, "check_violation").toBe("23514");
+  });
+
+  // ---- permissions ----
+  it("only an author may mutate the changelog; reviewer / outsider / anon and forged direct writes are rejected", { retry: 2 }, async () => {
+    expect((await create(dev)).error, "developer/author").toBeNull();
+    expect((await create(reviewer)).error?.message, "reviewer").toMatch(/DEVELOPER or ADMIN|forbidden/i);
+    expect((await create(outsider)).error, "outsider (org B)").toBeTruthy();
+    expect((await create(anon)).error, "anon").toBeTruthy();
+    // no client write policy on changelog_entries
+    const forged = await dev.from("changelog_entries").insert({ organization_id: ORG_A, manual_version_id: MV4, position: 5, entry_type: "ADDED", body: "forged" }).select("id");
+    expect((forged.data ?? []), "direct client insert denied by RLS").toHaveLength(0);
+  });
+
+  // ---- DRAFT-only ----
+  it("changelog mutation is rejected in every non-DRAFT state and allowed again after beginRevision", { retry: 2 }, async () => {
+    const e = (await create(dev, { p_body: "keep" })).data as { id: string };
+
+    await dev.rpc("submit_for_technical_review", { p_manual_version_id: MV4, p_expected_round: 0, p_content_hash: H });
+    expect((await mv4()).status).toBe("TECHNICAL_REVIEW");
+    expect((await create(dev, { p_body: "no" })).error?.message).toMatch(/DRAFT/i);
+    expect((await dev.rpc("update_changelog_entry", { p_id: e.id, p_entry_type: "ADDED", p_body: "no", p_source_ea_version_id: null, p_is_feature_change: false, p_open_position_impact: null })).error?.message).toMatch(/DRAFT/i);
+    expect((await dev.rpc("delete_changelog_entry", { p_id: e.id })).error?.message).toMatch(/DRAFT/i);
+    expect((await dev.rpc("reorder_changelog_entries", { p_manual_version_id: MV4, p_ordered_ids: [e.id] })).error?.message).toMatch(/DRAFT/i);
+    // forged direct write in review -> blocked (RLS has no client write policy; the DB
+    // draft-guard trigger is the defence-in-depth layer behind it)
+    const forged = await dev.from("changelog_entries").update({ body: "hacked" }).eq("id", e.id).select("id");
+    expect(forged.error?.message ?? "", "forged direct changelog write blocked").toMatch(/permission denied|DRAFT|policy/i);
+
+    for (const st of ["COMPLIANCE_REVIEW", "CHANGES_REQUESTED", "APPROVED"] as const) {
+      await svc().from("manual_versions").update({ status: st }).eq("id", MV4);
+      expect((await create(dev, { p_body: "no" })).error, `rejected in ${st}`).toBeTruthy();
+    }
+
+    // CHANGES_REQUESTED -> beginRevision -> DRAFT -> editable again
+    await svc().from("manual_versions").update({ status: "CHANGES_REQUESTED", review_round: 1 }).eq("id", MV4);
+    await dev.rpc("begin_revision", { p_manual_version_id: MV4, p_expected_round: 1 });
+    expect((await mv4()).status).toBe("DRAFT");
+    expect((await create(dev, { p_body: "revised" })).error, "editable after beginRevision").toBeNull();
+  });
+
+  // ---- no workflow side effect / no audit spam ----
+  it("changelog CRUD never changes status / round / submitted_content_hash and writes no audit_events", { retry: 2 }, async () => {
+    const before = await mv4();
+    const auditBefore = await auditCount();
+    const e = (await create(dev, { p_body: "one" })).data as { id: string };
+    await dev.rpc("update_changelog_entry", { p_id: e.id, p_entry_type: "CHANGED", p_body: "two", p_source_ea_version_id: EAV2, p_is_feature_change: true, p_open_position_impact: null });
+    await create(dev, { p_body: "three" });
+    await dev.rpc("reorder_changelog_entries", { p_manual_version_id: MV4, p_ordered_ids: (await entries()).map((x) => x.id).reverse() });
+    await dev.rpc("delete_changelog_entry", { p_id: e.id });
+
+    const after = await mv4();
+    expect(after.status).toBe(before.status);
+    expect(after.review_round).toBe(before.review_round);
+    expect(after.submitted_content_hash).toBe(before.submitted_content_hash);
+    expect(await auditCount()).toBe(auditBefore);
+  });
+});
+
+// ===========================================================================
+// Phase 6 slice 5 — clone_manual_version: atomic clone + parameter-group remap by name.
+// Source EA version SRC (Risk default 0.01, setup XAUUSD@M15) vs target TGT (Risk default 0.02,
+// setup EURUSD.pro@H1). Proves: copied vs NOT copied, target-data ownership, missing-group
+// rollback, lineage guard, concurrency, audit exactly-once. AC-P6-11.
+// ===========================================================================
+describe.skipIf(!HAS_SERVICE)("Phase 6 slice 5 — clone manual version", () => {
+  const P = "60000000-0000-4000-8000-000000005a01"; // EA product (ORG_A)
+  const SRC = "60000000-0000-4000-8000-000000005b01"; // source EA version
+  const TGT = "60000000-0000-4000-8000-000000005c01"; // target EA version (same product)
+  const NOGRP = "60000000-0000-4000-8000-000000005d01"; // target missing the "Trailing" group
+  const PX = "60000000-0000-4000-8000-000000005e01"; // unrelated product
+  const EAVX = "60000000-0000-4000-8000-000000005f01"; // its version
+  const PB = "60000000-0000-4000-8000-000000005a11"; // ORG_B product
+  const EAVB = "60000000-0000-4000-8000-000000005b11"; // its version
+  const M5 = "60000000-0000-4000-8000-000000005c11"; // source manual
+  const MV_SRC = "60000000-0000-4000-8000-000000005d11"; // source manual version
+  const IMG = "60000000-0000-4000-8000-000000005e11"; // an ORG_A image asset
+  const CT = "c5000000-0000-4000-8000-000000000001"; // checklist template
+
+  let dev: SupabaseClient, reviewer: SupabaseClient, anon: SupabaseClient;
+  let DEV = "", REV = "", COMP = "";
+  // fixture ids captured in beforeAll
+  let gSrcRisk = "", gSrcTrail = "", gTgtRisk = "", gTgtTrail = "";
+  let secCover = "", secCustom = "";
+
+  const svc = () => service();
+  const clone = (c: SupabaseClient, over: Record<string, unknown> = {}) =>
+    c.rpc("clone_manual_version", { p_source_manual_version_id: MV_SRC, p_target_ea_version_id: TGT, p_new_version: "2.0.0", ...over });
+  const newMvByVersion = async (v: string) =>
+    (await svc().from("manual_versions").select("*").eq("manual_id", M5).eq("version", v).maybeSingle()).data;
+
+  const mkEaVersion = async (id: string, org: string, product: string, ver: string) =>
+    svc().from("ea_versions").insert({ id, organization_id: org, ea_product_id: product, version: ver, platform: "MT5", release_date: "2026-01-01", requirements: {}, support: {} });
+  const mkGroup = async (org: string, eav: string, name: string) =>
+    (await svc().from("parameter_groups").insert({ organization_id: org, ea_version_id: eav, name, position: 0 }).select("id").single()).data!.id as string;
+  const mkParam = async (org: string, group: string, tname: string, def: string) =>
+    svc().from("ea_parameters").insert({ organization_id: org, parameter_group_id: group, display_name: tname, technical_name: tname, param_type: "double", default_value: def, position: 0 });
+
+  beforeAll(async () => {
+    dev = await signIn("developer@smartin.demo");
+    reviewer = await signIn("reviewer@smartin.demo");
+    anon = createClient(URL!, ANON!, { global: { fetch: boundFetch } });
+    DEV = (await dev.auth.getUser()).data.user!.id;
+    REV = (await reviewer.auth.getUser()).data.user!.id;
+    COMP = (await (await signIn("compliance@smartin.demo")).auth.getUser()).data.user!.id;
+
+    // clean earlier run
+    for (const mv of [MV_SRC]) await svc().from("manual_versions").delete().eq("id", mv);
+    await svc().from("manual_versions").delete().eq("manual_id", M5);
+    await svc().from("manuals").delete().eq("id", M5);
+    for (const id of [SRC, TGT, NOGRP, EAVX]) await svc().from("ea_versions").delete().eq("id", id);
+    for (const id of [P, PX]) await svc().from("ea_products").delete().eq("id", id);
+    await svc().from("ea_versions").delete().eq("id", EAVB);
+    await svc().from("ea_products").delete().eq("id", PB);
+    await svc().from("image_assets").delete().eq("id", IMG);
+
+    // --- EA products + versions ---
+    await svc().from("ea_products").insert({ id: P, organization_id: ORG_A, owner_id: DEV, name: "Clone Src (DEMO)", slug: "clone-src-demo", description: "x" });
+    await mkEaVersion(SRC, ORG_A, P, "1.0.0");
+    await mkEaVersion(TGT, ORG_A, P, "2.0.0");
+    await mkEaVersion(NOGRP, ORG_A, P, "3.0.0");
+    await svc().from("ea_products").insert({ id: PX, organization_id: ORG_A, owner_id: DEV, name: "Other Prod (DEMO)", slug: "other-prod-demo", description: "x" });
+    await mkEaVersion(EAVX, ORG_A, PX, "1.0.0");
+    await svc().from("ea_products").insert({ id: PB, organization_id: ORG_B, owner_id: COMP, name: "B5 (DEMO)", slug: "b5-demo", description: "x" });
+    await mkEaVersion(EAVB, ORG_B, PB, "1.0.0");
+
+    // --- parameter groups (same names, different UUIDs + defaults) ---
+    gSrcRisk = await mkGroup(ORG_A, SRC, "Risk");
+    gSrcTrail = await mkGroup(ORG_A, SRC, "Trailing");
+    gTgtRisk = await mkGroup(ORG_A, TGT, "Risk");
+    gTgtTrail = await mkGroup(ORG_A, TGT, "Trailing");
+    await mkGroup(ORG_A, NOGRP, "Risk"); // NOGRP has Risk but NOT Trailing
+    await mkParam(ORG_A, gSrcRisk, "RiskPercent", "0.01");
+    await mkParam(ORG_A, gTgtRisk, "RiskPercent", "0.02");
+
+    // --- setups (source XAUUSD@M15, target EURUSD.pro@H1) ---
+    await svc().from("ea_version_setups").insert([
+      { organization_id: ORG_A, ea_version_id: SRC, symbol: "XAUUSD", timeframe: "M15", preset_ref: "x.set", tested_minimum_lot: 0.01, notes: "src", is_supported: true, position: 0 },
+      { organization_id: ORG_A, ea_version_id: TGT, symbol: "EURUSD.pro", timeframe: "H1", preset_ref: "y.set", tested_minimum_lot: 0.01, notes: "tgt", is_supported: true, position: 0 },
+    ]);
+
+    // --- image asset (ORG_A) ---
+    await svc().from("image_assets").insert({ id: IMG, organization_id: ORG_A, owner_id: DEV, storage_key: `clone5/${IMG}.png`, mime_type: "image/png", byte_size: 1234, width: 10, height: 10 });
+
+    // --- source manual + version linked to SRC ---
+    await svc().from("manuals").insert({ id: M5, organization_id: ORG_A, ea_product_id: P, template_id: SYSTEM_TEMPLATE, locale: "id" });
+    await svc().from("manual_versions").insert({
+      id: MV_SRC, organization_id: ORG_A, manual_id: M5, ea_version_id: SRC, version: "1.0.0",
+      status: "TECHNICAL_REVIEW", review_round: 1, submitted_content_hash: "s".repeat(64), reviewed_at: new Date().toISOString(),
+      template_id: SYSTEM_TEMPLATE, template_version: 1, technical_reviewer_id: REV, compliance_reviewer_id: COMP,
+    });
+    secCover = (await svc().from("manual_sections").insert({ organization_id: ORG_A, manual_version_id: MV_SRC, section_key: "cover", title: "Sampul", required: true, is_custom: false, position: 0, completion_state: "complete" }).select("id").single()).data!.id as string;
+    secCustom = (await svc().from("manual_sections").insert({ organization_id: ORG_A, manual_version_id: MV_SRC, section_key: "custom-tim", title: "Catatan Tim", required: false, is_custom: true, position: 1 }).select("id").single()).data!.id as string;
+    const txt = { type: "text", schemaVersion: 1, content: { schemaVersion: 1, format: "plain-paragraphs", paragraphs: ["konten sumber"] } };
+    // uniform key set — PostgREST rejects a bulk insert whose objects differ in keys (PGRST102)
+    const blk = (over: Record<string, unknown>) => ({
+      organization_id: ORG_A, manual_section_id: secCover, image_asset_id: null,
+      parameter_group_ids: [] as string[], deleted_at: null as string | null, ...over,
+    });
+    const ins = await svc().from("manual_blocks").insert([
+      blk({ block_type: "text", payload: txt, position: 0 }),
+      blk({ block_type: "steps", payload: { type: "steps", schemaVersion: 1, steps: [{ title: "L1", instruction: "x" }] }, position: 1 }),
+      blk({ block_type: "parameterTable", payload: { type: "parameterTable", schemaVersion: 1, groupIds: [gSrcRisk, gSrcTrail] }, position: 2, parameter_group_ids: [gSrcRisk, gSrcTrail] }),
+      blk({ block_type: "image", payload: { type: "image", schemaVersion: 1, imageAssetId: IMG, caption: "c" }, position: 3, image_asset_id: IMG }),
+      blk({ block_type: "text", payload: txt, position: 4, deleted_at: new Date().toISOString() }), // soft-deleted -> NOT cloned
+    ]);
+    if (ins.error) throw new Error(`slice-5 fixture block insert failed: ${ins.error.message}`);
+    // one row at a time — each insert's object may carry different optional keys
+    await svc().from("changelog_entries").insert({ organization_id: ORG_A, manual_version_id: MV_SRC, position: 0, entry_type: "ADDED", body: "e1", source_ea_version_id: SRC, is_feature_change: true });
+    await svc().from("changelog_entries").insert({ organization_id: ORG_A, manual_version_id: MV_SRC, position: 1, entry_type: "FIXED", body: "e2", source_ea_version_id: SRC });
+    // review history that must NOT be cloned
+    await svc().from("reviews").insert({ organization_id: ORG_A, manual_version_id: MV_SRC, round_number: 1, review_type: "TECHNICAL", reviewer_id: REV, decision: "APPROVE", summary: "", reviewed_content_hash: "s".repeat(64) });
+    await svc().from("review_comments").insert({ organization_id: ORG_A, manual_version_id: MV_SRC, round_number: 1, review_type: "TECHNICAL", author_id: REV, body: "komentar sumber" });
+    await svc().from("checklist_results").insert({ organization_id: ORG_A, manual_version_id: MV_SRC, checklist_template_id: CT, checklist_template_version: 1, check_key: "CHK-VERSI-MATCH", category: "identity", required: true, state: "PASS", evaluator: "system" });
+    await svc().from("checklist_results").insert({ organization_id: ORG_A, manual_version_id: MV_SRC, checklist_template_id: CT, checklist_template_version: 1, check_key: "CHK-VERSI-DUA", category: "identity", required: true, state: "NOT_APPLICABLE", evaluator: "reviewer", override_actor_id: REV, override_reason: "tidak berlaku", override_at: new Date().toISOString() });
+    await svc().from("ai_revisions").insert({ organization_id: ORG_A, manual_version_id: MV_SRC, operation: "improveText", input_hash: "h", status: "PROPOSAL", provider: "mock" });
+  });
+
+  afterAll(async () => {
+    await svc().from("manual_versions").delete().eq("manual_id", M5);
+    await svc().from("manuals").delete().eq("id", M5);
+    for (const id of [SRC, TGT, NOGRP, EAVX]) await svc().from("ea_versions").delete().eq("id", id);
+    for (const id of [P, PX]) await svc().from("ea_products").delete().eq("id", id);
+    await svc().from("ea_versions").delete().eq("id", EAVB);
+    await svc().from("ea_products").delete().eq("id", PB);
+    await svc().from("image_assets").delete().eq("id", IMG);
+    await svc().from("audit_events").delete().eq("organization_id", ORG_A).eq("action", "manual_version:clone");
+  });
+
+  it("happy path: fresh DRAFT linked to the target; structure + changelog copied; workflow/review/AI/checklist NOT copied; one audit row", { retry: 2 }, async () => {
+    const before = (await svc().from("audit_events").select("id", { count: "exact", head: true }).eq("action", "manual_version:clone")).count ?? 0;
+    const r = await clone(dev);
+    expect(r.error, "clone succeeds").toBeNull();
+    const nid = (r.data as { newManualVersionId: string }).newManualVersionId;
+
+    const mv = await newMvByVersion("2.0.0");
+    expect(mv, "new version row exists").toBeTruthy();
+    expect(mv!.id).toBe(nid);
+    expect(mv!.ea_version_id).toBe(TGT);
+    expect(mv!.status).toBe("DRAFT");
+    expect(mv!.review_round).toBe(0);
+    expect(mv!.submitted_content_hash).toBeNull();
+    expect(mv!.reviewed_at).toBeNull();
+    expect(mv!.published_at).toBeNull();
+    expect(mv!.technical_reviewer_id).toBeNull();
+    expect(mv!.compliance_reviewer_id).toBeNull();
+    expect(mv!.template_id).toBe(SYSTEM_TEMPLATE);
+
+    // sections: same key/title/required/is_custom/position, NEW ids, completion reset
+    const secs = (await svc().from("manual_sections").select("id, section_key, title, required, is_custom, position, completion_state").eq("manual_version_id", nid).order("position")).data ?? [];
+    expect(secs.map((s) => [s.section_key, s.required, s.is_custom, s.position])).toEqual([
+      ["cover", true, false, 0],
+      ["custom-tim", false, true, 1],
+    ]);
+    expect(secs.every((s) => s.completion_state === "incomplete")).toBe(true);
+    expect(secs.some((s) => s.id === secCover || s.id === secCustom)).toBe(false);
+
+    // blocks: only the 4 ACTIVE ones cloned (soft-deleted text block excluded)
+    const newCover = secs.find((s) => s.section_key === "cover")!.id;
+    const blks = (await svc().from("manual_blocks").select("id, block_type, payload, position, image_asset_id, parameter_group_ids, deleted_at, row_version").eq("manual_section_id", newCover).order("position")).data ?? [];
+    expect(blks.map((b) => b.block_type)).toEqual(["text", "steps", "parameterTable", "image"]);
+    expect(blks.every((b) => b.deleted_at === null && b.row_version === 1)).toBe(true);
+
+    // parameterTable: group ids + payload.groupIds remapped to TARGET groups
+    const pt = blks.find((b) => b.block_type === "parameterTable")!;
+    expect(new Set(pt.parameter_group_ids as string[])).toEqual(new Set([gTgtRisk, gTgtTrail]));
+    expect(new Set((pt.payload as { groupIds: string[] }).groupIds)).toEqual(new Set([gTgtRisk, gTgtTrail]));
+    // image: same asset reference (no byte copy)
+    expect(blks.find((b) => b.block_type === "image")!.image_asset_id).toBe(IMG);
+
+    // changelog: cloned, order + source_ea_version_id preserved (NOT rewritten to TGT)
+    const cl = (await svc().from("changelog_entries").select("position, entry_type, body, source_ea_version_id, is_feature_change").eq("manual_version_id", nid).order("position")).data ?? [];
+    expect(cl.map((e) => [e.position, e.entry_type, e.body, e.source_ea_version_id])).toEqual([
+      [0, "ADDED", "e1", SRC],
+      [1, "FIXED", "e2", SRC],
+    ]);
+
+    // NOT cloned
+    expect((await svc().from("reviews").select("id").eq("manual_version_id", nid)).data ?? []).toHaveLength(0);
+    expect((await svc().from("review_comments").select("id").eq("manual_version_id", nid)).data ?? []).toHaveLength(0);
+    expect((await svc().from("checklist_results").select("id").eq("manual_version_id", nid)).data ?? []).toHaveLength(0);
+    expect((await svc().from("ai_revisions").select("id").eq("manual_version_id", nid)).data ?? []).toHaveLength(0);
+    expect((await svc().from("published_snapshots").select("id").eq("manual_version_id", nid)).data ?? []).toHaveLength(0);
+
+    // contributor: exactly the clone actor
+    const contribs = (await svc().from("manual_version_contributors").select("user_id").eq("manual_version_id", nid)).data ?? [];
+    expect(contribs.map((c) => c.user_id)).toEqual([DEV]);
+
+    // one clone audit row
+    expect((await svc().from("audit_events").select("id", { count: "exact", head: true }).eq("action", "manual_version:clone")).count ?? 0).toBe(before + 1);
+
+    // source unchanged
+    const src = await svc().from("manual_versions").select("status, review_round").eq("id", MV_SRC).single();
+    expect(src.data!.status).toBe("TECHNICAL_REVIEW");
+    expect((await svc().from("reviews").select("id").eq("manual_version_id", MV_SRC)).data ?? []).toHaveLength(1);
+    expect((await svc().from("checklist_results").select("id").eq("manual_version_id", MV_SRC)).data ?? []).toHaveLength(2);
+
+    await svc().from("manual_versions").delete().eq("id", nid);
+  });
+
+  it("target data ownership: the cloned parameterTable resolves TARGET Risk (default 0.02), never source 0.01; setups follow the target", { retry: 2 }, async () => {
+    const r = await clone(dev, { p_new_version: "2.1.0" });
+    expect(r.error).toBeNull();
+    const nid = (r.data as { newManualVersionId: string }).newManualVersionId;
+
+    const newCover = (await svc().from("manual_sections").select("id").eq("manual_version_id", nid).eq("section_key", "cover").single()).data!.id;
+    const pt = (await svc().from("manual_blocks").select("parameter_group_ids").eq("manual_section_id", newCover).eq("block_type", "parameterTable").single()).data!;
+    const gids = pt.parameter_group_ids as string[];
+    const params = (await svc().from("ea_parameters").select("technical_name, default_value, parameter_group_id").in("parameter_group_id", gids)).data ?? [];
+    const risk = params.find((p) => p.technical_name === "RiskPercent")!;
+    expect(risk.default_value).toBe("0.02"); // TARGET default — proves NO parameter copy (GI-11)
+    expect(risk.parameter_group_id).toBe(gTgtRisk);
+
+    // setups resolve from the target EA version
+    const setups = (await svc().from("ea_version_setups").select("symbol, timeframe").eq("ea_version_id", TGT)).data ?? [];
+    expect(setups).toEqual([{ symbol: "EURUSD.pro", timeframe: "H1" }]);
+
+    await svc().from("manual_versions").delete().eq("id", nid);
+  });
+
+  it("atomic failure — target missing a mapped parameter group: typed error names it and NOTHING is written", { retry: 2 }, async () => {
+    const r = await clone(dev, { p_target_ea_version_id: NOGRP, p_new_version: "9.9.9" });
+    expect(r.error?.message ?? "", "names the missing group").toMatch(/Trailing/);
+    // full rollback
+    expect(await newMvByVersion("9.9.9"), "no new manual_versions row").toBeNull();
+    const anyOrphan = (await svc().from("manual_sections").select("id").eq("section_key", "custom-tim").neq("manual_version_id", MV_SRC)).data ?? [];
+    expect(anyOrphan, "no orphan sections").toHaveLength(0);
+    expect((await svc().from("audit_events").select("id").eq("action", "manual_version:clone").filter("metadata->>newManualVersionString", "eq", "9.9.9")).data ?? []).toHaveLength(0);
+  });
+
+  it("atomic failure — invalid target lineage (unrelated product / cross-org) is rejected before any write", { retry: 2 }, async () => {
+    expect((await clone(dev, { p_target_ea_version_id: EAVX, p_new_version: "8.8.8" })).error?.message).toMatch(/different EA product/i);
+    expect((await clone(dev, { p_target_ea_version_id: EAVB, p_new_version: "8.8.9" })).error?.message).toMatch(/not found in this organisation|different EA product/i);
+    expect(await newMvByVersion("8.8.8")).toBeNull();
+    expect(await newMvByVersion("8.8.9")).toBeNull();
+  });
+
+  it("clone concurrency: two requests for the same new version — one wins, one typed conflict, one audit row", { retry: 2 }, async () => {
+    const before = (await svc().from("audit_events").select("id", { count: "exact", head: true }).eq("action", "manual_version:clone")).count ?? 0;
+    const [a, b] = await Promise.all([clone(dev, { p_new_version: "5.0.0" }), clone(dev, { p_new_version: "5.0.0" })]);
+    const errs = [a.error, b.error].filter(Boolean);
+    expect(errs, "exactly one loses").toHaveLength(1);
+    expect((await svc().from("manual_versions").select("id").eq("manual_id", M5).eq("version", "5.0.0")).data ?? [], "one new version row").toHaveLength(1);
+    expect(((await svc().from("audit_events").select("id", { count: "exact", head: true }).eq("action", "manual_version:clone")).count ?? 0) - before, "one clone audit").toBe(1);
+    await svc().from("manual_versions").delete().eq("manual_id", M5).eq("version", "5.0.0");
+  });
+
+  it("only an author may clone; a reviewer and anon are rejected", { retry: 2 }, async () => {
+    expect((await clone(reviewer, { p_new_version: "6.0.0" })).error?.message).toMatch(/DEVELOPER or ADMIN|forbidden/i);
+    expect((await clone(anon, { p_new_version: "6.0.1" })).error).toBeTruthy();
+    expect(await newMvByVersion("6.0.0")).toBeNull();
+    expect(await newMvByVersion("6.0.1")).toBeNull();
+  });
+});
+
+// ===========================================================================
+// Phase 6 slice 5 (final correction) — clone integrity:
+//   (1) the source MUST be the CURRENT latest Manual Version of its lineage;
+//   (2) clones of one lineage are serialised by a `manuals` FOR UPDATE lock, so two concurrent
+//       clones of the same latest — even with DIFFERENT requested version strings — cannot both
+//       create a sibling: the loser sees a stale source and is rejected;
+//   (3) the RPC resolves + returns the source result set's CHECKLIST-TEMPLATE version (distinct
+//       from the manual template_version), rejects a mixed-version source, and falls back to the
+//       current active checklist template when the source has no results yet.
+// The application-side "fresh eval actually uses that version" behaviour is covered by the
+// browser spot-check (refreshValidation is app-side and not exercised by this pure-supabase suite).
+// ===========================================================================
+describe.skipIf(!HAS_SERVICE)("Phase 6 slice 5 (final) — clone integrity: latest-source + checklist-template version", () => {
+  const CP = "60000000-0000-4000-8000-000000006a01"; // EA product (ORG_A)
+  const CSRC = "60000000-0000-4000-8000-000000006b01"; // source EA version
+  const CTGT = "60000000-0000-4000-8000-000000006c01"; // target EA version (same product)
+  const CM = "60000000-0000-4000-8000-000000006d01"; // manual lineage
+  const CMV1 = "60000000-0000-4000-8000-000000006e01"; // older manual version (stale source)
+  const CMV2 = "60000000-0000-4000-8000-000000006f01"; // latest manual version (valid source)
+  const CT1 = "c5000000-0000-4000-8000-000000000001"; // system checklist template v1 (seeded, active)
+  const CT2 = "c5000000-0000-4000-8000-000000000002"; // checklist template v2 (created here)
+
+  let dev: SupabaseClient;
+  let DEV = "";
+  const svc = () => service();
+
+  const cloneFrom = (source: string, over: Record<string, unknown> = {}) =>
+    dev.rpc("clone_manual_version", { p_source_manual_version_id: source, p_target_ea_version_id: CTGT, p_new_version: "9.0.0", ...over });
+  const childVersions = async () =>
+    (await svc().from("manual_versions").select("id, version").eq("manual_id", CM).order("created_at")).data ?? [];
+  const cloneAudits = async () =>
+    (await svc().from("audit_events").select("id, metadata").eq("action", "manual_version:clone").eq("organization_id", ORG_A)
+      .filter("metadata->>sourceManualVersionId", "in", `(${CMV1},${CMV2})`)).data ?? [];
+  const dropChild = async (version: string) => { await svc().from("manual_versions").delete().eq("manual_id", CM).eq("version", version); };
+  const clResult = (mv: string, tid: string, ver: number, key: string, over: Record<string, unknown> = {}) => ({
+    organization_id: ORG_A, manual_version_id: mv, checklist_template_id: tid, checklist_template_version: ver,
+    check_key: key, category: "identity", required: true, state: "PASS", evaluator: "system", ...over,
+  });
+
+  beforeAll(async () => {
+    dev = await signIn("developer@smartin.demo");
+    DEV = (await dev.auth.getUser()).data.user!.id;
+
+    // clean any earlier run
+    await svc().from("manual_versions").delete().eq("manual_id", CM);
+    await svc().from("manuals").delete().eq("id", CM);
+    for (const id of [CSRC, CTGT]) await svc().from("ea_versions").delete().eq("id", id);
+    await svc().from("ea_products").delete().eq("id", CP);
+    await svc().from("checklist_items").delete().eq("checklist_template_id", CT2);
+    await svc().from("checklist_results").delete().eq("checklist_template_id", CT2);
+    await svc().from("checklist_templates").delete().eq("id", CT2);
+
+    await svc().from("ea_products").insert({ id: CP, organization_id: ORG_A, owner_id: DEV, name: "Clone Integ (DEMO)", slug: "clone-integ-demo", description: "x" });
+    await svc().from("ea_versions").insert([
+      { id: CSRC, organization_id: ORG_A, ea_product_id: CP, version: "1.0.0", platform: "MT5", release_date: "2026-01-01", requirements: {}, support: {} },
+      { id: CTGT, organization_id: ORG_A, ea_product_id: CP, version: "2.0.0", platform: "MT5", release_date: "2026-01-01", requirements: {}, support: {} },
+    ]);
+
+    await svc().from("manuals").insert({ id: CM, organization_id: ORG_A, ea_product_id: CP, template_id: SYSTEM_TEMPLATE, locale: "id" });
+    // CMV1 older, CMV2 newer — explicit created_at so "latest" (created_at desc) is deterministic
+    await svc().from("manual_versions").insert([
+      { id: CMV1, organization_id: ORG_A, manual_id: CM, ea_version_id: CSRC, version: "1.0.0", status: "DRAFT", template_id: SYSTEM_TEMPLATE, template_version: 1, created_at: "2026-01-01T00:00:00Z" },
+      { id: CMV2, organization_id: ORG_A, manual_id: CM, ea_version_id: CSRC, version: "1.1.0", status: "DRAFT", template_id: SYSTEM_TEMPLATE, template_version: 1, created_at: "2026-02-01T00:00:00Z" },
+    ]);
+    for (const mv of [CMV1, CMV2]) {
+      await svc().from("manual_sections").insert({ organization_id: ORG_A, manual_version_id: mv, section_key: "cover", title: "Sampul", required: true, is_custom: false, position: 0, completion_state: "complete" });
+    }
+    // CMV2 (the valid source) carries a v1-evaluated result set
+    await svc().from("checklist_results").insert(clResult(CMV2, CT1, 1, "CHK-VERSI-MATCH"));
+    await svc().from("checklist_results").insert(clResult(CMV2, CT1, 1, "CHK-VERSI-DUA", { state: "NOT_APPLICABLE", evaluator: "reviewer", override_actor_id: DEV, override_reason: "n/a", override_at: new Date().toISOString() }));
+
+    // checklist template v2 — created inactive; individual tests flip active as needed.
+    // One item so a v2 result row can satisfy checklist_results' (template_id, check_key) FK.
+    await svc().from("checklist_templates").insert({ id: CT2, organization_id: null, key: "smartin-documentation-checklist", version: 2, title: "Smartin Documentation Checklist v2", is_active: false });
+    await svc().from("checklist_items").insert({ checklist_template_id: CT2, check_key: "CHK-CARA-KERJA", label: "Cara kerja", category: "content", rule_key: "CHK-CARA-KERJA", position: 0 });
+  });
+
+  // Each test starts from a known state: CMV2 is the only "latest" (prune any sibling a prior
+  // test or a retry created), no stray clone audits, v1 active / v2 inactive.
+  beforeEach(async () => {
+    await svc().from("manual_versions").delete().eq("manual_id", CM).not("version", "in", "(1.0.0,1.1.0)");
+    await svc().from("audit_events").delete().eq("action", "manual_version:clone").eq("organization_id", ORG_A)
+      .filter("metadata->>sourceManualVersionId", "in", `(${CMV1},${CMV2})`);
+    await svc().from("checklist_templates").update({ is_active: true }).eq("id", CT1);
+    await svc().from("checklist_templates").update({ is_active: false }).eq("id", CT2);
+  });
+
+  afterAll(async () => {
+    await svc().from("audit_events").delete().eq("action", "manual_version:clone").eq("organization_id", ORG_A)
+      .filter("metadata->>sourceManualVersionId", "in", `(${CMV1},${CMV2})`);
+    await svc().from("manual_versions").delete().eq("manual_id", CM);
+    await svc().from("manuals").delete().eq("id", CM);
+    for (const id of [CSRC, CTGT]) await svc().from("ea_versions").delete().eq("id", id);
+    await svc().from("ea_products").delete().eq("id", CP);
+    await svc().from("checklist_items").delete().eq("checklist_template_id", CT2);
+    await svc().from("checklist_results").delete().eq("checklist_template_id", CT2);
+    await svc().from("checklist_templates").delete().eq("id", CT2);
+    // safety net: restore the seeded template's active flags
+    await svc().from("checklist_templates").update({ is_active: true }).eq("id", CT1);
+  });
+
+  it("rejects a stale (non-latest) source before any write; the latest source then succeeds", { retry: 2 }, async () => {
+    const auditsBefore = (await cloneAudits()).length;
+
+    // CMV1 is NOT the latest (CMV2 is) -> typed rejection, nothing written
+    const stale = await cloneFrom(CMV1, { p_new_version: "9.1.0" });
+    expect(stale.error?.message ?? "", "typed stale-source error").toMatch(/no longer the latest version/i);
+    expect((await childVersions()).map((v) => v.version).sort(), "no new child version").toEqual(["1.0.0", "1.1.0"]);
+    expect((await svc().from("manual_version_contributors").select("id").eq("manual_version_id", CMV1)).data ?? [], "no contributor on stale source").toHaveLength(0);
+    expect((await cloneAudits()).length, "no clone audit for the stale attempt").toBe(auditsBefore);
+
+    // CMV2 IS the latest -> success
+    const okr = await cloneFrom(CMV2, { p_new_version: "9.1.0" });
+    expect(okr.error, "latest source clones").toBeNull();
+    expect((okr.data as { newVersion: string }).newVersion).toBe("9.1.0");
+    expect((await childVersions()).map((v) => v.version).sort()).toEqual(["1.0.0", "1.1.0", "9.1.0"]);
+    expect((await cloneAudits()).length, "exactly one new clone audit").toBe(auditsBefore + 1);
+
+    await dropChild("9.1.0"); // reset latest = CMV2 for the remaining tests
+  });
+
+  it("serialises concurrent clones of one lineage: two requests with DIFFERENT versions -> one wins, one stale", { retry: 2 }, async () => {
+    const auditsBefore = (await cloneAudits()).length;
+
+    const [a, b] = await Promise.all([
+      cloneFrom(CMV2, { p_new_version: "9.2.0" }),
+      cloneFrom(CMV2, { p_new_version: "9.3.0" }),
+    ]);
+    const errs = [a.error, b.error].filter(Boolean);
+    expect(errs, "exactly one concurrent clone loses").toHaveLength(1);
+    expect(errs[0]!.message, "loser is rejected as a stale source").toMatch(/no longer the latest version/i);
+
+    const created = (await childVersions()).map((v) => v.version).filter((v) => v === "9.2.0" || v === "9.3.0");
+    expect(created, "only one sibling version created").toHaveLength(1);
+    expect((await cloneAudits()).length - auditsBefore, "one clone audit event").toBe(1);
+
+    await dropChild("9.2.0");
+    await dropChild("9.3.0");
+  });
+
+  it("resolves the source result set's checklist-template version (v1) and records it in the audit", { retry: 2 }, async () => {
+    const r = await cloneFrom(CMV2, { p_new_version: "9.4.0" });
+    expect(r.error).toBeNull();
+    const data = r.data as { sourceChecklistTemplateVersion: number; sourceChecklistTemplateId: string };
+    expect(data.sourceChecklistTemplateVersion, "returns the source's v1 binding — NOT the active template").toBe(1);
+    expect(data.sourceChecklistTemplateId).toBe(CT1);
+
+    const audit = (await cloneAudits()).find((a) => (a.metadata as { newManualVersionString?: string }).newManualVersionString === "9.4.0");
+    expect((audit!.metadata as { checklistTemplateVersion: number }).checklistTemplateVersion).toBe(1);
+
+    // clone did NOT copy result states / evidence / overrides onto the new version
+    const nid = (r.data as { newManualVersionId: string }).newManualVersionId;
+    expect((await svc().from("checklist_results").select("id").eq("manual_version_id", nid)).data ?? [], "no checklist rows copied").toHaveLength(0);
+
+    await dropChild("9.4.0");
+  });
+
+  it("a mixed-version source result set is a typed integrity error (before any write)", { retry: 2 }, async () => {
+    const mix = await svc().from("checklist_results").insert(clResult(CMV2, CT2, 2, "CHK-CARA-KERJA", { category: "content" }));
+    expect(mix.error, "v2 result row inserted").toBeNull();
+    try {
+      const r = await cloneFrom(CMV2, { p_new_version: "9.5.0" });
+      expect(r.error?.message ?? "", "mixed checklist versions rejected").toMatch(/mixed checklist template versions/i);
+      expect((await childVersions()).map((v) => v.version), "no child created").not.toContain("9.5.0");
+    } finally {
+      await svc().from("checklist_results").delete().eq("manual_version_id", CMV2).eq("check_key", "CHK-CARA-KERJA");
+    }
+  });
+
+  it("a source with NO checklist results yet falls back to the current active checklist template version", { retry: 2 }, async () => {
+    // temporarily strip CMV2's result set and make v2 the active template
+    const saved = (await svc().from("checklist_results").select("*").eq("manual_version_id", CMV2)).data ?? [];
+    await svc().from("checklist_results").delete().eq("manual_version_id", CMV2);
+    await svc().from("checklist_templates").update({ is_active: false }).eq("id", CT1);
+    await svc().from("checklist_templates").update({ is_active: true }).eq("id", CT2);
+    try {
+      const r = await cloneFrom(CMV2, { p_new_version: "9.6.0" });
+      expect(r.error).toBeNull();
+      const data = r.data as { sourceChecklistTemplateVersion: number; sourceChecklistTemplateId: string };
+      expect(data.sourceChecklistTemplateVersion, "falls back to the active v2").toBe(2);
+      expect(data.sourceChecklistTemplateId).toBe(CT2);
+      await dropChild("9.6.0");
+    } finally {
+      await svc().from("checklist_templates").update({ is_active: true }).eq("id", CT1);
+      await svc().from("checklist_templates").update({ is_active: false }).eq("id", CT2);
+      for (const row of saved) {
+        delete (row as { id?: string }).id;
+        delete (row as { created_at?: string }).created_at;
+        delete (row as { evaluated_at?: string }).evaluated_at;
+        await svc().from("checklist_results").insert(row);
+      }
+    }
+  });
+
+  it("source result states are untouched by a clone (no upgrade, no override loss)", { retry: 2 }, async () => {
+    const before = (await svc().from("checklist_results").select("check_key, state, checklist_template_version, override_actor_id, override_reason").eq("manual_version_id", CMV2).order("check_key")).data ?? [];
+    const r = await cloneFrom(CMV2, { p_new_version: "9.7.0" });
+    expect(r.error).toBeNull();
+    const after = (await svc().from("checklist_results").select("check_key, state, checklist_template_version, override_actor_id, override_reason").eq("manual_version_id", CMV2).order("check_key")).data ?? [];
+    expect(after, "source checklist results unchanged").toEqual(before);
+    await dropChild("9.7.0");
+  });
+});
+
+// ===========================================================================
+// Phase 6 slice 6 — publication transaction: immutable snapshot + publish gate + archive.
+// A dedicated throwaway manual version is driven to APPROVED through the REAL slice-2 workflow
+// RPCs, then published via the SERVICE-ROLE-ONLY publish_manual_version RPC (the browser can
+// never reach it). Proves: ADMIN-only, APPROVED-only, review-hash integrity, the persisted
+// Phase 5 publish gate (required MISSING / publish-blocking WARNING / non-blocking WARNING),
+// checklist result-set coherence, ONE atomic transaction with real fault-injection rollback,
+// published + archived + snapshot immutability, source-drift freeze, and the archive command.
+// AC-P6-2 (final 2 edges) / AC-P6-9 / AC-P6-10 / AC-P6-12.
+// ===========================================================================
+describe.skipIf(!HAS_SERVICE)("Phase 6 slice 6 — publication", () => {
+  const PMANUAL = "60000000-0000-4000-8000-000000006301";
+  const PMV = "60000000-0000-4000-8000-000000006311";
+  const PMV_OTHER = "60000000-0000-4000-8000-000000006312"; // fault-injection slug squatter
+  const CT1 = "c5000000-0000-4000-8000-000000000001";
+  const SLUG = "slice6-pub-ea";
+  const PUBVER = "9.9.6";
+  const H1 = "a".repeat(64);
+  const H2 = "b".repeat(64);
+  // a plausible frozen render_json; its exact shape is irrelevant to the RPC (server builds the
+  // real one) — what matters is that the STORED bytes round-trip to the STORED hash.
+  const RJSON = {
+    snapshotVersion: 1,
+    public: { slug: SLUG, version: PUBVER },
+    template: { id: SYSTEM_TEMPLATE, version: 1 },
+    content: { sections: [{ key: "cover", blocks: [{ type: "text", position: 0 }] }], changelog: [] },
+    images: {},
+  };
+  const SNAP = computeSnapshotHash(RJSON);
+
+  let dev: SupabaseClient, admin: SupabaseClient, reviewer: SupabaseClient, compliance: SupabaseClient, outsider: SupabaseClient;
+  let DEV = "", ADMIN = "", REV = "", COMP = "", OUT = "";
+  let coverSection = "";
+  let ITEMS: { check_key: string; category: string; required: boolean }[] = [];
+
+  const svc = () => service();
+  const mv = async () =>
+    (await svc().from("manual_versions").select("status, review_round, submitted_content_hash, published_at, archived_at").eq("id", PMV).single()).data!;
+  const snapshotRow = async () =>
+    (await svc().from("published_snapshots").select("*").eq("manual_version_id", PMV).maybeSingle()).data;
+  const auditCount = async (action: string) =>
+    (await svc().from("audit_events").select("id", { count: "exact", head: true }).eq("entity_id", PMV).eq("action", action)).count ?? 0;
+
+  const publish = (actorId: string, o: Partial<{ hash: string; render: unknown; snap: string; slug: string; ver: string }> = {}) =>
+    svc().rpc("publish_manual_version", {
+      p_manual_version_id: PMV,
+      p_actor_id: actorId,
+      p_expected_content_hash: o.hash ?? H1,
+      p_render_json: o.render ?? RJSON,
+      p_snapshot_hash: o.snap ?? SNAP,
+      p_public_slug: o.slug ?? SLUG,
+      p_public_version: o.ver ?? PUBVER,
+    });
+
+  // full, coherent 31-row result set on CT1 v1; `over` flips individual states
+  const seedChecklist = async (over: Record<string, string> = {}) => {
+    await svc().from("checklist_results").delete().eq("manual_version_id", PMV);
+    for (const it of ITEMS) {
+      await svc().from("checklist_results").insert({
+        organization_id: ORG_A, manual_version_id: PMV, checklist_template_id: CT1, checklist_template_version: 1,
+        check_key: it.check_key, category: it.category, required: it.required,
+        state: over[it.check_key] ?? "PASS", evaluator: "system",
+      });
+    }
+  };
+
+  const driveToApproved = async () => {
+    await svc().from("published_snapshots").delete().eq("manual_version_id", PMV); // survives a body-only retry
+    await svc().from("reviews").delete().eq("manual_version_id", PMV);
+    await svc().from("manual_versions").update({
+      status: "DRAFT", review_round: 0, submitted_content_hash: null, published_at: null, archived_at: null, reviewed_at: null,
+      technical_reviewer_id: REV, compliance_reviewer_id: COMP,
+    }).eq("id", PMV);
+    await svc().from("manual_version_contributors").delete().eq("manual_version_id", PMV);
+    let r = await dev.rpc("submit_for_technical_review", { p_manual_version_id: PMV, p_expected_round: 0, p_content_hash: H1 });
+    expect(r.error, "submit").toBeNull();
+    r = await reviewer.rpc("record_technical_decision", { p_manual_version_id: PMV, p_expected_round: 1, p_decision: "APPROVE", p_summary: "", p_current_hash: H1 });
+    expect(r.error, "tech approve").toBeNull();
+    r = await compliance.rpc("record_compliance_decision", { p_manual_version_id: PMV, p_expected_round: 1, p_decision: "APPROVE", p_summary: "", p_current_hash: H1 });
+    expect(r.error, "compliance approve").toBeNull();
+    expect((await mv()).status).toBe("APPROVED");
+  };
+
+  beforeAll(async () => {
+    dev = await signIn("developer@smartin.demo");
+    admin = await signIn("admin@smartin.demo");
+    reviewer = await signIn("reviewer@smartin.demo");
+    compliance = await signIn("compliance@smartin.demo");
+    outsider = await signIn("outsider@smartin.demo");
+    DEV = (await dev.auth.getUser()).data.user!.id;
+    ADMIN = (await admin.auth.getUser()).data.user!.id;
+    REV = (await reviewer.auth.getUser()).data.user!.id;
+    COMP = (await compliance.auth.getUser()).data.user!.id;
+    OUT = (await outsider.auth.getUser()).data.user!.id;
+
+    ITEMS = ((await svc().from("checklist_items").select("check_key, category, required").eq("checklist_template_id", CT1)).data ?? []) as typeof ITEMS;
+    expect(ITEMS.length, "31 v1 checklist items").toBe(31);
+
+    // robust reset — a prior crashed run may have left PMV PUBLISHED with a snapshot (FK RESTRICT)
+    await svc().from("published_snapshots").delete().in("manual_version_id", [PMV, PMV_OTHER]);
+    await svc().from("published_snapshots").delete().eq("organization_id", ORG_A).eq("public_slug", SLUG);
+    await svc().from("checklist_results").delete().in("manual_version_id", [PMV, PMV_OTHER]);
+    await svc().from("reviews").delete().in("manual_version_id", [PMV, PMV_OTHER]);
+    for (const id of [PMV, PMV_OTHER]) {
+      await svc().from("manual_versions").update({ status: "DRAFT" }).eq("id", id);
+      await svc().from("manual_versions").delete().eq("id", id);
+    }
+    await svc().from("manuals").delete().eq("id", PMANUAL);
+    await svc().from("manuals").insert({ id: PMANUAL, organization_id: ORG_A, ea_product_id: VMAX_PRODUCT, template_id: SYSTEM_TEMPLATE, locale: "id" });
+    await svc().from("manual_versions").insert([
+      { id: PMV, organization_id: ORG_A, manual_id: PMANUAL, ea_version_id: VMAX_EA_VERSION, version: PUBVER, status: "DRAFT", template_id: SYSTEM_TEMPLATE, template_version: 1 },
+      { id: PMV_OTHER, organization_id: ORG_A, manual_id: PMANUAL, ea_version_id: VMAX_EA_VERSION, version: "9.9.7", status: "DRAFT", template_id: SYSTEM_TEMPLATE, template_version: 1 },
+    ]);
+    coverSection = (await svc().from("manual_sections").insert({ organization_id: ORG_A, manual_version_id: PMV, section_key: "cover", title: "Sampul", required: true, is_custom: false, position: 0 }).select("id").single()).data!.id as string;
+  });
+
+  afterAll(async () => {
+    await svc().from("published_snapshots").delete().in("manual_version_id", [PMV, PMV_OTHER]);
+    await svc().from("published_snapshots").delete().eq("organization_id", ORG_A).eq("public_slug", SLUG);
+    await svc().from("reviews").delete().eq("manual_version_id", PMV);
+    await svc().from("checklist_results").delete().eq("manual_version_id", PMV);
+    for (const id of [PMV, PMV_OTHER]) {
+      await svc().from("manual_versions").update({ status: "DRAFT" }).eq("id", id); // clear the delete guard
+      await svc().from("manual_versions").delete().eq("id", id);
+    }
+    await svc().from("manuals").delete().eq("id", PMANUAL);
+    // `audit_events` is strictly append-only (20260901002400) — the `manual_version:publish` /
+    // `:archive` rows from these runs are RETAINED DEV/QA evidence. Every count assertion below is
+    // delta-based (before/after) so accumulation across runs is harmless.
+  });
+
+  beforeEach(async () => {
+    await svc().from("published_snapshots").delete().in("manual_version_id", [PMV, PMV_OTHER]);
+    await svc().from("published_snapshots").delete().eq("organization_id", ORG_A).eq("public_slug", SLUG);
+    await svc().from("manual_blocks").delete().eq("manual_section_id", coverSection);
+  });
+
+  // ---- happy path (spec §41) ----
+  it("APPROVED + clean gate -> ONE atomic publish: PUBLISHED, published_at, one snapshot, one audit, stored hash recomputes", { retry: 2 }, async () => {
+    await driveToApproved();
+    await seedChecklist();
+    const submitted = (await mv()).submitted_content_hash;
+    const pubAuditBefore = await auditCount("manual_version:publish");
+
+    const r = await publish(ADMIN);
+    expect(r.error, "admin publishes").toBeNull();
+    const out = r.data as { status: string; snapshotId: string; contentHash: string; publicSlug: string; publicVersion: string };
+    expect(out.status).toBe("PUBLISHED");
+
+    const row = await mv();
+    expect(row.status).toBe("PUBLISHED");
+    expect(row.published_at).not.toBeNull();
+
+    const snaps = (await svc().from("published_snapshots").select("*").eq("manual_version_id", PMV)).data ?? [];
+    expect(snaps, "exactly one snapshot").toHaveLength(1);
+    expect(snaps[0].content_hash).toBe(SNAP);
+    expect(snaps[0].public_slug).toBe(SLUG);
+    expect(snaps[0].public_version).toBe(PUBVER);
+    // recompute the canonical hash FROM THE STORED render_json (AC-P6-10)
+    expect(computeSnapshotHash(snaps[0].render_json)).toBe(snaps[0].content_hash);
+    expect(computeSnapshotHash(snaps[0].render_json)).toBe(computeSnapshotHash(snaps[0].render_json)); // byte-stable, repeat
+
+    expect(await auditCount("manual_version:publish"), "exactly one NEW publish audit").toBe(pubAuditBefore + 1);
+    const meta = (await svc().from("audit_events").select("metadata").eq("entity_id", PMV).eq("action", "manual_version:publish").order("created_at", { ascending: false }).limit(1).single()).data!.metadata as Record<string, unknown>;
+    expect(meta).toMatchObject({ publicSlug: SLUG, publicVersion: PUBVER, contentHash: SNAP });
+    expect(JSON.stringify(meta)).not.toMatch(/render_json|paragraph|blocks/i); // no snapshot body in audit
+
+    // review history + submitted hash untouched (spec §28)
+    expect((await svc().from("reviews").select("id").eq("manual_version_id", PMV)).data ?? [], "reviews unchanged").toHaveLength(2);
+    expect((await mv()).submitted_content_hash).toBe(submitted);
+  });
+
+  // ---- ADMIN-only (spec §42) ----
+  it("only an ADMIN may publish; a forged non-admin actor id is rejected; anon/authenticated cannot invoke the RPC", { retry: 2 }, async () => {
+    await driveToApproved();
+    await seedChecklist();
+    for (const [who, id] of [["developer", DEV], ["technical reviewer", REV], ["compliance reviewer", COMP], ["outsider", OUT]] as const) {
+      const r = await publish(id);
+      expect(r.error?.message ?? "", `${who} rejected`).toMatch(/only an ADMIN/i);
+    }
+    // the privileged RPC is service-role-only — an authenticated client cannot execute it at all
+    const forbidden = await dev.rpc("publish_manual_version", {
+      p_manual_version_id: PMV, p_actor_id: ADMIN, p_expected_content_hash: H1, p_render_json: RJSON, p_snapshot_hash: SNAP, p_public_slug: SLUG, p_public_version: PUBVER,
+    });
+    expect(forbidden.error, "authenticated cannot call publish_manual_version").toBeTruthy();
+
+    expect(await snapshotRow(), "no snapshot from any rejected attempt").toBeNull();
+    expect((await mv()).status).toBe("APPROVED");
+
+    expect((await publish(ADMIN)).error, "admin succeeds").toBeNull();
+    expect((await mv()).status).toBe("PUBLISHED");
+  });
+
+  // ---- wrong state (spec §43) ----
+  it("publish is rejected from every non-APPROVED state", { retry: 2 }, async () => {
+    await seedChecklist();
+    for (const st of ["DRAFT", "TECHNICAL_REVIEW", "COMPLIANCE_REVIEW", "CHANGES_REQUESTED", "PUBLISHED", "ARCHIVED"] as const) {
+      await svc().from("manual_versions").update({ status: st, review_round: 1 }).eq("id", PMV);
+      const r = await publish(ADMIN);
+      expect(r.error?.message ?? "", `from ${st}`).toMatch(/only an APPROVED/i);
+    }
+    expect(await snapshotRow()).toBeNull();
+    await svc().from("manual_versions").update({ status: "DRAFT", review_round: 0 }).eq("id", PMV);
+  });
+
+  // ---- approval precondition (spec §44) ----
+  it("publish requires valid CURRENT-round technical + compliance approvals whose hashes match", { retry: 2 }, async () => {
+    await seedChecklist();
+    // (a) APPROVED-looking but no reviews rows
+    await svc().from("reviews").delete().eq("manual_version_id", PMV);
+    await svc().from("manual_versions").update({ status: "APPROVED", review_round: 1, submitted_content_hash: H1 }).eq("id", PMV);
+    expect((await publish(ADMIN)).error?.message ?? "", "no technical approval").toMatch(/no current-round technical approval/i);
+
+    // (b) approvals exist but only for an OLD round
+    await svc().from("reviews").insert([
+      { organization_id: ORG_A, manual_version_id: PMV, round_number: 1, review_type: "TECHNICAL", reviewer_id: REV, decision: "APPROVE", summary: "", reviewed_content_hash: H1 },
+      { organization_id: ORG_A, manual_version_id: PMV, round_number: 1, review_type: "COMPLIANCE", reviewer_id: COMP, decision: "APPROVE", summary: "", reviewed_content_hash: H1 },
+    ]);
+    await svc().from("manual_versions").update({ review_round: 2 }).eq("id", PMV);
+    expect((await publish(ADMIN)).error?.message ?? "", "old-round approval only").toMatch(/no current-round technical approval/i);
+
+    // (c) current-round approvals exist but the server-computed hash disagrees
+    await svc().from("manual_versions").update({ review_round: 1 }).eq("id", PMV);
+    expect((await publish(ADMIN, { hash: H2 })).error?.message ?? "", "hash mismatch").toMatch(/stale content/i);
+
+    expect(await snapshotRow()).toBeNull();
+    await svc().from("reviews").delete().eq("manual_version_id", PMV);
+  });
+
+  // ---- Phase 5 publish gate: required MISSING (spec §45) ----
+  it("a required in-scope MISSING checklist result blocks publish and names the blocker", { retry: 2 }, async () => {
+    await driveToApproved();
+    await seedChecklist({ "CHK-PARAM-COMPLETE": "MISSING" });
+    const before = await auditCount("manual_version:publish");
+    const r = await publish(ADMIN);
+    expect(r.error?.message ?? "", "blocked").toMatch(/publication is blocked/i);
+    expect(r.error?.details ?? "", "blocker key surfaced").toMatch(/CHK-PARAM-COMPLETE/);
+    expect(await snapshotRow()).toBeNull();
+    expect((await mv()).status).toBe("APPROVED");
+    expect(await auditCount("manual_version:publish"), "no NEW publish audit").toBe(before);
+  });
+
+  // ---- Phase 5 publish gate: publish-blocking WARNING (spec §46) ----
+  it("a publish-blocking WARNING (CHK-NO-PROHIBITED-CLAIMS) blocks publish", { retry: 2 }, async () => {
+    await driveToApproved();
+    await seedChecklist({ "CHK-NO-PROHIBITED-CLAIMS": "WARNING" });
+    const r = await publish(ADMIN);
+    expect(r.error?.message ?? "", "blocked").toMatch(/publication is blocked/i);
+    expect(r.error?.details ?? "").toMatch(/CHK-NO-PROHIBITED-CLAIMS/);
+    expect(await snapshotRow()).toBeNull();
+  });
+
+  // ---- Phase 5 publish gate: ORDINARY WARNING does NOT block (spec §47) ----
+  it("a WARNING on a NON-publish-blocking item does NOT block publish", { retry: 2 }, async () => {
+    await driveToApproved();
+    await seedChecklist({ "CHK-CHANGELOG-VERSI": "WARNING" }); // required but publish_blocking = false
+    const r = await publish(ADMIN);
+    expect(r.error, "non-blocking warning still publishes").toBeNull();
+    expect((await mv()).status).toBe("PUBLISHED");
+  });
+
+  // ---- result-set coherence (spec §48) ----
+  it("publish is rejected when the checklist result set is incomplete or mixes template versions", { retry: 2 }, async () => {
+    await driveToApproved();
+    await seedChecklist();
+    await svc().from("checklist_results").delete().eq("manual_version_id", PMV).eq("check_key", "CHK-INTERFACE");
+    expect((await publish(ADMIN)).error?.message ?? "", "incomplete set").toMatch(/does not cover every checklist item/i);
+
+    await seedChecklist();
+    await svc().from("checklist_results").update({ checklist_template_version: 2 }).eq("manual_version_id", PMV).eq("check_key", "CHK-INTERFACE");
+    expect((await publish(ADMIN)).error?.message ?? "", "mixed versions").toMatch(/mixes template versions/i);
+    expect(await snapshotRow()).toBeNull();
+  });
+
+  // ---- atomic fault injection (spec §22 / §49) ----
+  it("a real uniqueness failure on the snapshot INSERT rolls the WHOLE transaction back", { retry: 2 }, async () => {
+    await driveToApproved();
+    await seedChecklist();
+    // a DIFFERENT manual version already owns (ORG_A, SLUG, PUBVER) -> our snapshot INSERT will
+    // violate the (organization_id, public_slug, public_version) unique AFTER the status UPDATE
+    // already ran inside the same transaction.
+    await svc().from("published_snapshots").insert({
+      organization_id: ORG_A, manual_version_id: PMV_OTHER, render_json: { x: 1 }, content_hash: "z".repeat(64),
+      public_slug: SLUG, public_version: PUBVER,
+    });
+    const before = await auditCount("manual_version:publish");
+
+    const r = await publish(ADMIN);
+    expect(r.error, "publish fails on the slug/version conflict").toBeTruthy();
+
+    const row = await mv();
+    expect(row.status, "target still APPROVED (rolled back)").toBe("APPROVED");
+    expect(row.published_at, "published_at still NULL").toBeNull();
+    expect((await svc().from("published_snapshots").select("id").eq("manual_version_id", PMV)).data ?? [], "no target snapshot").toHaveLength(0);
+    expect(await auditCount("manual_version:publish"), "no NEW target publish audit (full rollback)").toBe(before);
+
+    await svc().from("published_snapshots").delete().eq("manual_version_id", PMV_OTHER);
+  });
+
+  // ---- published immutability + archive carve-out (spec §50) ----
+  it("after publish, ordinary app writes to the frozen content are all rejected; then ADMIN archive succeeds", { retry: 2 }, async () => {
+    await driveToApproved();
+    await seedChecklist();
+    expect((await publish(ADMIN)).error).toBeNull();
+
+    // manual_versions: no ordinary UPDATE / DELETE
+    const mvUpd = await dev.from("manual_versions").update({ version: "9.9.9" }).eq("id", PMV).select("id");
+    expect((mvUpd.data ?? []).length === 0 || mvUpd.error, "mv update blocked").toBeTruthy();
+    const del = await dev.from("manual_versions").delete().eq("id", PMV).select("id");
+    expect((del.data ?? []).length === 0 || del.error, "mv delete blocked").toBeTruthy();
+
+    // manual_sections / manual_blocks / changelog_entries: no insert / update / delete
+    const sIns = await dev.from("manual_sections").insert({ organization_id: ORG_A, manual_version_id: PMV, section_key: "x", title: "x", position: 9 }).select("id");
+    expect((sIns.data ?? []).length === 0 || sIns.error, "section insert blocked").toBeTruthy();
+    const sUpd = await dev.from("manual_sections").update({ title: "hax" }).eq("id", coverSection).select("id");
+    expect((sUpd.data ?? []).length === 0 || sUpd.error, "section update blocked").toBeTruthy();
+    const bIns = await dev.from("manual_blocks").insert({ organization_id: ORG_A, manual_section_id: coverSection, block_type: "text", payload: {}, position: 0 }).select("id");
+    expect((bIns.data ?? []).length === 0 || bIns.error, "block insert blocked").toBeTruthy();
+    const clIns = await dev.from("changelog_entries").insert({ organization_id: ORG_A, manual_version_id: PMV, position: 0, entry_type: "ADDED", body: "x", source_ea_version_id: VMAX_EA_VERSION }).select("id");
+    expect((clIns.data ?? []).length === 0 || clIns.error, "changelog insert blocked").toBeTruthy();
+
+    // the controlled carve-out still works
+    const arch = await svc().rpc("archive_manual_version", { p_manual_version_id: PMV, p_actor_id: ADMIN });
+    expect(arch.error, "admin archive").toBeNull();
+    expect((await mv()).status).toBe("ARCHIVED");
+  });
+
+  // ---- snapshot immutability (spec §51) ----
+  it("published_snapshots rows reject ordinary UPDATE / DELETE and stay byte-identical", { retry: 2 }, async () => {
+    await driveToApproved();
+    await seedChecklist();
+    expect((await publish(ADMIN)).error).toBeNull();
+    const before = await snapshotRow();
+
+    const u1 = await admin.from("published_snapshots").update({ render_json: { hacked: true } }).eq("manual_version_id", PMV).select("id");
+    expect((u1.data ?? []).length === 0 || u1.error, "render_json update blocked").toBeTruthy();
+    const u2 = await admin.from("published_snapshots").update({ content_hash: "0".repeat(64) }).eq("manual_version_id", PMV).select("id");
+    expect((u2.data ?? []).length === 0 || u2.error, "content_hash update blocked").toBeTruthy();
+    const d1 = await admin.from("published_snapshots").delete().eq("manual_version_id", PMV).select("id");
+    expect((d1.data ?? []).length === 0 || d1.error, "delete blocked").toBeTruthy();
+
+    const after = await snapshotRow();
+    expect(after!.content_hash).toBe(before!.content_hash);
+    expect(JSON.stringify(after!.render_json)).toBe(JSON.stringify(before!.render_json));
+  });
+
+  // ---- source drift after publish (spec §53) ----
+  it("mutating a live EA fact after publish does NOT change the stored snapshot or its hash", { retry: 2 }, async () => {
+    await driveToApproved();
+    await seedChecklist();
+    expect((await publish(ADMIN)).error).toBeNull();
+    const before = await snapshotRow();
+
+    const param = (await svc().from("ea_parameters").select("id, default_value").eq("parameter_group_id", VMAX_GROUP).limit(1).maybeSingle()).data;
+    if (param) {
+      await svc().from("ea_parameters").update({ default_value: "999.999" }).eq("id", param.id);
+      const after = await snapshotRow();
+      expect(JSON.stringify(after!.render_json), "stored render_json unchanged").toBe(JSON.stringify(before!.render_json));
+      expect(after!.content_hash, "stored hash unchanged").toBe(before!.content_hash);
+      expect(computeSnapshotHash(after!.render_json), "recompute from stored still matches").toBe(after!.content_hash);
+      await svc().from("ea_parameters").update({ default_value: param.default_value }).eq("id", param.id); // restore
+    }
+  });
+
+  // ---- archive command (spec §52) ----
+  it("archive: non-admin rejected; ADMIN -> ARCHIVED + archived_at, snapshot intact, one audit; second archive rejected", { retry: 2 }, async () => {
+    await driveToApproved();
+    await seedChecklist();
+    expect((await publish(ADMIN)).error).toBeNull();
+    const snapBefore = await snapshotRow();
+    const archAuditBefore = await auditCount("manual_version:archive");
+
+    expect((await svc().rpc("archive_manual_version", { p_manual_version_id: PMV, p_actor_id: DEV })).error?.message ?? "", "non-admin").toMatch(/only an ADMIN/i);
+
+    const a = await svc().rpc("archive_manual_version", { p_manual_version_id: PMV, p_actor_id: ADMIN });
+    expect(a.error, "admin archives").toBeNull();
+    const row = await mv();
+    expect(row.status).toBe("ARCHIVED");
+    expect(row.archived_at).not.toBeNull();
+
+    const snapAfter = await snapshotRow();
+    expect(snapAfter, "snapshot still exists").not.toBeNull();
+    expect(snapAfter!.content_hash).toBe(snapBefore!.content_hash);
+    expect(JSON.stringify(snapAfter!.render_json)).toBe(JSON.stringify(snapBefore!.render_json));
+    expect(await auditCount("manual_version:archive"), "exactly one NEW archive audit").toBe(archAuditBefore + 1);
+
+    expect((await svc().rpc("archive_manual_version", { p_manual_version_id: PMV, p_actor_id: ADMIN })).error?.message ?? "", "second archive").toMatch(/only a PUBLISHED/i);
+    // review history untouched by archive
+    expect((await svc().from("reviews").select("id").eq("manual_version_id", PMV)).data ?? []).toHaveLength(2);
+  });
+
+  // ---- the full 8-edge workflow now has real command coverage (spec §54, AC-P6-2) ----
+  it("all EIGHT workflow edges execute through real server commands; forged illegal transitions are rejected", { retry: 2 }, async () => {
+    const seen: string[] = [];
+    await svc().from("reviews").delete().eq("manual_version_id", PMV);
+    await svc().from("manual_versions").update({
+      status: "DRAFT", review_round: 0, submitted_content_hash: null, published_at: null, archived_at: null, reviewed_at: null,
+      technical_reviewer_id: REV, compliance_reviewer_id: COMP,
+    }).eq("id", PMV);
+    await svc().from("manual_version_contributors").delete().eq("manual_version_id", PMV);
+    await seedChecklist();
+
+    // 1. DRAFT -> TECHNICAL_REVIEW
+    await dev.rpc("submit_for_technical_review", { p_manual_version_id: PMV, p_expected_round: 0, p_content_hash: H1 });
+    seen.push("DRAFT->TECHNICAL_REVIEW=" + (await mv()).status);
+    // 2. TECHNICAL_REVIEW -> CHANGES_REQUESTED
+    await reviewer.rpc("record_technical_decision", { p_manual_version_id: PMV, p_expected_round: 1, p_decision: "REQUEST_CHANGES", p_summary: "perbaiki", p_current_hash: H1 });
+    seen.push("TECHNICAL_REVIEW->CHANGES_REQUESTED=" + (await mv()).status);
+    // 3. CHANGES_REQUESTED -> DRAFT
+    await dev.rpc("begin_revision", { p_manual_version_id: PMV, p_expected_round: 1 });
+    seen.push("CHANGES_REQUESTED->DRAFT=" + (await mv()).status);
+    // 4. DRAFT -> TECHNICAL_REVIEW (again) then TECHNICAL_REVIEW -> COMPLIANCE_REVIEW
+    await dev.rpc("submit_for_technical_review", { p_manual_version_id: PMV, p_expected_round: 1, p_content_hash: H1 });
+    await reviewer.rpc("record_technical_decision", { p_manual_version_id: PMV, p_expected_round: 2, p_decision: "APPROVE", p_summary: "", p_current_hash: H1 });
+    seen.push("TECHNICAL_REVIEW->COMPLIANCE_REVIEW=" + (await mv()).status);
+    // 5. COMPLIANCE_REVIEW -> CHANGES_REQUESTED
+    await compliance.rpc("record_compliance_decision", { p_manual_version_id: PMV, p_expected_round: 2, p_decision: "REQUEST_CHANGES", p_summary: "kutipan", p_current_hash: H1 });
+    seen.push("COMPLIANCE_REVIEW->CHANGES_REQUESTED=" + (await mv()).status);
+    // 6. back to DRAFT, resubmit, tech approve, COMPLIANCE_REVIEW -> APPROVED
+    await dev.rpc("begin_revision", { p_manual_version_id: PMV, p_expected_round: 2 });
+    await dev.rpc("submit_for_technical_review", { p_manual_version_id: PMV, p_expected_round: 2, p_content_hash: H1 });
+    await reviewer.rpc("record_technical_decision", { p_manual_version_id: PMV, p_expected_round: 3, p_decision: "APPROVE", p_summary: "", p_current_hash: H1 });
+    await compliance.rpc("record_compliance_decision", { p_manual_version_id: PMV, p_expected_round: 3, p_decision: "APPROVE", p_summary: "", p_current_hash: H1 });
+    seen.push("COMPLIANCE_REVIEW->APPROVED=" + (await mv()).status);
+    // 7. APPROVED -> PUBLISHED
+    expect((await publish(ADMIN)).error, "publish edge").toBeNull();
+    seen.push("APPROVED->PUBLISHED=" + (await mv()).status);
+    // 8. PUBLISHED -> ARCHIVED
+    await svc().rpc("archive_manual_version", { p_manual_version_id: PMV, p_actor_id: ADMIN });
+    seen.push("PUBLISHED->ARCHIVED=" + (await mv()).status);
+
+    expect(seen).toEqual([
+      "DRAFT->TECHNICAL_REVIEW=TECHNICAL_REVIEW",
+      "TECHNICAL_REVIEW->CHANGES_REQUESTED=CHANGES_REQUESTED",
+      "CHANGES_REQUESTED->DRAFT=DRAFT",
+      "TECHNICAL_REVIEW->COMPLIANCE_REVIEW=COMPLIANCE_REVIEW",
+      "COMPLIANCE_REVIEW->CHANGES_REQUESTED=CHANGES_REQUESTED",
+      "COMPLIANCE_REVIEW->APPROVED=APPROVED",
+      "APPROVED->PUBLISHED=PUBLISHED",
+      "PUBLISHED->ARCHIVED=ARCHIVED",
+    ]);
+
+    // forged illegal transitions via a direct client UPDATE are rejected by the DB guards
+    const f1 = await dev.from("manual_versions").update({ status: "PUBLISHED" }).eq("id", PMV).select("id");
+    expect((f1.data ?? []).length === 0 || f1.error, "forged ARCHIVED->PUBLISHED blocked").toBeTruthy();
+    await svc().from("manual_versions").update({ status: "DRAFT" }).eq("id", PMV);
+    const f2 = await dev.from("manual_versions").update({ status: "APPROVED" }).eq("id", PMV).select("id");
+    expect((f2.data ?? []).length === 0 || f2.error, "forged DRAFT->APPROVED blocked").toBeTruthy();
+  });
+});
+
+// ===========================================================================
+// Phase 6 slice 7 (final gate) — review history data + the template/member audit sweep.
+// A dedicated fixture is driven through TWO real review rounds (round 1: technical comments +
+// Request Changes; round 2: technical Approve, compliance comment, compliance Approve, publish,
+// archive) so the history query has real evidence. Then the pre-existing ADMIN-only DB mutation
+// paths for `manual_templates` + `memberships` (no UI, but `*_write_admin` RLS permits a direct
+// PostgREST write) are exercised and asserted to emit exactly ONE append-only audit row each
+// (AC-P6-13), with `audit_events` proven append-only for every ordinary caller.
+// ===========================================================================
+describe.skipIf(!HAS_SERVICE)("Phase 6 slice 7 — review history + template/member audit", () => {
+  // `audit_events` is strictly append-only (20260901002400) — it can never be cleaned, not even
+  // by the service role. So every entity that gets audited uses a PER-RUN random id: the audit
+  // rows a run leaves behind are isolated (RETAINED DEV/QA evidence) and never collide with
+  // another run's assertions. The mutable entity rows themselves are still deleted in afterAll.
+  let HMANUAL = "", HMV = "";
+  const CT1 = "c5000000-0000-4000-8000-000000000001";
+  const H = "e".repeat(64);
+  const SLUG = `slice7-hist-ea-${crypto.randomUUID().slice(0, 8)}`;
+
+  let dev: SupabaseClient, admin: SupabaseClient, reviewer: SupabaseClient, compliance: SupabaseClient, outsider: SupabaseClient, anon: SupabaseClient;
+  let DEV = "", ADMIN = "", REV = "", COMP = "";
+  let secCover = "", blk1 = "";
+  let ITEMS: { check_key: string; category: string; required: boolean }[] = [];
+
+  const svc = () => service();
+  const mv = async () => (await svc().from("manual_versions").select("status, review_round").eq("id", HMV).single()).data!;
+  const seedChecklistNA = async () => {
+    await svc().from("checklist_results").delete().eq("manual_version_id", HMV);
+    for (const it of ITEMS) {
+      await svc().from("checklist_results").insert({
+        organization_id: ORG_A, manual_version_id: HMV, checklist_template_id: CT1, checklist_template_version: 1,
+        check_key: it.check_key, category: it.category, required: it.required,
+        state: "NOT_APPLICABLE", evaluator: "reviewer", override_actor_id: REV, override_reason: "qa", override_at: "2026-08-01T00:00:00Z",
+      });
+    }
+  };
+
+  beforeAll(async () => {
+    dev = await signIn("developer@smartin.demo");
+    admin = await signIn("admin@smartin.demo");
+    reviewer = await signIn("reviewer@smartin.demo");
+    compliance = await signIn("compliance@smartin.demo");
+    outsider = await signIn("outsider@smartin.demo");
+    anon = createClient(URL!, ANON!, { global: { fetch: boundFetch } });
+    DEV = (await dev.auth.getUser()).data.user!.id;
+    ADMIN = (await admin.auth.getUser()).data.user!.id;
+    REV = (await reviewer.auth.getUser()).data.user!.id;
+    COMP = (await compliance.auth.getUser()).data.user!.id;
+    ITEMS = ((await svc().from("checklist_items").select("check_key, category, required").eq("checklist_template_id", CT1)).data ?? []) as typeof ITEMS;
+
+    HMANUAL = crypto.randomUUID();
+    HMV = crypto.randomUUID();
+    await svc().from("memberships").delete().eq("organization_id", ORG_A).eq("user_id", COMP).eq("role", "DEVELOPER");
+
+    await svc().from("manuals").insert({ id: HMANUAL, organization_id: ORG_A, ea_product_id: VMAX_PRODUCT, template_id: SYSTEM_TEMPLATE, locale: "id" });
+    await svc().from("manual_versions").insert({
+      id: HMV, organization_id: ORG_A, manual_id: HMANUAL, ea_version_id: VMAX_EA_VERSION, version: "9.9.7",
+      status: "DRAFT", review_round: 0, template_id: SYSTEM_TEMPLATE, template_version: 1,
+      technical_reviewer_id: REV, compliance_reviewer_id: COMP,
+    });
+    secCover = (await svc().from("manual_sections").insert({ organization_id: ORG_A, manual_version_id: HMV, section_key: "cover", title: "Sampul", required: true, position: 0 }).select("id").single()).data!.id as string;
+    blk1 = (await svc().from("manual_blocks").insert({ organization_id: ORG_A, manual_section_id: secCover, block_type: "text", payload: { type: "text", schemaVersion: 1, content: { schemaVersion: 1, format: "plain-paragraphs", paragraphs: ["x"] } }, position: 0 }).select("id").single()).data!.id as string;
+    await seedChecklistNA();
+  });
+
+  afterAll(async () => {
+    await svc().from("published_snapshots").delete().eq("manual_version_id", HMV);
+    await svc().from("checklist_results").delete().eq("manual_version_id", HMV);
+    await svc().from("reviews").delete().eq("manual_version_id", HMV);
+    await svc().from("review_comments").delete().eq("manual_version_id", HMV);
+    await svc().from("manual_version_contributors").delete().eq("manual_version_id", HMV);
+    await svc().from("manual_versions").update({ status: "DRAFT" }).eq("id", HMV);
+    await svc().from("manual_versions").delete().eq("id", HMV);
+    await svc().from("manuals").delete().eq("id", HMANUAL);
+    await svc().from("memberships").delete().eq("organization_id", ORG_A).eq("user_id", COMP).eq("role", "DEVELOPER");
+    // The mutable entity rows above are cleaned; their `audit_events` rows are STRICTLY APPEND-ONLY
+    // (20260901002400 — not even the service role can delete them) and are RETAINED as DEV/QA
+    // evidence with safe metadata (per-run random `entity_id`, so no cross-run collision).
+  });
+
+  // clean assigned DRAFT before each test / body-only retry (audit rows stay — append-only)
+  beforeEach(async () => {
+    await svc().from("published_snapshots").delete().eq("manual_version_id", HMV);
+    await svc().from("reviews").delete().eq("manual_version_id", HMV);
+    await svc().from("review_comments").delete().eq("manual_version_id", HMV);
+    await svc().from("manual_version_contributors").delete().eq("manual_version_id", HMV);
+    await svc().from("manual_versions").update({
+      status: "DRAFT", review_round: 0, submitted_content_hash: null, published_at: null, archived_at: null, reviewed_at: null,
+      technical_reviewer_id: REV, compliance_reviewer_id: COMP,
+    }).eq("id", HMV);
+    await svc().from("manual_blocks").update({ deleted_at: null }).eq("id", blk1);
+  });
+
+  // ---- review history data across two real rounds (AC-P6-15 evidence) ----
+  it("two real review rounds produce a complete, org-scoped decision + comment history", { retry: 2 }, async () => {
+    // ROUND 1 — submit, technical comments (manual + block), Request Changes
+    expect((await dev.rpc("submit_for_technical_review", { p_manual_version_id: HMV, p_expected_round: 0, p_content_hash: H })).error).toBeNull();
+    expect((await reviewer.rpc("create_review_comment", { p_manual_version_id: HMV, p_review_type: "TECHNICAL", p_round: 1, p_section_id: null, p_block_id: null, p_body: "Perlu perbaikan bab sampul." })).error).toBeNull();
+    const bc = await reviewer.rpc("create_review_comment", { p_manual_version_id: HMV, p_review_type: "TECHNICAL", p_round: 1, p_section_id: null, p_block_id: blk1, p_body: "Blok ini kurang jelas." });
+    expect(bc.error).toBeNull();
+    expect((await reviewer.rpc("record_technical_decision", { p_manual_version_id: HMV, p_expected_round: 1, p_decision: "REQUEST_CHANGES", p_summary: "Lengkapi identitas versi pada bab sampul.", p_current_hash: H })).error).toBeNull();
+    expect((await mv()).status).toBe("CHANGES_REQUESTED");
+
+    // developer revises, soft-deletes the commented block, resubmits -> ROUND 2
+    expect((await dev.rpc("begin_revision", { p_manual_version_id: HMV, p_expected_round: 1 })).error).toBeNull();
+    await svc().from("manual_blocks").update({ deleted_at: new Date().toISOString() }).eq("id", blk1);
+    expect((await dev.rpc("submit_for_technical_review", { p_manual_version_id: HMV, p_expected_round: 1, p_content_hash: H })).error).toBeNull();
+
+    // ROUND 2 — technical Approve, compliance comment, compliance Approve
+    expect((await reviewer.rpc("record_technical_decision", { p_manual_version_id: HMV, p_expected_round: 2, p_decision: "APPROVE", p_summary: "", p_current_hash: H })).error).toBeNull();
+    expect((await compliance.rpc("create_review_comment", { p_manual_version_id: HMV, p_review_type: "COMPLIANCE", p_round: 2, p_section_id: secCover, p_block_id: null, p_body: "Rujukan disclosure sudah memadai." })).error).toBeNull();
+    expect((await compliance.rpc("record_compliance_decision", { p_manual_version_id: HMV, p_expected_round: 2, p_decision: "APPROVE", p_summary: "", p_current_hash: H })).error).toBeNull();
+    expect((await mv()).status).toBe("APPROVED");
+
+    // publish + archive so the history shows the terminal states
+    expect((await svc().rpc("publish_manual_version", {
+      p_manual_version_id: HMV, p_actor_id: ADMIN, p_expected_content_hash: H,
+      p_render_json: { snapshotVersion: 1, public: { slug: SLUG, version: "9.9.7" }, content: {}, images: {} },
+      p_snapshot_hash: "f".repeat(64), p_public_slug: SLUG, p_public_version: "9.9.7",
+    })).error).toBeNull();
+    expect((await svc().rpc("archive_manual_version", { p_manual_version_id: HMV, p_actor_id: ADMIN })).error).toBeNull();
+
+    // --- history data: decisions ---
+    const decisions = (await svc().from("reviews").select("round_number, review_type, decision, summary").eq("manual_version_id", HMV).order("round_number").order("review_type")).data ?? [];
+    expect(decisions).toEqual([
+      { round_number: 1, review_type: "TECHNICAL", decision: "REQUEST_CHANGES", summary: "Lengkapi identitas versi pada bab sampul." },
+      { round_number: 2, review_type: "COMPLIANCE", decision: "APPROVE", summary: "" },
+      { round_number: 2, review_type: "TECHNICAL", decision: "APPROVE", summary: "" },
+    ]);
+
+    // --- history data: comments span both rounds; round-1 comments still present; block-anchor
+    //     comment survives its block being soft-deleted ---
+    const comments = (await svc().from("review_comments").select("round_number, review_type, body, section_id, block_id, resolved").eq("manual_version_id", HMV).order("round_number").order("created_at")).data ?? [];
+    expect(comments.map((c) => [c.round_number, c.review_type])).toEqual([
+      [1, "TECHNICAL"], [1, "TECHNICAL"], [2, "COMPLIANCE"],
+    ]);
+    expect(comments[1].block_id, "block-anchored round-1 comment retained").toBe(blk1);
+    const delBlk = (await svc().from("manual_blocks").select("deleted_at").eq("id", blk1).single()).data!;
+    expect(delBlk.deleted_at, "the anchored block is soft-deleted").not.toBeNull();
+
+    // --- org isolation: an org-B authenticated user sees no history rows ---
+    expect((await outsider.from("reviews").select("id").eq("manual_version_id", HMV)).data ?? [], "org B sees no reviews").toHaveLength(0);
+    expect((await outsider.from("review_comments").select("id").eq("manual_version_id", HMV)).data ?? [], "org B sees no comments").toHaveLength(0);
+    expect((await outsider.from("manual_versions").select("id").eq("id", HMV)).data ?? [], "org B sees no version").toHaveLength(0);
+    // --- anon denial ---
+    expect((await anon.from("reviews").select("id").eq("manual_version_id", HMV)).data ?? [], "anon sees no reviews").toHaveLength(0);
+    expect((await anon.from("review_comments").select("id").eq("manual_version_id", HMV)).data ?? [], "anon sees no comments").toHaveLength(0);
+  });
+
+  // ---- template mutation audit + retention after entity deletion (AC-P6-13, §10-A) ----
+  it("an ADMIN's manual_templates mutation writes exactly one audit row per row-change; the audit SURVIVES deleting the template; non-admin + cross-org rejected", { retry: 2 }, async () => {
+    const tplId = crypto.randomUUID();
+    const tplKey = `slice7-qa-tpl-${crypto.randomUUID().slice(0, 8)}`;
+
+    const ins = await admin.from("manual_templates").insert({ id: tplId, organization_id: ORG_A, key: tplKey, version: 1, title: "QA Template (DEV/QA evidence)", is_active: false }).select("id");
+    expect(ins.error, "admin creates an org template").toBeNull();
+    let audits: Record<string, unknown>[] = (await svc().from("audit_events").select("action, actor_id, entity_type, metadata, created_at").eq("entity_id", tplId).order("created_at")).data ?? [];
+    expect(audits, "exactly one template:insert audit").toHaveLength(1);
+    expect(audits[0].action).toBe("template:insert");
+    expect(audits[0].entity_type).toBe("manual_template");
+    expect(audits[0].actor_id, "actor is the authenticated admin").toBe(ADMIN);
+    expect((audits[0].metadata as { templateKind: string }).templateKind).toBe("manual");
+    expect(JSON.stringify(audits[0].metadata)).not.toMatch(/paragraph|render_json|section|block|token|secret/i);
+
+    const upd = await admin.from("manual_templates").update({ is_active: true }).eq("id", tplId).select("id");
+    expect(upd.error).toBeNull();
+    audits = (await svc().from("audit_events").select("action").eq("entity_id", tplId).order("created_at")).data ?? [];
+    expect(audits.map((a) => a.action), "one insert + one update audit").toEqual(["template:insert", "template:update"]);
+
+    // §10-A — clean up the ENTITY via the trusted fixture path; the AUDIT ROWS MUST REMAIN.
+    const del = await svc().from("manual_templates").delete().eq("id", tplId).select("id");
+    expect(del.error, "service can delete the throwaway template entity").toBeNull();
+    expect((await svc().from("manual_templates").select("id").eq("id", tplId)).data ?? [], "template entity gone").toHaveLength(0);
+    const kept = (await svc().from("audit_events").select("action").eq("entity_id", tplId).order("created_at")).data ?? [];
+    expect(kept.map((a) => a.action), "audit history survives entity deletion (no cascade)").toEqual(["template:insert", "template:update"]);
+
+    // non-admin cannot mutate org templates (RLS)
+    const devIns = await dev.from("manual_templates").insert({ organization_id: ORG_A, key: `slice7-x-${crypto.randomUUID().slice(0, 6)}`, version: 1, title: "x" }).select("id");
+    expect((devIns.data ?? []).length === 0 || devIns.error, "developer cannot create a template").toBeTruthy();
+    // cross-org: org-B admin cannot create an ORG_A template
+    const xIns = await outsider.from("manual_templates").insert({ organization_id: ORG_A, key: `slice7-xorg-${crypto.randomUUID().slice(0, 6)}`, version: 1, title: "x" }).select("id");
+    expect((xIns.data ?? []).length === 0 || xIns.error, "org B admin cannot create an ORG_A template").toBeTruthy();
+  });
+
+  // ---- member mutation audit + retention after entity deletion (AC-P6-13, §10-B, §17) ----
+  it("an ADMIN's memberships mutation writes exactly one audit row per row-change (actor from auth.uid(), not forgeable); the audit SURVIVES deleting the membership; non-admin + cross-org rejected", { retry: 2 }, async () => {
+    await svc().from("memberships").delete().eq("organization_id", ORG_A).eq("user_id", COMP).eq("role", "DEVELOPER");
+
+    const ins = await admin.from("memberships").insert({ organization_id: ORG_A, user_id: COMP, role: "DEVELOPER", is_active: true }).select("id");
+    expect(ins.error, "admin adds a membership row").toBeNull();
+    const memId = ins.data![0].id as string; // fresh per run -> audit rows isolated by entity_id
+
+    let audits: Record<string, unknown>[] = (await svc().from("audit_events").select("action, actor_id, entity_type, metadata").eq("entity_id", memId).order("created_at")).data ?? [];
+    expect(audits, "exactly one member:insert audit").toHaveLength(1);
+    expect(audits[0].action).toBe("member:insert");
+    expect(audits[0].entity_type).toBe("membership");
+    expect(audits[0].actor_id, "actor is the authenticated admin — no client-forgeable actor_id param").toBe(ADMIN);
+    const meta = audits[0].metadata as Record<string, unknown>;
+    expect(meta.targetUserId).toBe(COMP);
+    expect(meta.role).toBe("DEVELOPER");
+    expect(JSON.stringify(meta)).not.toMatch(/token|secret|password|apikey|paragraph|render_json/i);
+
+    const upd = await admin.from("memberships").update({ is_active: false }).eq("id", memId).select("id");
+    expect(upd.error).toBeNull();
+    audits = (await svc().from("audit_events").select("action").eq("entity_id", memId).order("created_at")).data ?? [];
+    expect(audits.map((a) => a.action), "one insert + one update audit").toEqual(["member:insert", "member:update"]);
+
+    // §10-B — clean up the ENTITY via the trusted fixture path; the AUDIT ROWS MUST REMAIN.
+    const del = await svc().from("memberships").delete().eq("id", memId).select("id");
+    expect(del.error, "service can delete the throwaway membership entity").toBeNull();
+    expect((await svc().from("memberships").select("id").eq("id", memId)).data ?? [], "membership entity gone").toHaveLength(0);
+    const kept = (await svc().from("audit_events").select("action").eq("entity_id", memId).order("created_at")).data ?? [];
+    expect(kept.map((a) => a.action), "audit history survives entity deletion (no cascade)").toEqual(["member:insert", "member:update"]);
+
+    // non-admin cannot mutate memberships (RLS membership_write_admin)
+    const devIns = await dev.from("memberships").insert({ organization_id: ORG_A, user_id: DEV, role: "ADMIN", is_active: true }).select("id");
+    expect((devIns.data ?? []).length === 0 || devIns.error, "developer cannot grant itself ADMIN").toBeTruthy();
+    // cross-org: org-B admin cannot add an ORG_A membership
+    const xIns = await outsider.from("memberships").insert({ organization_id: ORG_A, user_id: COMP, role: "ADMIN", is_active: true }).select("id");
+    expect((xIns.data ?? []).length === 0 || xIns.error, "org B admin cannot touch ORG_A memberships").toBeTruthy();
+
+    await svc().from("memberships").delete().eq("organization_id", ORG_A).eq("user_id", COMP).eq("role", "DEVELOPER");
+  });
+
+  // ---- audit_events is STRICTLY append-only — no application identity, service_role included (§5/§6) ----
+  it("neither an authenticated caller NOR the service_role can UPDATE or DELETE an audit_events row", { retry: 2 }, async () => {
+    // a dedicated fixture audit row (INSERT still works — this is a legitimate privileged action)
+    const fx = await svc().rpc("assign_reviewers", { p_manual_version_id: HMV, p_technical_reviewer_id: REV, p_compliance_reviewer_id: COMP });
+    expect(fx.error, "assign_reviewers INSERTs an audit row").toBeNull();
+    const row = (await svc().from("audit_events").select("id, action, metadata").eq("entity_id", HMV).eq("action", "manual_version:assign_reviewers").order("created_at", { ascending: false }).limit(1).single()).data!;
+    const beforeJson = JSON.stringify(row);
+
+    // (a) service_role — the trusted server credential — CANNOT mutate audit history
+    const sUpd = await svc().from("audit_events").update({ action: "hacked" }).eq("id", row.id).select("id");
+    expect(sUpd.error, "service_role UPDATE audit_events rejected").toBeTruthy();
+    expect(sUpd.error!.message).toMatch(/append-only/i);
+    const sDel = await svc().from("audit_events").delete().eq("id", row.id).select("id");
+    expect(sDel.error, "service_role DELETE audit_events rejected").toBeTruthy();
+    expect(sDel.error!.message).toMatch(/append-only/i);
+
+    // (b) authenticated ADMIN / developer — rejected
+    for (const [who, c] of [["admin", admin], ["developer", dev]] as const) {
+      const u = await c.from("audit_events").update({ action: "hacked" }).eq("id", row.id).select("id");
+      expect((u.data ?? []).length === 0 || u.error, `${who} cannot UPDATE audit_events`).toBeTruthy();
+      const d = await c.from("audit_events").delete().eq("id", row.id).select("id");
+      expect((d.data ?? []).length === 0 || d.error, `${who} cannot DELETE audit_events`).toBeTruthy();
+    }
+    // (c) anon — no access at all
+    const aSel = await anon.from("audit_events").select("id").eq("id", row.id);
+    expect(aSel.data ?? [], "anon reads no audit rows").toHaveLength(0);
+    const aDel = await anon.from("audit_events").delete().eq("id", row.id).select("id");
+    expect((aDel.data ?? []).length === 0 || aDel.error, "anon cannot DELETE audit_events").toBeTruthy();
+
+    // (d) the row is byte-for-byte unchanged
+    const after = (await svc().from("audit_events").select("id, action, metadata").eq("id", row.id).single()).data!;
+    expect(JSON.stringify(after), "audit row byte-identical after every failed mutation").toBe(beforeJson);
   });
 });

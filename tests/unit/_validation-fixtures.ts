@@ -91,6 +91,7 @@ export function makeVm(opts: {
   developer?: { name: string } | null;
   organization?: string;
   groups?: { name: string; params: { technicalName: string; displayName: string; defaultValue: string | null }[] }[];
+  changelog?: ManualViewModel["changelog"];
 } = {}): ManualViewModel {
   const content = opts.content ?? {};
   const orgName = opts.organization ?? "PT Smartin Advisor Sistem";
@@ -141,6 +142,7 @@ export function makeVm(opts: {
     })),
     parameterGroups: groups,
     images: {},
+    changelog: opts.changelog ?? [],
   };
 }
 

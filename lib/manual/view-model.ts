@@ -86,6 +86,22 @@ export type ManualViewModel = {
     }[];
   }[];
   images: Record<string, { id: string; altText: string | null; caption: string | null; signedUrl: string | null }>;
+  /**
+   * Structured changelog entries for this manual version (Phase 6 slice 4). Part of the reviewed
+   * content — included in the review fingerprint and read by the Phase 5 `CHK-CHANGELOG-VERSI`
+   * rule. Ordered by `position`.
+   */
+  changelog?: ChangelogEntryVm[];
+};
+
+export type ChangelogEntryVm = {
+  id: string;
+  position: number;
+  entryType: "ADDED" | "CHANGED" | "FIXED" | "BREAKING";
+  body: string;
+  sourceEaVersionId: string | null;
+  isFeatureChange: boolean;
+  openPositionImpact: string | null;
 };
 
 export interface ManualDataSource {
@@ -105,6 +121,7 @@ export async function assembleManualViewModel(
   vm.supportedSetups.sort((a, b) => a.position - b.position);
   vm.parameterGroups.sort((a, b) => a.position - b.position);
   vm.parameterGroups.forEach((g) => g.parameters.sort((a, b) => a.position - b.position));
+  if (vm.changelog) vm.changelog.sort((a, b) => a.position - b.position);
   return vm;
 }
 

@@ -15,5 +15,9 @@ export default defineConfig({
     globals: true,
     include: ["tests/**/*.test.{ts,tsx}"],
     setupFiles: ["tests/setup.ts"],
+    // The live integration suite makes many sequential round-trips to the remote DEV project
+    // (workflow RPCs). A generous ceiling never slows a passing test.
+    testTimeout: 60_000,
+    hookTimeout: 60_000,
   },
 });

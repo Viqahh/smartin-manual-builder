@@ -106,6 +106,11 @@ export type SectionEditorHandle = {
   ) => { ok: true; changed: boolean } | { ok: false; reason: "not-found" | "invalid" | "stale" };
   /** Canonical hash of a block's current payload (stale-target guard, §18). */
   blockPayloadHash: (blockKey: string) => string | null;
+  /**
+   * Scroll a block (by DB id) into view and flash it — used by review-comment anchor navigation
+   * (Phase 6 slice 3, §17). Returns false when the block is not in this mounted section.
+   */
+  focusBlock: (blockId: string) => boolean;
 };
 
 type SectionEditorProps = {
@@ -434,6 +439,17 @@ export const SectionEditor = forwardRef<SectionEditorHandle, SectionEditorProps>
         const b = blocksRef.current.find((x) => x.key === blockKey);
         return b ? stableStringify(b.payload) : null;
       },
+      focusBlock: (blockId) => {
+        if (typeof document === "undefined") return false;
+        const el = document.querySelector<HTMLElement>(`[data-block-id="${CSS.escape(blockId)}"]`);
+        if (!el) return false;
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        el.classList.remove("rc-anchor-flash");
+        void el.offsetWidth; // restart the animation if it is still on the element
+        el.classList.add("rc-anchor-flash");
+        window.setTimeout(() => el.classList.remove("rc-anchor-flash"), 1800);
+        return true;
+      },
       applyProposal: (blockKey, targetField, output) => {
         const b = blocksRef.current.find((x) => x.key === blockKey);
         if (!b) return { ok: false, reason: "not-found" };
@@ -740,7 +756,7 @@ export const SectionEditor = forwardRef<SectionEditorHandle, SectionEditorProps>
           <Undo2 aria-hidden="true" size={14} /> Peran Anda hanya dapat membaca manual ini.
         </p>
         <div className="editor-canvas">
-          <SectionContent section={section} vm={vm} />
+          <SectionContent section={section} vm={vm} anchored />
         </div>
       </div>
     );
@@ -805,6 +821,7 @@ export const SectionEditor = forwardRef<SectionEditorHandle, SectionEditorProps>
               <li
                 key={b.key}
                 className="block-item"
+                data-block-id={b.id ?? undefined}
                 data-save={b.save}
                 data-dragover={dragOver === i}
                 onFocusCapture={() => reportAiTarget(b.key)}

@@ -406,8 +406,26 @@ describe("CHK-CHANGELOG-VERSI (PRD-VER, Pasal 8)", () => {
   it("MISSING when the changelog has no version entry", () => {
     expect(evalKey(withChapter("changelog", [textBlock("Belum ada catatan.")]), "CHK-CHANGELOG-VERSI").state).toBe("MISSING");
   });
-  it("PASS when a [X.Y.Z] entry is present", () => {
+  it("PASS when a [X.Y.Z] entry is present (legacy free-text fallback)", () => {
     expect(evalKey(base(), "CHK-CHANGELOG-VERSI").state).toBe("PASS");
+  });
+  it("MISSING → PASS when a structured changelog entry is added (slice 4)", () => {
+    const noText = withChapter("changelog", [textBlock("Belum ada catatan.")]);
+    expect(evalKey(noText, "CHK-CHANGELOG-VERSI").state).toBe("MISSING");
+    const structured = withChapter("changelog", [textBlock("Belum ada catatan.")], {
+      changelog: [
+        {
+          id: "cl-1",
+          position: 0,
+          entryType: "ADDED" as const,
+          body: "Menambahkan filter berita.",
+          sourceEaVersionId: "ev1",
+          isFeatureChange: true,
+          openPositionImpact: null,
+        },
+      ],
+    });
+    expect(evalKey(structured, "CHK-CHANGELOG-VERSI").state).toBe("PASS");
   });
 });
 

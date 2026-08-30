@@ -26,9 +26,10 @@ export const ACTIONS = [
   "manual:update",
   "manual:submit_review",
   "image:upload",
-  // Reviews (Phase 6 — listed so the map is complete; not wired in Phase 2)
+  // Reviews (Phase 6)
   "review:technical",
   "review:compliance",
+  "review:assign", // ADMIN assigns the technical + compliance reviewer per manual version
   "manual:publish",
   // Workspace administration
   "template:manage",

@@ -174,16 +174,31 @@ function SupportedConfigTable({ vm }: { vm: ManualViewModel }) {
   );
 }
 
-export function SectionContent({ section, vm }: { section: Section; vm: ManualViewModel }) {
+export function SectionContent({
+  section,
+  vm,
+  anchored = false,
+}: {
+  section: Section;
+  vm: ManualViewModel;
+  /** wrap each block in a `[data-block-id]` element so review-comment anchors can focus it (§17). */
+  anchored?: boolean;
+}) {
   const injectSetups = section.key === "requirements" || section.key === "presets";
   return (
     <div className="manual-content generic-chapter">
       {section.blocks.length === 0 && !injectSetups && (
         <p className="lead">Bab ini telah disiapkan dari template Smartin. Konten akan disusun pada editor (Phase 3).</p>
       )}
-      {section.blocks.map((b) => (
-        <BlockView key={b.id} block={b} vm={vm} />
-      ))}
+      {section.blocks.map((b) =>
+        anchored ? (
+          <div key={b.id} data-block-id={b.id} className="rc-anchor-block">
+            <BlockView block={b} vm={vm} />
+          </div>
+        ) : (
+          <BlockView key={b.id} block={b} vm={vm} />
+        ),
+      )}
       {injectSetups && <SupportedConfigTable vm={vm} />}
       {section.completionState === "issue" && (
         <aside className="manual-callout warning">

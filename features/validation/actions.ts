@@ -46,18 +46,23 @@ function canReview(roles: readonly OrgRole[]): boolean {
 // Load the active checklist template + its items (system template — RLS SELECT ok).
 // Falls back to the built-in v1 metadata if the row is somehow absent.
 // ---------------------------------------------------------------------------
-async function loadActiveTemplate(): Promise<{ templateId: string; version: number; items: ChecklistItemDef[] }> {
+/**
+ * Load the checklist template + items. With no argument → the current ACTIVE template (the normal
+ * Phase 5 path). With `pinnedVersion` (Phase 6 slice 5) → that exact `smartin-documentation-checklist`
+ * version, so a clone is evaluated against the SAME checklist-template version its source Manual
+ * Version was bound to — even after the active template has since been upgraded. A pinned version
+ * that no longer exists falls back to the active template (documented).
+ */
+async function loadTemplate(
+  pinnedVersion?: number,
+): Promise<{ templateId: string; version: number; items: ChecklistItemDef[] }> {
   const supabase = await createSupabaseServerClient();
-  const { data: tpl } = await supabase
-    .from("checklist_templates")
-    .select("id, version")
-    .eq("key", "smartin-documentation-checklist")
-    .eq("is_active", true)
-    .order("version", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  let q = supabase.from("checklist_templates").select("id, version").eq("key", "smartin-documentation-checklist");
+  q = pinnedVersion != null ? q.eq("version", pinnedVersion) : q.eq("is_active", true);
+  const { data: tpl } = await q.order("version", { ascending: false }).limit(1).maybeSingle();
 
   if (!tpl) {
+    if (pinnedVersion != null) return loadTemplate(); // pinned version gone -> active fallback
     return { templateId: "c5000000-0000-4000-8000-000000000001", version: 1, items: CHECKLIST_V1 };
   }
   const { data: rows } = await supabase
@@ -111,10 +116,14 @@ async function resolveActorNames(ids: string[]): Promise<Map<string, string>> {
 // ---------------------------------------------------------------------------
 // Evaluate + persist. Server-owned (service client). Preserves reviewer N/A overrides.
 // ---------------------------------------------------------------------------
-async function evaluateAndPersist(orgId: string, manualId: string): Promise<ValidationView> {
+async function evaluateAndPersist(
+  orgId: string,
+  manualId: string,
+  pinnedChecklistVersion?: number,
+): Promise<ValidationView> {
   const vm = await assembleManualViewModel(new SupabaseManualDataSource(orgId), manualId);
   if (!vm) throw new NotFound();
-  const { templateId, version, items } = await loadActiveTemplate();
+  const { templateId, version, items } = await loadTemplate(pinnedChecklistVersion);
 
   const existing = await loadExistingResults(vm.manualVersion.id);
   const nameMap = await resolveActorNames(existing.map((r) => r.override_actor_id ?? "").filter(Boolean));
@@ -237,7 +246,7 @@ export async function getValidation(input: unknown): Promise<ActionResult<Valida
     if (existing.length === 0) {
       return ok(await evaluateAndPersist(orgId, parsed.data.manualId));
     }
-    const { templateId, version, items } = await loadActiveTemplate();
+    const { templateId, version, items } = await loadTemplate();
     const nameMap = await resolveActorNames(existing.map((r) => r.override_actor_id ?? "").filter(Boolean));
     const scope = (vm.eaVersion.requirements?.pbkScope === "OUT_OF_SCOPE" ? "OUT_OF_SCOPE" : "IN_SCOPE") as
       | "IN_SCOPE"
@@ -249,13 +258,20 @@ export async function getValidation(input: unknown): Promise<ActionResult<Valida
   }
 }
 
+const refreshInput = z.object({
+  manualId: z.uuid(),
+  /** Phase 6 slice 5 — pin the fresh evaluation to a specific checklist-template version (the one
+   *  the clone's source Manual Version was bound to). Omitted ⇒ current active template. */
+  checklistTemplateVersion: z.number().int().positive().optional(),
+});
+
 export async function refreshValidation(input: unknown): Promise<ActionResult<ValidationView>> {
   try {
     const { orgId, roles } = await requireActiveOrg();
     if (!canAny(roles, "manual:read")) return fail("FORBIDDEN", "Tidak diizinkan membaca manual.");
-    const parsed = manualRef.safeParse(input);
+    const parsed = refreshInput.safeParse(input);
     if (!parsed.success) return validationFail([{ path: "manualId", message: "ID manual tidak valid." }]);
-    return ok(await evaluateAndPersist(orgId, parsed.data.manualId));
+    return ok(await evaluateAndPersist(orgId, parsed.data.manualId, parsed.data.checklistTemplateVersion));
   } catch (e) {
     if (e instanceof NotFound) return fail("NOT_FOUND", "Manual tidak ditemukan.");
     return authFail(e) ?? fail("INTERNAL", "Gagal mengevaluasi kesiapan dokumentasi.");
@@ -276,7 +292,7 @@ export async function overrideChecklistItem(input: unknown): Promise<ActionResul
 
     const vm = await assembleManualViewModel(new SupabaseManualDataSource(orgId), manualId);
     if (!vm) return fail("NOT_FOUND", "Manual tidak ditemukan.");
-    const { templateId, version, items } = await loadActiveTemplate();
+    const { templateId, version, items } = await loadTemplate();
     const item = items.find((i) => i.checkKey === checkKey);
     if (!item) return fail("NOT_FOUND", "Item checklist tidak dikenal.");
 

@@ -52,7 +52,7 @@ export class SupabaseManualDataSource implements ManualDataSource {
       supabase.from("organizations").select("id, name").eq("id", this.orgId).single(),
     ]);
 
-    const [{ data: setups }, { data: sections }, { data: groups }] = await Promise.all([
+    const [{ data: setups }, { data: sections }, { data: groups }, { data: changelog }] = await Promise.all([
       supabase.from("ea_version_setups").select("*").eq("ea_version_id", version.ea_version_id).order("position"),
       supabase
         .from("manual_sections")
@@ -63,6 +63,11 @@ export class SupabaseManualDataSource implements ManualDataSource {
         .from("parameter_groups")
         .select("*, ea_parameters(*)")
         .eq("ea_version_id", version.ea_version_id)
+        .order("position"),
+      supabase
+        .from("changelog_entries")
+        .select("id, position, entry_type, body, source_ea_version_id, is_feature_change, open_position_impact")
+        .eq("manual_version_id", version.id)
         .order("position"),
     ]);
 
@@ -151,6 +156,15 @@ export class SupabaseManualDataSource implements ManualDataSource {
         })),
       })),
       images: {},
+      changelog: (changelog ?? []).map((c) => ({
+        id: c.id as string,
+        position: Number(c.position ?? 0),
+        entryType: c.entry_type as "ADDED" | "CHANGED" | "FIXED" | "BREAKING",
+        body: (c.body as string) ?? "",
+        sourceEaVersionId: (c.source_ea_version_id as string | null) ?? null,
+        isFeatureChange: Boolean(c.is_feature_change),
+        openPositionImpact: (c.open_position_impact as string | null) ?? null,
+      })),
     };
 
     // Sign URLs for images referenced by blocks (private bucket).

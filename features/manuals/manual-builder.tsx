@@ -13,6 +13,13 @@ import type { BlockEditorCtx } from "./editor/block-editors";
 import { AiPanel } from "@/features/ai/ai-panel";
 import { ValidationPanel } from "@/features/validation/validation-panel";
 import type { ValidationView } from "@/lib/validation/types";
+import { ReviewControls } from "@/features/reviews/review-controls";
+import { PublishControls } from "@/features/manuals/publish-controls";
+import { AssignReviewersForm } from "@/features/reviews/assign-reviewers-form";
+import { ReviewCommentsPanel } from "@/features/reviews/review-comments-panel";
+import type { AssignableReviewer, ReviewCommentRow } from "@/features/reviews/queries";
+import { ChangelogEditor, type ChangelogEntryView } from "@/features/changelog/changelog-editor";
+import { CloneVersionForm } from "@/features/manuals/clone-version-form";
 import { createAutosaveQueue, type SaveOutcome } from "@/lib/editor/autosave-queue";
 import {
   addCustomSection,
@@ -24,6 +31,67 @@ import {
 import { uploadManualImage, updateImageAsset, signImageUrl } from "@/features/images/actions";
 import { sectionCompletionBlockers, eaDeclaresDangerMode } from "@/lib/domain/section-completion";
 import type { OrgImage } from "@/features/images/queries";
+
+export type ReviewBundle = {
+  manualId: string;
+  status: string;
+  reviewRound: number;
+  isAdmin: boolean;
+  isAssignedTechnical: boolean;
+  isAssignedCompliance: boolean;
+  canSubmit: boolean;
+  canBeginRevision: boolean;
+  technicalReviewerId: string | null;
+  complianceReviewerId: string | null;
+  technicalReviewerName: string | null;
+  complianceReviewerName: string | null;
+  blockingReasons: string[];
+  lastRequestChangesSummary: string | null;
+  assignableTechnical: AssignableReviewer[];
+  assignableCompliance: AssignableReviewer[];
+  // slice 3 — review comments
+  comments: ReviewCommentRow[];
+  /** active review stage the viewer may comment in, or null (history only) */
+  canComment: "TECHNICAL" | "COMPLIANCE" | null;
+  canResolveTechnical: boolean;
+  canResolveCompliance: boolean;
+};
+
+export type ChangelogBundle = {
+  manualVersionId: string;
+  canEdit: boolean;
+  entries: ChangelogEntryView[];
+  pbkScope: "IN_SCOPE" | "OUT_OF_SCOPE";
+  sourceOptions: { id: string; label: string }[];
+  linkedEaVersionId: string;
+};
+
+export type CloneBundle = {
+  sourceManualVersionId: string;
+  sourceVersion: string;
+  sourceEaVersionLabel: string;
+  linkedEaVersionId: string;
+  targetOptions: { id: string; label: string }[];
+};
+
+export type PublicationBundle = {
+  manualId: string;
+  status: string;
+  isAdmin: boolean;
+  reviewRound: number;
+  eaName: string;
+  eaVersion: string;
+  manualVersion: string;
+  publicSlug: string;
+  technicalDecision: { reviewerName: string | null; decidedAt: string } | null;
+  complianceDecision: { reviewerName: string | null; decidedAt: string } | null;
+  readinessPercent: number | null;
+  publishBlockers: { checkKey: string; label: string; state: string }[];
+  /** present once the version is PUBLISHED / ARCHIVED */
+  snapshot: { contentHash: string; publicSlug: string; publicVersion: string; publishedAt: string } | null;
+};
+
+type InspectorTab = "Validasi" | "Metadata" | "Komentar";
 
 type Section = ManualViewModel["sections"][number];
 type CompletionState = Section["completionState"];
@@ -58,14 +126,18 @@ function Inspector({
   initialValidation,
   validationNonce,
   onNavigateSection,
+  onFocusBlock,
   onTab,
   onSetCompletion,
   onClose,
+  review,
+  clone,
+  publication,
 }: {
   identity: ReturnType<typeof manualIdentity>;
   section: Section | undefined;
   saveState: SaveState;
-  tab: "Validasi" | "Metadata";
+  tab: InspectorTab;
   canEdit: boolean;
   canReview: boolean;
   completionBlockers: string[];
@@ -77,10 +149,15 @@ function Inspector({
   initialValidation: ValidationView | null;
   validationNonce: number;
   onNavigateSection: (sectionKey: string) => void;
-  onTab: (t: "Validasi" | "Metadata") => void;
+  onFocusBlock: (sectionKey: string, blockId: string) => void;
+  onTab: (t: InspectorTab) => void;
   onSetCompletion: (s: CompletionState) => void;
   onClose?: () => void;
+  review: ReviewBundle | null;
+  clone: CloneBundle | null;
+  publication: PublicationBundle | null;
 }) {
+  const unresolvedComments = review?.comments.filter((c) => !c.resolved).length ?? 0;
   return (
     <aside className="inspector-panel" aria-label="Inspector manual">
       {onClose && (
@@ -89,13 +166,42 @@ function Inspector({
         </button>
       )}
       <div className="inspector-tabs" role="tablist" aria-label="Inspector">
-        {(["Validasi", "Metadata"] as const).map((item) => (
+        {(["Validasi", "Metadata", "Komentar"] as const).map((item) => (
           <button role="tab" aria-selected={tab === item} key={item} onClick={() => onTab(item)}>
             {item}
+            {item === "Komentar" && unresolvedComments > 0 && (
+              <span className="inspector-tab-badge">{unresolvedComments}</span>
+            )}
           </button>
         ))}
       </div>
-      {tab === "Validasi" ? (
+      {tab === "Komentar" ? (
+        <div className="inspector-content">
+          {review ? (
+            <ReviewCommentsPanel
+              manualId={review.manualId}
+              reviewRound={review.reviewRound}
+              comments={review.comments}
+              canComment={review.canComment}
+              canResolveTechnical={review.canResolveTechnical}
+              canResolveCompliance={review.canResolveCompliance}
+              currentSection={
+                section
+                  ? { id: section.id, key: section.key, title: section.title, position: section.position }
+                  : null
+              }
+              currentSectionBlocks={(section?.blocks ?? []).map((b, i) => ({
+                id: b.id,
+                label: `Blok #${i + 1} · ${b.type}`,
+              }))}
+              onNavigateSection={onNavigateSection}
+              onFocusBlock={onFocusBlock}
+            />
+          ) : (
+            <p className="rc-empty">Komentar review belum tersedia untuk manual ini.</p>
+          )}
+        </div>
+      ) : tab === "Validasi" ? (
         <div className="inspector-content">
           <ValidationPanel
             manualId={manualId}
@@ -194,6 +300,75 @@ function Inspector({
               </div>
             </dl>
           </section>
+          {review && (
+            <section>
+              <h3>Review</h3>
+              <dl>
+                <div>
+                  <dt>Status alur</dt>
+                  <dd>{STATUS_LABELS[review.status as keyof typeof STATUS_LABELS] ?? review.status}</dd>
+                </div>
+                <div>
+                  <dt>Ronde review</dt>
+                  <dd className="mono">{review.reviewRound}</dd>
+                </div>
+                <div>
+                  <dt>Reviewer teknis</dt>
+                  <dd>{review.technicalReviewerName ?? "belum ditetapkan"}</dd>
+                </div>
+                <div>
+                  <dt>Reviewer kepatuhan</dt>
+                  <dd>{review.complianceReviewerName ?? "belum ditetapkan"}</dd>
+                </div>
+              </dl>
+              <Link className="inspector-history-link" href={`/manuals/${review.manualId}/reviews`}>
+                Lihat riwayat review &rarr;
+              </Link>
+            </section>
+          )}
+          {publication?.snapshot && (
+            <section>
+              <h3>Snapshot publikasi</h3>
+              <dl>
+                <div>
+                  <dt>Diterbitkan</dt>
+                  <dd>{new Date(publication.snapshot.publishedAt).toLocaleString("id-ID")}</dd>
+                </div>
+                <div>
+                  <dt>Slug / versi publik</dt>
+                  <dd className="mono">{publication.snapshot.publicSlug}/{publication.snapshot.publicVersion}</dd>
+                </div>
+                <div>
+                  <dt>Hash snapshot</dt>
+                  <dd className="mono publish-hash" title={publication.snapshot.contentHash}>
+                    {publication.snapshot.contentHash}
+                  </dd>
+                </div>
+              </dl>
+              <p className="publish-phase7-note">
+                Snapshot publik telah dibuat. Halaman publik tersedia pada Phase 7.
+              </p>
+            </section>
+          )}
+          {review?.isAdmin && (review.status === "DRAFT" || review.status === "CHANGES_REQUESTED") && (
+            <AssignReviewersForm
+              manualId={review.manualId}
+              status={review.status}
+              technicalReviewerId={review.technicalReviewerId}
+              complianceReviewerId={review.complianceReviewerId}
+              technicalOptions={review.assignableTechnical}
+              complianceOptions={review.assignableCompliance}
+            />
+          )}
+          {clone && (
+            <CloneVersionForm
+              sourceManualVersionId={clone.sourceManualVersionId}
+              sourceVersion={clone.sourceVersion}
+              sourceEaVersionLabel={clone.sourceEaVersionLabel}
+              linkedEaVersionId={clone.linkedEaVersionId}
+              targetOptions={clone.targetOptions}
+            />
+          )}
         </div>
       )}
     </aside>
@@ -208,6 +383,10 @@ export function ManualBuilder({
   groups = [],
   aiProviderMode = "mock",
   initialValidation = null,
+  review = null,
+  changelog = null,
+  clone = null,
+  publication = null,
 }: {
   vm: ManualViewModel;
   canEdit?: boolean;
@@ -216,12 +395,17 @@ export function ManualBuilder({
   groups?: { id: string; name: string; count: number }[];
   aiProviderMode?: "mock" | "configured" | "config-error";
   initialValidation?: ValidationView | null;
+  review?: ReviewBundle | null;
+  changelog?: ChangelogBundle | null;
+  clone?: CloneBundle | null;
+  publication?: PublicationBundle | null;
 }) {
   const identity = manualIdentity(vm);
   const [sections, setSections] = useState(vm.sections);
   const [selectedId, setSelectedId] = useState(vm.sections[0]?.id ?? "");
   const [mobilePanel, setMobilePanel] = useState<"chapters" | "inspector" | null>(null);
-  const [tab, setTab] = useState<"Validasi" | "Metadata">("Validasi");
+  const [tab, setTab] = useState<InspectorTab>("Validasi");
+  const [pendingBlockFocus, setPendingBlockFocus] = useState<string | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [images, setImages] = useState<OrgImage[]>(initialImages);
   const sectionEditorRef = useRef<SectionEditorHandle | null>(null);
@@ -248,6 +432,26 @@ export function ManualBuilder({
     },
     [vm.sections],
   );
+
+  // Review-comment anchor navigation (§17): jump to the block's section, then focus + flash the
+  // block once the SectionEditor for that section has mounted.
+  const handleFocusBlock = useCallback(
+    (sectionKey: string, blockId: string) => {
+      const target = vm.sections.find((s) => s.key === sectionKey);
+      if (target) setSelectedId(target.id);
+      setMobilePanel(null);
+      setPendingBlockFocus(blockId);
+    },
+    [vm.sections],
+  );
+  useEffect(() => {
+    if (!pendingBlockFocus) return;
+    const t = setTimeout(() => {
+      sectionEditorRef.current?.focusBlock(pendingBlockFocus);
+      setPendingBlockFocus(null);
+    }, 140);
+    return () => clearTimeout(t);
+  }, [pendingBlockFocus, selectedId]);
   const [blockCounts, setBlockCounts] = useState<Record<string, number>>(() =>
     Object.fromEntries(vm.sections.map((s) => [s.id, s.blocks.length])),
   );
@@ -511,10 +715,36 @@ export function ManualBuilder({
           <Link className="secondary-button" href={`/manuals/${vm.manual.id}/preview`}>
             <Eye aria-hidden="true" size={17} /> Preview manual
           </Link>
-          {canEdit && (
-            <button className="primary-button" disabled title="Pengiriman review tersedia pada Phase 6">
-              Kirim review
-            </button>
+          {review && (
+            <ReviewControls
+              manualId={review.manualId}
+              status={review.status}
+              reviewRound={review.reviewRound}
+              isAssignedTechnical={review.isAssignedTechnical}
+              isAssignedCompliance={review.isAssignedCompliance}
+              canSubmit={review.canSubmit}
+              canBeginRevision={review.canBeginRevision}
+              technicalReviewerSet={review.technicalReviewerId !== null}
+              complianceReviewerSet={review.complianceReviewerId !== null}
+              blockingReasons={review.blockingReasons}
+              lastRequestChangesSummary={review.lastRequestChangesSummary}
+            />
+          )}
+          {publication && ["APPROVED", "PUBLISHED", "ARCHIVED"].includes(publication.status) && (
+            <PublishControls
+              manualId={publication.manualId}
+              status={publication.status}
+              isAdmin={publication.isAdmin}
+              eaName={publication.eaName}
+              eaVersion={publication.eaVersion}
+              manualVersion={publication.manualVersion}
+              publicSlug={publication.publicSlug}
+              reviewRound={publication.reviewRound}
+              technicalDecision={publication.technicalDecision}
+              complianceDecision={publication.complianceDecision}
+              readinessPercent={publication.readinessPercent}
+              publishBlockers={publication.publishBlockers}
+            />
           )}
         </div>
       </header>
@@ -548,6 +778,17 @@ export function ManualBuilder({
               </span>
             </div>
           </div>
+          {section?.key === "changelog" && changelog && (
+            <ChangelogEditor
+              manualVersionId={changelog.manualVersionId}
+              canEdit={changelog.canEdit}
+              entries={changelog.entries}
+              pbkScope={changelog.pbkScope}
+              sourceOptions={changelog.sourceOptions}
+              linkedEaVersionId={changelog.linkedEaVersionId}
+              onChanged={scheduleValidationRefresh}
+            />
+          )}
           {section && (
             <SectionEditor
               key={section.id}
@@ -581,8 +822,15 @@ export function ManualBuilder({
             initialValidation={initialValidation}
             validationNonce={validationNonce}
             onNavigateSection={navigateToSection}
+            onFocusBlock={handleFocusBlock}
             onTab={setTab}
             onSetCompletion={setCompletion}
+
+            review={review}
+
+            clone={clone}
+
+            publication={publication}
           />
         </div>
       </div>
@@ -609,8 +857,15 @@ export function ManualBuilder({
               initialValidation={initialValidation}
               validationNonce={validationNonce}
               onNavigateSection={navigateToSection}
+              onFocusBlock={handleFocusBlock}
               onTab={setTab}
               onSetCompletion={setCompletion}
+
+              review={review}
+
+              clone={clone}
+
+              publication={publication}
               onClose={() => setMobilePanel(null)}
             />
           )}

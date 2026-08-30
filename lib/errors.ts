@@ -18,6 +18,11 @@ export type ActionResult<T = void> =
         | "UNAUTHENTICATED"
         | "NO_MEMBERSHIP"
         | "UPLOAD"
+        // Phase 6 review workflow
+        | "WORKFLOW" // wrong current state / precondition not met (typed workflow error)
+        | "STALE" // stale review round or content-hash mismatch (a conflict the loser must retry)
+        | "SELF_APPROVAL" // a reviewer who authored/edited the version tried to APPROVE it
+        | "NOT_READY" // Phase 5 submission gate: a required in-scope item is still MISSING
         | "INTERNAL";
       message: string;
       issues?: FieldIssue[];

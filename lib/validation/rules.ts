@@ -358,12 +358,30 @@ function checkDevLegal(vm: ManualViewModel): RuleOutcome {
 }
 
 function checkChangelogVersi(vm: ManualViewModel): RuleOutcome {
+  const eaVer = (vm.eaVersion.version ?? "").trim();
+
+  // Slice 4: structured changelog_entries are the primary source. Any structured entry satisfies
+  // the "changelog for this version" check; note whether one references the linked EA version.
+  const entries = vm.changelog ?? [];
+  if (entries.length > 0) {
+    const linked = entries.filter((e) => e.sourceEaVersionId === vm.eaVersion.id).length;
+    return {
+      state: "PASS",
+      reason:
+        linked > 0
+          ? `Catatan Perubahan memuat ${entries.length} entri terstruktur (${linked} untuk versi EA ${eaVer || "?"}).`
+          : `Catatan Perubahan memuat ${entries.length} entri terstruktur.`,
+      evidence: { structuredEntries: entries.length, linkedToEaVersion: linked, eaVersion: eaVer },
+      navigateSectionKey: "changelog",
+    };
+  }
+
+  // Fallback: the legacy free-text heuristic on the chapter's blocks.
   const section = sectionByKey(vm, "changelog");
   const txt = sectionText(section);
   if (!sectionHasContent(section)) {
     return { state: "MISSING", reason: "Bab Catatan Perubahan belum memiliki isi.", evidence: { sectionId: section?.id ?? null }, navigateSectionKey: "changelog" };
   }
-  const eaVer = (vm.eaVersion.version ?? "").trim();
   const hasEntry = (eaVer && txt.includes(eaVer)) || /\[\s*\d+\.\d+\.\d+\s*\]/.test(txt) || /\bv?\d+\.\d+\.\d+\b\s*[-–—:]/.test(txt);
   return {
     state: hasEntry ? "PASS" : "MISSING",
