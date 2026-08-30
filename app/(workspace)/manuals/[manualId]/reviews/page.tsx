@@ -1,5 +1,5 @@
 import { notFound } from "next/navigation";
-import { getWorkspaceContext } from "@/lib/auth/context";
+import { getRequiredWorkspacePageContext } from "@/lib/auth/context";
 import { canAny } from "@/lib/permissions/actions";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { getReviewHistory } from "@/features/reviews/queries";
@@ -9,9 +9,11 @@ export const dynamic = "force-dynamic";
 
 /**
  * AC-P6-15 — decision + comment history for one Manual Version. Private workspace data:
- * requires `manual:read` in the caller's active org; every query is org-scoped (RLS + explicit
- * `.eq("organization_id", …)`), so a cross-org manual id yields notFound and anon never reaches
- * this route (the workspace layout redirects). Not the Phase 7 public route.
+ * `getRequiredWorkspacePageContext()` redirects an unauthenticated / no-membership request (a page
+ * renders concurrently with the layout, so the layout redirect alone is not enough); then this
+ * page requires `manual:read` in the caller's active org and every query is org-scoped (RLS +
+ * explicit `.eq("organization_id", …)`), so a cross-org manual id yields notFound. Not the Phase 7
+ * public route.
  */
 export default async function ReviewHistoryPage({
   params,
@@ -22,10 +24,9 @@ export default async function ReviewHistoryPage({
 }) {
   const { manualId } = await params;
   const { v } = await searchParams;
-  const ctx = await getWorkspaceContext();
-  if (!ctx.activeOrg) notFound();
-  const orgId = ctx.activeOrg.id;
-  if (!canAny(ctx.activeOrg.roles, "manual:read")) notFound();
+  const { activeOrg } = await getRequiredWorkspacePageContext();
+  const orgId = activeOrg.id;
+  if (!canAny(activeOrg.roles, "manual:read")) notFound();
 
   const supabase = await createSupabaseServerClient();
   const { data: manual } = await supabase

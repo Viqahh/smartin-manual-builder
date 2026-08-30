@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
-import { getWorkspaceContext } from "@/lib/auth/context";
+import { getRequiredWorkspacePageContext } from "@/lib/auth/context";
 import { canAny } from "@/lib/permissions/actions";
 import { getEaProduct } from "@/features/ea-products/queries";
 import { listEaVersions, getEaVersionWithSetups } from "@/features/ea-versions/queries";
@@ -19,9 +19,9 @@ export default async function EAProductDetailPage({
   params: Promise<{ productId: string }>;
 }) {
   const { productId } = await params;
-  const ctx = await getWorkspaceContext();
-  const orgId = ctx.activeOrg!.id;
-  const roles = ctx.activeOrg?.roles ?? [];
+  const { activeOrg } = await getRequiredWorkspacePageContext();
+  const orgId = activeOrg.id;
+  const roles = activeOrg.roles;
   const canCreateVersion = canAny(roles, "ea_version:create");
   const canManageSetup = canAny(roles, "ea_setup:manage");
   const canManageParams = canAny(roles, "ea_parameter:manage");

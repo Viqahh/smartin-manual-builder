@@ -1,6 +1,6 @@
 import { notFound } from "next/navigation";
 import { ManualBuilder, type ReviewBundle } from "@/features/manuals/manual-builder";
-import { getWorkspaceContext } from "@/lib/auth/context";
+import { getRequiredWorkspacePageContext } from "@/lib/auth/context";
 import { canAny } from "@/lib/permissions/actions";
 import { SupabaseManualDataSource } from "@/features/manuals/data-source";
 import { assembleManualViewModel } from "@/lib/manual/view-model";
@@ -26,15 +26,15 @@ export default async function ManualBuilderPage({
   params: Promise<{ manualId: string }>;
 }) {
   const { manualId } = await params;
-  const ctx = await getWorkspaceContext();
-  const orgId = ctx.activeOrg!.id;
-  const userId = ctx.user!.id;
+  const { user, activeOrg } = await getRequiredWorkspacePageContext();
+  const orgId = activeOrg.id;
+  const userId = user.id;
 
   const source = new SupabaseManualDataSource(orgId);
   const vm = await assembleManualViewModel(source, manualId);
   if (!vm) notFound();
 
-  const roles = ctx.activeOrg?.roles ?? [];
+  const roles = activeOrg.roles;
   const isDraft = vm.manualVersion.status === "DRAFT";
   const canAuthor = canAny(roles, "manual:update");
   // Content is authored only in DRAFT (server-enforced by a DB trigger; the UI reflects it).

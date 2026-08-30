@@ -1,5 +1,6 @@
 import "server-only";
 import { cache } from "react";
+import { redirect } from "next/navigation";
 import { createSupabaseServerClientOrNull } from "@/lib/supabase/server";
 import { isSupabaseConfigured } from "@/lib/env";
 import type { MembershipRole } from "@/lib/supabase/database.types";
@@ -95,4 +96,32 @@ export async function requireActiveOrg(): Promise<{
   if (!ctx.user) throw new AuthError("UNAUTHENTICATED", "Sesi tidak ditemukan.");
   if (!ctx.activeOrg) throw new AuthError("NO_MEMBERSHIP", "Anda belum tergabung dalam organisasi.");
   return { userId: ctx.user.id, orgId: ctx.activeOrg.id, roles: ctx.activeOrg.roles };
+}
+
+/** The workspace context with `user` + `activeOrg` guaranteed non-null. */
+export type RequiredWorkspacePageContext = {
+  user: NonNullable<WorkspaceContext["user"]>;
+  activeOrg: NonNullable<WorkspaceContext["activeOrg"]>;
+  memberships: WorkspaceContext["memberships"];
+};
+
+/**
+ * Auth boundary for workspace PAGE server components (`app/(workspace)/**\/page.tsx`).
+ *
+ * A page renders CONCURRENTLY with its layout, so `app/(workspace)/layout.tsx`'s `redirect()` does
+ * NOT stop a child page's body from evaluating first — a page that dereferences `ctx.activeOrg!`
+ * throws `TypeError: Cannot read properties of null` for an unauthenticated / no-membership request
+ * even though the response ultimately redirects. Every workspace page must call this FIRST. It
+ * performs the same redirects the layout does and narrows `user` + `activeOrg` to non-null, so no
+ * page needs a `!` assertion or an org query with a null id.
+ *
+ * - Supabase not configured / no session → `redirect("/login")` (matches `no-membership` + `/login`;
+ *   the workspace layout's own setup-state panel branch is left untouched).
+ * - session, no active membership          → `redirect("/no-membership")`.
+ */
+export async function getRequiredWorkspacePageContext(): Promise<RequiredWorkspacePageContext> {
+  const ctx = await getWorkspaceContext();
+  if (!ctx.configured || !ctx.user) redirect("/login");
+  if (!ctx.activeOrg) redirect("/no-membership");
+  return { user: ctx.user, activeOrg: ctx.activeOrg, memberships: ctx.memberships };
 }

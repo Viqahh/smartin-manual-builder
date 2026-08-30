@@ -3,7 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ManualRenderer } from "@/components/manual-renderer/manual-renderer";
 import { PdfDownloadButton } from "@/components/public-manual/pdf-download-button";
-import { getWorkspaceContext } from "@/lib/auth/context";
+import { getRequiredWorkspacePageContext } from "@/lib/auth/context";
 import { canAny } from "@/lib/permissions/actions";
 import { SupabaseManualDataSource } from "@/features/manuals/data-source";
 import { getPublishedSnapshotMeta } from "@/features/reviews/queries";
@@ -20,18 +20,18 @@ export default async function ManualPreviewPage({
   params: Promise<{ manualId: string }>;
 }) {
   const { manualId } = await params;
-  const ctx = await getWorkspaceContext();
+  const { activeOrg } = await getRequiredWorkspacePageContext();
 
-  const source = new SupabaseManualDataSource(ctx.activeOrg!.id);
+  const source = new SupabaseManualDataSource(activeOrg.id);
   const vm = await assembleManualViewModel(source, manualId);
   if (!vm) notFound();
   const id = manualIdentity(vm);
-  const canEdit = canAny(ctx.activeOrg?.roles ?? [], "manual:update");
-  const canPublish = canAny(ctx.activeOrg?.roles ?? [], "manual:publish");
+  const canEdit = canAny(activeOrg.roles, "manual:update");
+  const canPublish = canAny(activeOrg.roles, "manual:publish");
 
   // Export PDF is enabled only once this exact version has a frozen published snapshot; the
   // download reads the immutable stored artifact for that snapshot (PUBLISHED or ARCHIVED).
-  const snap = await getPublishedSnapshotMeta(ctx.activeOrg!.id, vm.manualVersion.id).catch(() => null);
+  const snap = await getPublishedSnapshotMeta(activeOrg.id, vm.manualVersion.id).catch(() => null);
   const pdf = snap
     ? {
         href: `/manual/${snap.publicSlug}/${snap.publicVersion}/pdf`,

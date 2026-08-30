@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { PageHeader } from "@/components/page-header";
-import { getWorkspaceContext } from "@/lib/auth/context";
+import { getRequiredWorkspacePageContext } from "@/lib/auth/context";
 import { canAny } from "@/lib/permissions/actions";
 import { listEaProducts } from "@/features/ea-products/queries";
 import { ProductCreateForm } from "@/features/ea-products/product-create-form";
@@ -8,9 +8,9 @@ import { ProductCreateForm } from "@/features/ea-products/product-create-form";
 export const dynamic = "force-dynamic";
 
 export default async function EAProductsPage() {
-  const ctx = await getWorkspaceContext();
-  const products = await listEaProducts(ctx.activeOrg!.id);
-  const canCreateProduct = canAny(ctx.activeOrg?.roles ?? [], "ea_product:create");
+  const { activeOrg } = await getRequiredWorkspacePageContext();
+  const products = await listEaProducts(activeOrg.id);
+  const canCreateProduct = canAny(activeOrg.roles, "ea_product:create");
 
   return (
     <div className="page-container">

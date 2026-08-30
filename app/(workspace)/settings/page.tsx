@@ -1,5 +1,5 @@
 import { PageHeader } from "@/components/page-header";
-import { getWorkspaceContext } from "@/lib/auth/context";
+import { getRequiredWorkspacePageContext } from "@/lib/auth/context";
 
 const ROLE_LABEL: Record<string, string> = {
   DEVELOPER: "Developer",
@@ -11,7 +11,7 @@ const ROLE_LABEL: Record<string, string> = {
 export const dynamic = "force-dynamic";
 
 export default async function SettingsPage() {
-  const ctx = await getWorkspaceContext();
+  const { user, activeOrg, memberships } = await getRequiredWorkspacePageContext();
 
   return (
     <div className="page-container">
@@ -24,28 +24,24 @@ export default async function SettingsPage() {
         <dl>
           <div>
             <dt>Nama</dt>
-            <dd>{ctx.user?.displayName}</dd>
+            <dd>{user.displayName}</dd>
           </div>
           <div>
             <dt>Email</dt>
-            <dd className="mono">{ctx.user?.email}</dd>
+            <dd className="mono">{user.email}</dd>
           </div>
           <div>
             <dt>Organisasi aktif</dt>
-            <dd>{ctx.activeOrg?.name}</dd>
+            <dd>{activeOrg.name}</dd>
           </div>
           <div>
             <dt>Peran</dt>
-            <dd>
-              {ctx.activeOrg && ctx.activeOrg.roles.length
-                ? ctx.activeOrg.roles.map((r) => ROLE_LABEL[r] ?? r).join(" · ")
-                : "-"}
-            </dd>
+            <dd>{activeOrg.roles.length ? activeOrg.roles.map((r) => ROLE_LABEL[r] ?? r).join(" · ") : "-"}</dd>
           </div>
         </dl>
       </section>
 
-      {ctx.memberships.length > 1 && (
+      {memberships.length > 1 && (
         <section className="card">
           <div className="section-heading">
             <div>
@@ -54,7 +50,7 @@ export default async function SettingsPage() {
             </div>
           </div>
           <ul className="membership-list">
-            {ctx.memberships.map((m) => (
+            {memberships.map((m) => (
               <li key={m.organizationId}>
                 <strong>{m.organizationName}</strong>
                 <span>{m.roles.map((r) => ROLE_LABEL[r] ?? r).join(" · ")}</span>

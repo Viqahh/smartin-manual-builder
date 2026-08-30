@@ -1,15 +1,15 @@
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 import { CreateManualWizard } from "@/features/manuals/create-manual-wizard";
-import { getWorkspaceContext } from "@/lib/auth/context";
+import { getRequiredWorkspacePageContext } from "@/lib/auth/context";
 import { canAny } from "@/lib/permissions/actions";
 import { listProductsWithVersions } from "@/features/ea-versions/queries";
 
 export const dynamic = "force-dynamic";
 
 export default async function CreateManualPage() {
-  const ctx = await getWorkspaceContext();
-  const canCreateManual = canAny(ctx.activeOrg?.roles ?? [], "manual:create");
+  const { activeOrg } = await getRequiredWorkspacePageContext();
+  const canCreateManual = canAny(activeOrg.roles, "manual:create");
 
   if (!canCreateManual) {
     return (
@@ -31,7 +31,7 @@ export default async function CreateManualPage() {
     );
   }
 
-  const products = await listProductsWithVersions(ctx.activeOrg!.id);
+  const products = await listProductsWithVersions(activeOrg.id);
 
   return (
     <div className="wizard-page">

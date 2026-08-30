@@ -2,16 +2,16 @@ import { Plus } from "lucide-react";
 import Link from "next/link";
 import { PageHeader } from "@/components/page-header";
 import { ManualTable } from "@/features/manuals/manual-table";
-import { getWorkspaceContext } from "@/lib/auth/context";
+import { getRequiredWorkspacePageContext } from "@/lib/auth/context";
 import { canAny } from "@/lib/permissions/actions";
 import { listManuals } from "@/features/manuals/queries";
 
 export const dynamic = "force-dynamic";
 
 export default async function ManualsPage() {
-  const ctx = await getWorkspaceContext();
-  const rows = await listManuals(ctx.activeOrg!.id);
-  const canCreateManual = canAny(ctx.activeOrg?.roles ?? [], "manual:create");
+  const { activeOrg } = await getRequiredWorkspacePageContext();
+  const rows = await listManuals(activeOrg.id);
+  const canCreateManual = canAny(activeOrg.roles, "manual:create");
 
   return (
     <div className="page-container">
