@@ -308,7 +308,11 @@ export function ValidationPanel({
         </button>
         {view.evaluatedAt && (
           <span className="v-evaluated">
-            Terakhir dievaluasi {new Date(view.evaluatedAt).toLocaleString("id-ID", { dateStyle: "short", timeStyle: "short" })}
+            Terakhir dievaluasi{" "}
+            {/* locale/timezone-formatted timestamp — deliberately differs server vs client (React #418) */}
+            <time dateTime={view.evaluatedAt} suppressHydrationWarning>
+              {new Date(view.evaluatedAt).toLocaleString("id-ID", { dateStyle: "short", timeStyle: "short" })}
+            </time>
           </span>
         )}
       </div>

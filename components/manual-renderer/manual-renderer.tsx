@@ -1,6 +1,12 @@
 import { AlertTriangle, Info, Lightbulb } from "lucide-react";
 import { BROKER_MIN_LOT_NOTE_ID } from "@/lib/domain/setups";
-import { chapterAnchor, manualIdentity, type ManualViewModel } from "@/lib/manual/view-model";
+import {
+  chapterAnchor,
+  manualIdentity,
+  CHANGELOG_ENTRY_LABEL,
+  EMPTY_CHAPTER_PLACEHOLDER,
+  type ManualViewModel,
+} from "@/lib/manual/view-model";
 import { RichTextView } from "./rich-text-view";
 
 /**
@@ -192,6 +198,27 @@ function SupportedConfigTable({ vm }: { vm: ManualViewModel }) {
   );
 }
 
+function ChangelogHistory({ entries }: { entries: NonNullable<ManualViewModel["changelog"]> }) {
+  return (
+    <div className="manual-content">
+      <ol className="manual-changelog">
+        {entries.map((e) => (
+          <li key={e.id} className="manual-changelog-entry" data-cl-type={e.entryType}>
+            <p className="manual-changelog-kind">{CHANGELOG_ENTRY_LABEL[e.entryType]}</p>
+            <p className="manual-changelog-body">{e.body}</p>
+            {e.entryType === "BREAKING" && e.openPositionImpact && (
+              <p className="manual-changelog-impact">
+                <span>Dampak posisi terbuka:</span>{" "}
+                <span className="manual-changelog-impact-value">{e.openPositionImpact}</span>
+              </p>
+            )}
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
 export function SectionContent({
   section,
   vm,
@@ -203,10 +230,12 @@ export function SectionContent({
   anchored?: boolean;
 }) {
   const injectSetups = section.key === "requirements" || section.key === "presets";
+  const changelogEntries = section.key === "changelog" ? vm.changelog ?? [] : [];
+  const hasInjectedContent = injectSetups || changelogEntries.length > 0;
   return (
     <div className="manual-content generic-chapter">
-      {section.blocks.length === 0 && !injectSetups && (
-        <p className="lead">Bab ini telah disiapkan dari template Smartin. Konten akan disusun pada editor (Phase 3).</p>
+      {section.blocks.length === 0 && !hasInjectedContent && (
+        <p className="lead">{EMPTY_CHAPTER_PLACEHOLDER}</p>
       )}
       {section.blocks.map((b) =>
         anchored ? (
@@ -218,6 +247,7 @@ export function SectionContent({
         ),
       )}
       {injectSetups && <SupportedConfigTable vm={vm} />}
+      {changelogEntries.length > 0 && <ChangelogHistory entries={changelogEntries} />}
       {section.completionState === "issue" && (
         <aside className="manual-callout warning">
           <AlertTriangle aria-hidden="true" />

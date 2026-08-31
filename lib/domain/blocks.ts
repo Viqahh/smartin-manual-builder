@@ -7,7 +7,12 @@
  */
 
 import { z } from "zod";
-import { richTextSchema, emptyRichText, type RichText } from "@/lib/domain/rich-text";
+import {
+  richTextSchema,
+  emptyRichText,
+  richTextToPlainText,
+  type RichText,
+} from "@/lib/domain/rich-text";
 
 export const BLOCK_TYPES = ["text", "steps", "image", "callout", "parameterTable", "faq"] as const;
 export type BlockType = (typeof BLOCK_TYPES)[number];
@@ -119,6 +124,31 @@ export function draftBlockPayload(type: BlockType): Record<string, unknown> {
     case "parameterTable":
       return { type: "parameterTable", schemaVersion: 1, groupIds: [] };
   }
+}
+
+/**
+ * May a freshly-added, never-persisted block be written to the database yet? (UAT-04, Phase 8A-P0)
+ *
+ * The editor holds a new block as local draft state and calls this before its first save. Parse
+ * must succeed AND the block must carry meaningful author content:
+ *   - `text` / `callout`: the rich text must contain non-whitespace (an empty body parses fine but
+ *     must not become a permanent blank row).
+ *   - `steps` / `faq`: `parseBlockPayload` already requires non-empty title/instruction/question.
+ *   - `parameterTable` / `image`: a valid payload already implies a real EA-Version group / asset
+ *     reference — that reference IS the meaningful content (spec §3/§4).
+ */
+export function isPersistableDraft(payload: unknown): boolean {
+  const parsed = parseBlockPayload(payload);
+  if (!parsed.ok) return false;
+  const v = parsed.value;
+  if (v.type === "text" || v.type === "callout") {
+    try {
+      return richTextToPlainText(v.content).trim().length > 0;
+    } catch {
+      return false;
+    }
+  }
+  return true;
 }
 
 /**

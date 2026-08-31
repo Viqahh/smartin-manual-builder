@@ -6,6 +6,7 @@
  * Covers: add -> undo -> redo, delete -> undo -> redo, reorder -> undo -> redo,
  * a new edit after undo clears redo, and the persisted (fake-DB) state stays correct after undo.
  */
+import { useState } from "react";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup, within } from "@testing-library/react";
 import type { ManualViewModel } from "@/lib/manual/view-model";
@@ -149,14 +150,34 @@ beforeEach(() => {
 });
 
 describe("SectionEditor undo/redo (AC-P3-12)", () => {
-  it("add block -> undo -> redo; persisted state matches the visible state", async () => {
+  it("UAT-04: a freshly added block is a LOCAL draft — nothing is written until real content is typed", async () => {
     renderEditor(makeSection([]));
 
     fireEvent.click(screen.getByRole("button", { name: /Tambah blok/ }));
     fireEvent.click(screen.getByRole("menuitem", { name: /Langkah instalasi/ }));
 
+    // the draft editor is on screen…
+    expect(screen.getByLabelText("Hapus blok 1")).toBeInTheDocument();
+    // …but the empty draft is NOT persisted (no ghost row), even after the autosave window
+    await new Promise((r) => setTimeout(r, 1200));
+    expect(liveRows()).toHaveLength(0);
+
+    // typing meaningful content (a steps block needs BOTH title and instruction to parse) persists it once
+    fireEvent.change(titleInputs()[0], { target: { value: "Salin file EA" } });
+    fireEvent.change(screen.getAllByLabelText("Instruksi")[0], { target: { value: "Letakkan .ex5 di folder Experts." } });
+    await waitFor(() => expect(liveRows()).toHaveLength(1), { timeout: 4000 });
+  }, 15000);
+
+  it("add block -> type content -> undo -> redo; persisted state matches the visible state", async () => {
+    renderEditor(makeSection([]));
+
+    fireEvent.click(screen.getByRole("button", { name: /Tambah blok/ }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /Langkah instalasi/ }));
+    fireEvent.change(titleInputs()[0], { target: { value: "Langkah nyata" } });
+    fireEvent.change(screen.getAllByLabelText("Instruksi")[0], { target: { value: "Instruksi nyata." } });
+
     // block persisted after the autosave debounce
-    await waitFor(() => expect(liveRows()).toHaveLength(1), { timeout: 3000 });
+    await waitFor(() => expect(liveRows()).toHaveLength(1), { timeout: 4000 });
     expect(screen.getByLabelText("Hapus blok 1")).toBeInTheDocument();
 
     // Undo -> block removed from the editor AND soft-deleted in the DB
@@ -170,6 +191,17 @@ describe("SectionEditor undo/redo (AC-P3-12)", () => {
     await waitFor(() => expect(liveRows()).toHaveLength(1));
     expect(screen.getByLabelText("Hapus blok 1")).toBeInTheDocument();
     expect(redoBtn()).toBeDisabled();
+  }, 15000);
+
+  it("UAT-04: an untouched draft block is discarded on unmount — no server write", async () => {
+    const { unmount } = renderEditor(makeSection([]));
+    fireEvent.click(screen.getByRole("button", { name: /Tambah blok/ }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /Teks/ }));
+    unmount();
+    await new Promise((r) => setTimeout(r, 300));
+    expect(liveRows()).toHaveLength(0);
+    const { createBlock } = (await import("@/features/blocks/actions")) as unknown as { createBlock: { mock: { calls: unknown[] } } };
+    expect(createBlock.mock.calls).toHaveLength(0);
   }, 15000);
 
   it("delete block -> undo -> redo", async () => {
@@ -348,4 +380,89 @@ describe("SectionEditor autosave — single-session conflict UX (AC-P3 fix)", ()
     await waitFor(() => expect((titleInputs()[0] as HTMLInputElement).value).toBe("SERVER COPY"));
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   }, 15000);
+});
+
+// --------------------------------------------------------------------------- UAT-01 chapter state
+/**
+ * A minimal stand-in for the builder's chapter switch: it keeps `sections` state, remounts
+ * <SectionEditor key={id}> per selected chapter, and folds committed blocks back via
+ * `onSectionBlocksCommitted`. Without the lift, switching A → B → A shows stale content.
+ */
+function ChapterHarness() {
+  const [sections, setSections] = useState<ManualViewModel["sections"][number][]>([
+    makeSection([{ id: "seed-a", type: "steps", payload: stepsPayload("A original"), position: 0 }]),
+    { ...makeSection([]), id: "sec-2", key: "faq", title: "Tanya Jawab", position: 5 },
+  ]);
+  const [sel, setSel] = useState("sec-1");
+  const section = sections.find((s) => s.id === sel)!;
+  return (
+    <div>
+      <button onClick={() => setSel("sec-1")}>go-A</button>
+      <button onClick={() => setSel("sec-2")}>go-B</button>
+      <SectionEditor
+        key={section.id}
+        section={section}
+        vm={vm}
+        canEdit
+        ctx={ctx}
+        onBlocksChanged={() => {}}
+        onSectionBlocksCommitted={(id, blocks) =>
+          setSections((prev) => {
+            const cur = prev.find((s) => s.id === id);
+            // same dedupe the real builder uses — an unchanged set must be a no-op (no re-render loop)
+            if (cur && JSON.stringify(cur.blocks) === JSON.stringify(blocks)) return prev;
+            return prev.map((s) => (s.id === id ? { ...s, blocks } : s));
+          })
+        }
+      />
+    </div>
+  );
+}
+
+describe("SectionEditor — chapter state lift (UAT-01)", () => {
+  it("A → B → A shows the latest saved content, not the stale prop", async () => {
+    // the harness seeds chapter A with a fake-DB row id "seed-a"
+    db.set("seed-a", { id: "seed-a", section: "sec-1", type: "steps", payload: stepsPayload("A original"), position: 0, deleted: false, row_version: 1 });
+
+    render(<ChapterHarness />);
+
+    // edit chapter A and let it persist
+    fireEvent.change(titleInputs()[0], { target: { value: "A edited" } });
+    await waitFor(
+      () => expect((db.get("seed-a")!.payload as { steps: { title: string }[] }).steps[0].title).toBe("A edited"),
+      { timeout: 4000 },
+    );
+
+    // switch to B, then back to A — the editor remounts from the harness `sections` state
+    fireEvent.click(screen.getByText("go-B"));
+    await waitFor(() => expect(screen.queryByLabelText("Judul langkah")).not.toBeInTheDocument());
+    fireEvent.click(screen.getByText("go-A"));
+
+    // the remounted A editor shows the edited title (lifted), not "A original"
+    await waitFor(() => expect(titleInputs()[0].value).toBe("A edited"));
+  }, 20000);
+});
+
+// --------------------------------------------------------------------------- UAT-33 canvas slot
+describe("SectionEditor — canvasPrefix renders INSIDE the document canvas (UAT-33)", () => {
+  it("puts inline chapter content (e.g. the structured changelog) inside .editor-canvas, above blocks", () => {
+    const { container } = render(
+      <SectionEditor
+        section={makeSection([])}
+        vm={vm}
+        canEdit
+        ctx={ctx}
+        onBlocksChanged={() => {}}
+        canvasPrefix={<div data-testid="cl-slot">catatan perubahan</div>}
+      />,
+    );
+    const canvas = container.querySelector(".editor-canvas");
+    expect(canvas).not.toBeNull();
+    // the prefix is a child of the canvas, not a sibling panel outside it
+    expect(canvas!.querySelector('[data-testid="cl-slot"]')).not.toBeNull();
+    // with a prefix present the big "Tambah blok pertama" empty state is replaced by the
+    // "optional blocks" hint (blocks remain available, just not the primary affordance)
+    expect(screen.queryByText("Tambah blok pertama")).not.toBeInTheDocument();
+    expect(screen.getByText(/Blok tambahan bersifat opsional/)).toBeInTheDocument();
+  });
 });

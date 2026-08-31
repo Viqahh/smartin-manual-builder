@@ -108,7 +108,23 @@ function tableBlock(container: Element): ParityBlock {
   return { kind: "parameterTable", groups };
 }
 
+function changelogBlock(el: Element): ParityBlock {
+  return {
+    kind: "changelog",
+    entries: [...el.querySelectorAll("ol.manual-changelog > li.manual-changelog-entry")].map((li, i) => {
+      const impact = li.querySelector(".manual-changelog-impact-value");
+      return {
+        index: i,
+        type: txt(li.querySelector(".manual-changelog-kind")),
+        body: txt(li.querySelector(".manual-changelog-body")),
+        impact: impact ? txt(impact) : null,
+      };
+    }),
+  };
+}
+
 function contentDivBlock(el: Element): ParityBlock {
+  if (el.querySelector("ol.manual-changelog")) return changelogBlock(el);
   if (el.querySelector("table.parameter-table")) return tableBlock(el);
   const children = [...el.children];
   // faq: `<h3>question</h3>` then the RichTextView answer (its <p>s are siblings of the <h3>)

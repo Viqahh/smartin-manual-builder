@@ -20,7 +20,7 @@ import { ReviewCommentsPanel } from "@/features/reviews/review-comments-panel";
 import type { AssignableReviewer, ReviewCommentRow } from "@/features/reviews/queries";
 import { ChangelogEditor, type ChangelogEntryView } from "@/features/changelog/changelog-editor";
 import { CloneVersionForm } from "@/features/manuals/clone-version-form";
-import { createAutosaveQueue, type SaveOutcome } from "@/lib/editor/autosave-queue";
+import { createAutosaveQueue, stableStringify, type SaveOutcome } from "@/lib/editor/autosave-queue";
 import {
   addCustomSection,
   renameSection,
@@ -474,6 +474,28 @@ export function ManualBuilder({
     },
     [sectionId],
   );
+
+  // UAT-01: fold the editor's committed block state back into `sections` so switching chapters
+  // A → B → A rebuilds A from current data (no page refresh). Deduped so an unchanged set is a
+  // no-op and can't cause an update loop.
+  const handleSectionBlocksCommitted = useCallback((sectionKey: string, nextBlocks: Section["blocks"]) => {
+    setSections((prev) => {
+      const cur = prev.find((s) => s.id === sectionKey);
+      if (!cur) return prev;
+      const same =
+        cur.blocks.length === nextBlocks.length &&
+        cur.blocks.every((b, i) => {
+          const n = nextBlocks[i];
+          return (
+            b.id === n.id &&
+            b.rowVersion === n.rowVersion &&
+            stableStringify(b.payload) === stableStringify(n.payload)
+          );
+        });
+      if (same) return prev;
+      return prev.map((s) => (s.id === sectionKey ? { ...s, blocks: nextBlocks } : s));
+    });
+  }, []);
   const completedCount = sections.filter((s) => s.completionState === "complete").length;
   const progress = sections.length ? Math.round((completedCount / sections.length) * 100) : 0;
   const dangerMode = eaDeclaresDangerMode(vm.eaVersion.requirements);
@@ -778,17 +800,6 @@ export function ManualBuilder({
               </span>
             </div>
           </div>
-          {section?.key === "changelog" && changelog && (
-            <ChangelogEditor
-              manualVersionId={changelog.manualVersionId}
-              canEdit={changelog.canEdit}
-              entries={changelog.entries}
-              pbkScope={changelog.pbkScope}
-              sourceOptions={changelog.sourceOptions}
-              linkedEaVersionId={changelog.linkedEaVersionId}
-              onChanged={scheduleValidationRefresh}
-            />
-          )}
           {section && (
             <SectionEditor
               key={section.id}
@@ -801,6 +812,23 @@ export function ManualBuilder({
               onAiTargetChange={setAiTarget}
               onAiApplyStateChange={setAiApplyState}
               onBlockSaved={scheduleValidationRefresh}
+              onSectionBlocksCommitted={handleSectionBlocksCommitted}
+              // UAT-33: the structured changelog is authored INLINE inside the BAB 14 canvas —
+              // not as a separate panel above it. In read-only states the shared renderer
+              // (SectionContent) already shows vm.changelog, so no prefix is needed there.
+              canvasPrefix={
+                canEdit && section.key === "changelog" && changelog ? (
+                  <ChangelogEditor
+                    manualVersionId={changelog.manualVersionId}
+                    canEdit={changelog.canEdit}
+                    entries={changelog.entries}
+                    pbkScope={changelog.pbkScope}
+                    sourceOptions={changelog.sourceOptions}
+                    linkedEaVersionId={changelog.linkedEaVersionId}
+                    onChanged={scheduleValidationRefresh}
+                  />
+                ) : undefined
+              }
             />
           )}
         </section>

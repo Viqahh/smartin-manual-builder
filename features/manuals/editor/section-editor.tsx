@@ -1,6 +1,15 @@
 "use client";
 
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { richTextFromParagraphs, richTextToPlainText } from "@/lib/domain/rich-text";
 import type { ProposalOutput, TargetField } from "@/lib/ai/types";
 import {
@@ -15,7 +24,13 @@ import {
 } from "lucide-react";
 import { BlockEditor, type BlockEditorCtx } from "./block-editors";
 import { SectionContent } from "@/components/manual-renderer/manual-renderer";
-import { BLOCK_TYPES, draftBlockPayload, parseBlockPayload, type BlockType } from "@/lib/domain/blocks";
+import {
+  BLOCK_TYPES,
+  draftBlockPayload,
+  isPersistableDraft,
+  parseBlockPayload,
+  type BlockType,
+} from "@/lib/domain/blocks";
 import { arrayMove } from "@/lib/editor/reorder";
 import {
   canRedo,
@@ -124,6 +139,19 @@ type SectionEditorProps = {
   onAiApplyStateChange?: (state: SaveState | null) => void;
   /** fires once each time a block edit is persisted — drives the Phase 5 checklist refresh. */
   onBlockSaved?: () => void;
+  /**
+   * UAT-01: lift the committed (persisted) block state to the builder whenever it settles, so a
+   * later per-chapter remount of this editor rebuilds from current data instead of the stale
+   * `section` prop. Never carries in-memory drafts.
+   */
+  onSectionBlocksCommitted?: (sectionId: string, blocks: Section["blocks"]) => void;
+  /**
+   * UAT-33: authoritative structured content that belongs to THIS chapter and is authored inline
+   * inside the document canvas — currently the BAB 14 structured changelog. Rendered at the top of
+   * `.editor-canvas`, above any optional ordinary blocks, so the author perceives it as chapter
+   * content and not as a separate management panel.
+   */
+  canvasPrefix?: ReactNode;
 };
 
 function targetFieldFor(type: AiBlockTarget["blockType"]): TargetField {
@@ -162,7 +190,18 @@ function safeRichPlain(v: unknown): string {
 }
 
 export const SectionEditor = forwardRef<SectionEditorHandle, SectionEditorProps>(function SectionEditor(
-  { section, vm, canEdit, ctx, onBlocksChanged, onAiTargetChange, onAiApplyStateChange, onBlockSaved },
+  {
+    section,
+    vm,
+    canEdit,
+    ctx,
+    onBlocksChanged,
+    onAiTargetChange,
+    onAiApplyStateChange,
+    onBlockSaved,
+    onSectionBlocksCommitted,
+    canvasPrefix,
+  },
   ref,
 ) {
   const initial: EBlock[] = useMemo(
@@ -370,14 +409,42 @@ export const SectionEditor = forwardRef<SectionEditorHandle, SectionEditorProps>
   // the block whose editor currently holds focus — so a keystroke edit can refresh the AI target
   const aiTargetKey = useRef<string | null>(null);
 
+  // UAT-05: coalesced client-side history push so Undo is available shortly after typing stops —
+  // not only after the autosave round-trip. `pushHistory`'s `sameDoc` dedup makes the later
+  // save-time push a no-op. Session-scoped: a page refresh intentionally resets history.
+  const historyPushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleHistoryPush = useCallback(() => {
+    if (historyPushTimer.current) clearTimeout(historyPushTimer.current);
+    historyPushTimer.current = setTimeout(() => {
+      historyPushTimer.current = null;
+      pushSnapshot(blocksRef.current);
+    }, 400);
+  }, [pushSnapshot]);
+  useEffect(
+    () => () => {
+      if (historyPushTimer.current) clearTimeout(historyPushTimer.current);
+    },
+    [],
+  );
+
   const changePayload = useCallback(
     (key: string, payload: Record<string, unknown>) => {
       // Ignore a no-op change (a rich-text editor re-normalising identical content on remount —
       // e.g. right after an undo/redo restore — must not enqueue a stale-version write).
       const current = blocksRef.current.find((x) => x.key === key);
       if (current && payloadsEqual(current.payload, payload)) return;
+
+      // UAT-04: a never-persisted draft with no meaningful content yet is kept LOCAL — typing is
+      // visible but nothing is written, so navigating away discards it with no ghost DB row.
+      if (current && current.id === null && !isPersistableDraft(payload)) {
+        setBlocks((prev) => prev.map((x) => (x.key === key ? { ...x, payload, save: "idle" as SaveState } : x)));
+        if (aiTargetKey.current === key) reportAiTarget(key, payload, current.type);
+        return;
+      }
+
       setBlocks((prev) => prev.map((x) => (x.key === key ? { ...x, payload, save: "dirty" as SaveState } : x)));
       saver.queue(key, payload, currentRv(key));
+      scheduleHistoryPush();
       // keep the inspector AI target in step with what the developer is typing
       if (aiTargetKey.current === key) reportAiTarget(key, payload, current?.type);
     },
@@ -507,27 +574,64 @@ export const SectionEditor = forwardRef<SectionEditorHandle, SectionEditorProps>
     onBlocksChanged(c);
   }, [blocks, onBlocksChanged]);
 
+  // UAT-01: lift the committed block set to the builder whenever it is settled (no dirty / saving
+  // / error block). The builder folds it into `sections` state so a later remount of this editor
+  // for the same chapter is not stale. Drafts (id === null) are never included; the builder
+  // dedupes so an unchanged set is a no-op.
+  const emitCommitted = useCallback(() => {
+    if (!onSectionBlocksCommitted) return;
+    const committed: Section["blocks"] = blocksRef.current
+      .filter((b) => b.id !== null)
+      .map((b, i) => ({
+        id: b.id as string,
+        type: b.type,
+        payload: b.payload,
+        position: i,
+        imageAssetId:
+          typeof b.payload.imageAssetId === "string" && b.payload.imageAssetId
+            ? (b.payload.imageAssetId as string)
+            : null,
+        parameterGroupIds: Array.isArray(b.payload.groupIds) ? (b.payload.groupIds as string[]) : [],
+        rowVersion: b.rowVersion,
+      }));
+    onSectionBlocksCommitted(section.id, committed);
+  }, [onSectionBlocksCommitted, section.id]);
+
+  useEffect(() => {
+    const settled = blocks.every((b) => b.id === null || b.save === "idle" || b.save === "saved");
+    if (settled) emitCommitted();
+  }, [blocks, emitCommitted]);
+
   const addBlock = useCallback(
     (type: BlockType) => {
       setAddOpen(false);
       if (type === "parameterTable" && ctx.groups.length === 0) return;
       const key = `new-${crypto.randomUUID()}`;
       let payload = draftBlockPayload(type);
-      if (type === "faq") payload = { ...payload, question: "Pertanyaan baru" };
-      if (type === "steps") {
-        payload = { type: "steps", schemaVersion: 1, steps: [{ title: "Langkah 1", instruction: "Tuliskan instruksi." }] };
-      }
       if (type === "parameterTable") {
         payload = { type: "parameterTable", schemaVersion: 1, groupIds: [ctx.groups[0].id] };
       }
-      const eb: EBlock = { key, id: null, type, payload, rowVersion: 1, save: "dirty", error: null };
+      // UAT-04: a new block starts as an in-memory draft with NO placeholder content. It is
+      // persisted only once it carries meaningful author content (`changePayload` gate). The two
+      // structurally-referential types are meaningful the moment they exist: `parameterTable`
+      // already points at a real EA-Version group; `image` waits for its asset to be chosen.
+      const eb: EBlock = {
+        key,
+        id: null,
+        type,
+        payload,
+        rowVersion: 1,
+        save: type === "parameterTable" ? "dirty" : "idle",
+        error: null,
+      };
       const next = [...blocksRef.current, eb];
       setBlocks(next);
-      pushSnapshot(next); // POST-add state — undo goes back to before the add, redo re-adds
-      // image needs an asset chosen before it persists; everything else persists now
-      if (type !== "image") saver.queue(key, payload, 1);
+      // No history push for the bare draft (UAT-04/05): an empty, never-persisted draft is not a
+      // meaningful undo state. The first real edit / the parameterTable persist pushes the POST-add
+      // snapshot through the normal save path, so undo still removes the block and redo re-adds it.
+      if (type === "parameterTable") saver.queue(key, payload, 1);
     },
-    [ctx.groups, pushSnapshot, saver],
+    [ctx.groups, saver],
   );
 
   const removeBlock = useCallback(
@@ -765,10 +869,24 @@ export const SectionEditor = forwardRef<SectionEditorHandle, SectionEditorProps>
   return (
     <div className="section-editor">
       <div className="editor-actionbar">
-        <button type="button" className="secondary-button" aria-label="Batalkan" disabled={!canUndo(history)} onClick={onUndo}>
+        <button
+          type="button"
+          className="secondary-button"
+          aria-label="Batalkan"
+          title="Batalkan perubahan terakhir. Riwayat berlaku selama sesi edit bab ini."
+          disabled={!canUndo(history)}
+          onClick={onUndo}
+        >
           <RotateCcw aria-hidden="true" size={15} /> Undo
         </button>
-        <button type="button" className="secondary-button" aria-label="Ulangi" disabled={!canRedo(history)} onClick={onRedo}>
+        <button
+          type="button"
+          className="secondary-button"
+          aria-label="Ulangi"
+          title="Ulangi perubahan yang dibatalkan. Riwayat berlaku selama sesi edit bab ini."
+          disabled={!canRedo(history)}
+          onClick={onRedo}
+        >
           <RotateCw aria-hidden="true" size={15} /> Redo
         </button>
         {deletedCount > 0 && (
@@ -801,20 +919,27 @@ export const SectionEditor = forwardRef<SectionEditorHandle, SectionEditorProps>
       </div>
 
       <div className="editor-canvas">
+        {canvasPrefix}
         {blocks.length === 0 ? (
-          <div className="editor-empty">
-            <h3>Tambah blok pertama</h3>
-            <p>Susun bab ini dari blok terstruktur.</p>
-            {suggested.length > 0 && (
-              <div className="editor-empty-suggested">
-                {suggested.map((t) => (
-                  <button key={t} type="button" className="secondary-button" onClick={() => addBlock(t)}>
-                    <Plus aria-hidden="true" size={14} /> {BLOCK_LABEL[t]}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
+          canvasPrefix ? (
+            <p className="editor-empty-optional">
+              Blok tambahan bersifat opsional untuk bab ini. Gunakan “Tambah blok” bila perlu.
+            </p>
+          ) : (
+            <div className="editor-empty">
+              <h3>Tambah blok pertama</h3>
+              <p>Susun bab ini dari blok terstruktur.</p>
+              {suggested.length > 0 && (
+                <div className="editor-empty-suggested">
+                  {suggested.map((t) => (
+                    <button key={t} type="button" className="secondary-button" onClick={() => addBlock(t)}>
+                      <Plus aria-hidden="true" size={14} /> {BLOCK_LABEL[t]}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )
         ) : (
           <ol className="block-list">
             {blocks.map((b, i) => (

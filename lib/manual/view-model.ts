@@ -132,6 +132,24 @@ export async function assembleManualViewModel(
  */
 export const chapterAnchor = (index: number): string => `chapter-${index}`;
 
+/**
+ * Neutral text the shared renderer shows for a canonical chapter that genuinely has no content
+ * yet. User-facing on Preview/Public/PDF — it must never carry internal/implementation wording
+ * ("Phase N", "template Smartin", "akan disusun pada editor").
+ */
+export const EMPTY_CHAPTER_PLACEHOLDER = "Bagian ini belum memiliki konten.";
+
+/** Human label per structured-changelog entry type — shared by the renderer and the parity model. */
+export const CHANGELOG_ENTRY_LABEL: Record<
+  NonNullable<ManualViewModel["changelog"]>[number]["entryType"],
+  string
+> = {
+  ADDED: "Ditambahkan",
+  CHANGED: "Diubah",
+  FIXED: "Diperbaiki",
+  BREAKING: "Perubahan besar",
+};
+
 /** Cover / metadata projection used by the builder header, inspector, preview, and cover. */
 export function manualIdentity(vm: ManualViewModel) {
   return {

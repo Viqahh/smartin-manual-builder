@@ -18,7 +18,12 @@
 
 import { richTextToPlainText } from "@/lib/domain/rich-text";
 import { BROKER_MIN_LOT_NOTE_ID } from "@/lib/domain/setups";
-import { manualIdentity, type ManualViewModel } from "@/lib/manual/view-model";
+import {
+  manualIdentity,
+  CHANGELOG_ENTRY_LABEL,
+  EMPTY_CHAPTER_PLACEHOLDER,
+  type ManualViewModel,
+} from "@/lib/manual/view-model";
 
 export type ParityParam = {
   index: number;
@@ -59,6 +64,10 @@ export type ParityBlock =
         supported: string;
       }[];
       note: string;
+    }
+  | {
+      kind: "changelog";
+      entries: { index: number; type: string; body: string; impact: string | null }[];
     }
   | { kind: "placeholder"; text: string };
 
@@ -159,6 +168,21 @@ function blockManifest(
   }
 }
 
+function changelogBlock(vm: ManualViewModel): ParityBlock | null {
+  const entries = vm.changelog ?? [];
+  if (entries.length === 0) return null;
+  return {
+    kind: "changelog",
+    entries: entries.map((e, i) => ({
+      index: i,
+      type: normText(CHANGELOG_ENTRY_LABEL[e.entryType]),
+      body: normText(e.body),
+      impact:
+        e.entryType === "BREAKING" && e.openPositionImpact ? normText(e.openPositionImpact) : null,
+    })),
+  };
+}
+
 function supportedSetupsBlock(vm: ManualViewModel): ParityBlock | null {
   if (vm.supportedSetups.length === 0) return null;
   return {
@@ -190,17 +214,19 @@ export function buildOutputParityManifest(vm: ManualViewModel): ParityManifest {
       const setups = supportedSetupsBlock(vm);
       if (setups) blocks.push(setups);
     }
-    // empty chapter with no injected table → the renderer shows a single lead placeholder
-    if (section.blocks.length === 0 && !injectSetups) {
-      blocks.push({
-        kind: "placeholder",
-        text: "Bab ini telah disiapkan dari template Smartin. Konten akan disusun pada editor (Phase 3).",
-      });
+    // …and the structured changelog history into the `changelog` chapter
+    const changelog = section.key === "changelog" ? changelogBlock(vm) : null;
+    if (changelog) blocks.push(changelog);
+
+    const injected = injectSetups || changelog != null;
+    // empty chapter with nothing injected → the renderer shows a single neutral lead placeholder
+    if (section.blocks.length === 0 && !injected) {
+      blocks.push({ kind: "placeholder", text: EMPTY_CHAPTER_PLACEHOLDER });
     }
     return {
       index,
       title: normText(section.title),
-      hasContent: section.blocks.length > 0 || injectSetups,
+      hasContent: section.blocks.length > 0 || injected,
       blocks,
     };
   });
