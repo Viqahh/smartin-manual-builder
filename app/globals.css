@@ -574,11 +574,57 @@ html:has(.pm-shell) { scroll-behavior: auto; }
 .pm-toc-title { overflow-wrap: anywhere; }
 
 .public-manual { min-width: 0; padding: 4px 0 64px; }
-.public-manual .a4-document { margin: 0; }
+.public-manual .a4-document { margin: 0; gap: 22px; }
 .manual-page { scroll-margin-top: 104px; }
-.public-manual-banner { margin: 0 0 18px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 10px 14px; color: #475569; background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 12px; }
-.public-manual-banner p { margin: 0; font-weight: 600; }
-.public-manual-banner a { color: #2563eb; }
+.public-manual-banner { margin: 0 0 18px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 11px 15px; color: #475569; background: #fff; border: 1px solid #cbd5e1; border-left: 3px solid #94a3b8; border-radius: 6px; font-size: 12.5px; }
+.public-manual-banner p { margin: 0; font-weight: 650; color: #334155; }
+.public-manual-banner a { color: #2563eb; font-weight: 600; }
+
+/* ── Slice 5: public READING surface ─────────────────────────────────────────────────────────
+   The `.manual-page` "paper page" framing (fixed A4 aspect-ratio + overflow:hidden) is a
+   preview/PDF aesthetic — on the public web reader it would CLIP a long chapter (e.g. a 24-row
+   parameter table). Here every chapter is a natural-height document card, with a comfortable
+   reading type scale. DOM structure + text are unchanged, so AC-P7-4 content parity holds; the
+   PDF is generated from `.pdf-shell` / `@media print` and is untouched. Navy / blue / green / white. */
+.public-manual .manual-cover,
+.public-manual .manual-page { aspect-ratio: auto; height: auto; min-height: 0; overflow: visible; border-radius: 8px; }
+.public-manual .manual-cover { min-height: 480px; padding: clamp(30px, 6vw, 54px); }
+.public-manual .manual-page { padding: 0 clamp(20px, 5vw, 48px); }
+.public-manual .manual-page-body { padding: 34px 0 30px; }
+/* a wide parameter table must scroll INSIDE `.manual-table-wrap`, never widen the page — every
+   ancestor down to the wrap must be allowed to shrink below its content (min-width:0). */
+.public-manual .a4-document,
+.public-manual .manual-page,
+.public-manual .manual-page-body,
+.public-manual .manual-content,
+.public-manual .manual-content > div,
+.public-manual .step-list,
+.public-manual .step-list article > div { min-width: 0; }
+.public-manual .manual-table-wrap { max-width: 100%; }
+.public-manual .manual-page-body > h2 { font-size: clamp(21px, 3.4vw, 26px); margin-bottom: 20px; }
+.public-manual .manual-content,
+.public-manual .manual-content p,
+.public-manual .manual-content li { font-size: 14px; line-height: 1.72; }
+.public-manual .manual-content .lead { font-size: 14px; }
+.public-manual .step-list { gap: 14px; }
+.public-manual .step-list article > span { width: 26px; height: 26px; font-size: 11px; }
+.public-manual .step-list h3 { font-size: 13.5px; }
+.public-manual .step-list p { font-size: 13px; line-height: 1.62; }
+.public-manual .manual-callout { margin-top: 18px; padding: 12px 14px; border-radius: 7px; }
+.public-manual .manual-callout p { font-size: 12.5px; line-height: 1.6; }
+.public-manual .manual-callout svg { width: 18px; }
+.public-manual .parameter-group-heading { margin: 26px 0 12px; }
+.public-manual .parameter-group-heading h3 { font-size: 14.5px; }
+.public-manual .parameter-group-heading p { font-size: 11px; }
+.public-manual .parameter-table { font-size: 12px; }
+.public-manual .parameter-table th { padding: 9px 10px; font-size: 10px; letter-spacing: .03em; text-transform: uppercase; }
+.public-manual .parameter-table td { padding: 9px 10px; }
+.public-manual .manual-content code { font-size: 12px; }
+.public-manual .manual-image-block { margin: 24px 0; border-radius: 7px; }
+.public-manual .manual-image-block figcaption,
+.public-manual .manual-step-image figcaption { padding: 9px 12px; font-size: 11px; }
+.public-manual .manual-step-image { margin-top: 10px; border-radius: 7px; }
+.public-manual .manual-image-missing { padding: 14px; color: #64748b; background: #f8fafc; border: 1px dashed #cbd5e1; border-radius: 6px; font-size: 12.5px; }
 
 .pm-shell a:focus-visible, .pm-shell summary:focus-visible, .pm-shell input:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
 

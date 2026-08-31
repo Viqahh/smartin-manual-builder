@@ -4542,4 +4542,61 @@ describe.skipIf(!HAS_SERVICE)("Phase 7 slice 1 — global publication namespace"
     // cleanup
     await svc().storage.from("manual-pdf-artifacts").remove([realKey, storageKey]);
   });
+
+  // -------------------------------------------------------------------------
+  // Phase 7 slice 5 — AC-P7-10 NEGATIVE: a publication whose content carries a forbidden
+  // regulatory-approval label ("Bappebti Approved" / "Certified" / "Compliant") is blocked at
+  // `publish_manual_version` — no published_snapshots, no public_manual_versions, no PDF artifact,
+  // no render-time censorship. Enforcement is the EXISTING chain: CHK-NO-PROHIBITED-CLAIMS is
+  // required + publish_blocking; a WARNING state on it makes the RPC refuse.
+  // -------------------------------------------------------------------------
+  it("AC-P7-10: forbidden regulatory-approval copy blocks the new publication (no snapshot / version / artifact)", { retry: 2 }, async () => {
+    const L = await mkLineage(ORG_A, { ownerId: OWNER_A, versions: ["1.0.0"] });
+    const [mv1] = L.mvs;
+    await forceApproved(mv1.id, ORG_A, ADMIN_A);
+
+    // the deterministic compliance engine flagged CHK-NO-PROHIBITED-CLAIMS -> WARNING for the
+    // "Bappebti Approved" copy (proven at unit level); persist that WARNING as the checklist result.
+    const upd = await svc()
+      .from("checklist_results")
+      .update({ state: "WARNING" })
+      .eq("manual_version_id", mv1.id)
+      .eq("check_key", "CHK-NO-PROHIBITED-CLAIMS")
+      .select("id, check_key");
+    expect(upd.error, "flip CHK-NO-PROHIBITED-CLAIMS to WARNING").toBeNull();
+    expect((upd.data ?? []).length, "CHK-NO-PROHIBITED-CLAIMS result exists for CT1").toBe(1);
+
+    // sanity: the checklist item really is publish-blocking (the gate the RPC joins on)
+    const ci = await svc()
+      .from("checklist_items")
+      .select("publish_blocking")
+      .eq("checklist_template_id", CT1)
+      .eq("check_key", "CHK-NO-PROHIBITED-CLAIMS")
+      .single();
+    expect(ci.data?.publish_blocking, "CHK-NO-PROHIBITED-CLAIMS is publish_blocking").toBe(true);
+
+    const r = await publishRPC(mv1.id, ADMIN_A, L.slug, "1.0.0");
+    expect(r.error, "publish RPC refuses the forbidden-copy publication").toBeTruthy();
+    expect((r.error?.message ?? "").toLowerCase()).toMatch(/publication is blocked|validation/);
+
+    // NOTHING was created and the manual version stayed out of PUBLISHED
+    expect(await snapRow(mv1.id), "no published_snapshots row").toBeNull();
+    const mvStatus = (await svc().from("manual_versions").select("status").eq("id", mv1.id).single()).data;
+    expect(mvStatus?.status, "manual version did not enter PUBLISHED").not.toBe("PUBLISHED");
+    expect(
+      (await svc().from("public_manual_versions").select("id").eq("published_snapshot_id", mv1.id)).data ?? [],
+      "no public_manual_versions row",
+    ).toHaveLength(0);
+    expect(
+      (await svc().from("published_pdf_artifacts").select("id").eq("manual_version_id", mv1.id)).data ?? [],
+      "no published_pdf_artifacts row",
+    ).toHaveLength(0);
+    expect(await pubAudit(mv1.id), "no publish audit event").toBe(0);
+
+    // control: with CHK-NO-PROHIBITED-CLAIMS back to PASS the same version publishes cleanly
+    await svc().from("checklist_results").update({ state: "PASS" }).eq("manual_version_id", mv1.id).eq("check_key", "CHK-NO-PROHIBITED-CLAIMS");
+    const ok = await publishRPC(mv1.id, ADMIN_A, L.slug, "1.0.0");
+    expect(ok.error, "neutral copy publishes").toBeNull();
+    expect(await snapRow(mv1.id), "snapshot now exists").toBeTruthy();
+  });
 });

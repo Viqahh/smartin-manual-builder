@@ -138,17 +138,30 @@ const RULES: Rule[] = [
   },
   {
     category: "CLAIM-REGULATOR-ENDORSE",
-    categoryLabel: "Klaim endorsemen regulator",
+    categoryLabel: "Klaim endorsemen / label persetujuan regulator",
     explanation:
-      "Aplikasi ini tidak memberi persetujuan regulator. Klaim 'disetujui Bappebti' / 'Bappebti approved' tanpa rekaman resmi dilarang.",
-    recommendedAction: "Hapus klaim persetujuan regulator. Sebut proses Bappebti sebagai kewajiban yang dijalankan di luar alat ini.",
+      "Aplikasi ini tidak memberi persetujuan regulator. Klaim 'disetujui Bappebti' / 'Bappebti approved' " +
+      "dan label persetujuan 'Approved' / 'Certified' / 'Compliant' pada keluaran manual (judul, badge, " +
+      "footer, watermark) dilarang tanpa rekaman resmi — dan tidak ada rekaman semacam itu di alat ini " +
+      "(PRD-COMP-001, AC-P7-10).",
+    recommendedAction:
+      "Hapus label persetujuan regulator. Gunakan 'siap untuk review kepatuhan' / 'checklist dokumentasi selesai'. " +
+      "Sebut proses Bappebti sebagai kewajiban yang dijalankan di luar alat ini.",
     patterns: [
       /di?setujui\s+bappebti/i,
-      /bappebti\s+approved/i,
+      /bappebti[-\s]+approved/i,
       /lolos\s+verifikasi\s+bappebti/i,
       /terdaftar\s+resmi\s+(di\s+)?bappebti\s+sebagai\s+ea/i,
       /regulator[-\s]?verified/i,
       /(disahkan|diakui|direstui)\s+(oleh\s+)?(bappebti|otoritas|regulator)/i,
+      // AC-P7-10 — standalone regulatory-approval LABELS on manual output
+      /\b(regulator(?:y|i)?|otoritas|bursa|kliring|pemerintah)[-\s]+(approved|certified|endorsed|compliant)\b/i,
+      /\b(approved|certified|endorsed|compliant)\s+by\s+(bappebti|the\s+regulator|otoritas|bursa)\b/i,
+      /\b(tersertifikasi|bersertifikat|disahkan)\s+(oleh\s+)?(bappebti|regulator|otoritas|bursa|pemerintah)\b/i,
+      /\b(status|sertifikasi|label|badge|stempel|cap|verifikasi)\s*[:\-–]\s*(approved|disetujui|certified|tersertifikasi|compliant|patuh|lolos)\b/i,
+      /\b(ea|expert\s+advisor|robot|manual|dokumen(?:tasi)?|produk|aplikasi|sistem)\s+(ini\s+)?(telah\s+|sudah\s+)?(disetujui\s+regulator|approved|certified|tersertifikasi)\b/i,
+      /^(?:[✓✅*\-\s]*)(approved|certified|compliant|disetujui|tersertifikasi)!*\s*$/i,
+      /\bbappebti\s+(certified|compliant|endorsed)\b/i,
     ],
   },
   {

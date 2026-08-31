@@ -182,7 +182,7 @@
 | ID | Criterion | Type | Verify |
 |---|---|---|---|
 | AC-P7-1 | GI-1..GI-8, GI-10, GI-11, GI-12 hold. | MUST | phase-gate. |
-| AC-P7-2 | `/manual/[eaSlug]/[version]` serves only a `PUBLISHED` snapshot; an unknown or non-published slug/version returns 404; the route has no code path to draft or private tables. (PRD-OUT-004, PRD-SEC-005) | MUST | route + code review. |
+| AC-P7-2 | `/manual/[eaSlug]/[version]` serves an immutable previously-published snapshot: a currently-`PUBLISHED` version returns 200, and an `ARCHIVED` (previously published) version also returns 200 with a neutral archived banner — plus a "Lihat versi terbaru" link when a newer published sibling exists. A draft / review-only / never-published version, or an unknown slug+version, returns 404. Archived versions are excluded from the active published-version switcher. The route has no code path to draft or private tables. (PRD-OUT-004, PRD-SEC-005) | MUST | route + code review. |
 | AC-P7-3 | The public manual shows a table of contents, working in-page search, and a version switcher listing all published versions; older version URLs still resolve. (PRD-POUT-002, PRD-VER-005) | MUST | test. |
 | AC-P7-4 | **PRD-SUCC-005:** for a given version, the web render and the PDF render contain the same chapters, blocks, and parameter values — verified by a visual-regression fixture within tolerance and a content-model diff that is empty. (PRD-OUT-001, PRD-POUT-001) | MUST | visual regression + diff. |
 | AC-P7-5 | The A4 PDF repeats long-table headers across page breaks, honours per-block page-break preferences, keeps captions with their images, and waits for fonts/images before export. (PRD-POUT-003) | MUST | PDF fixture inspection. |
