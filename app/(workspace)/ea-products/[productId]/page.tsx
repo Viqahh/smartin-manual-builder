@@ -19,9 +19,10 @@ export default async function EAProductDetailPage({
   params: Promise<{ productId: string }>;
 }) {
   const { productId } = await params;
-  const { activeOrg } = await getRequiredWorkspacePageContext();
-  const orgId = activeOrg.id;
-  const roles = activeOrg.roles;
+  const ctx = await getRequiredWorkspacePageContext();
+  if (!ctx) return null; // Supabase not configured — the workspace layout renders the setup panel
+  const orgId = ctx.activeOrg.id;
+  const roles = ctx.activeOrg.roles;
   const canCreateVersion = canAny(roles, "ea_version:create");
   const canManageSetup = canAny(roles, "ea_setup:manage");
   const canManageParams = canAny(roles, "ea_parameter:manage");

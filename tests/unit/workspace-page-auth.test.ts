@@ -5,11 +5,19 @@
  * `redirect()` does not stop a child page's body from evaluating. Before the fix, pages
  * dereferenced `ctx.activeOrg!.id` and threw `TypeError: Cannot read properties of null` for an
  * unauthenticated / no-membership request (production log: `GET /dashboard`). Every workspace page
- * now calls `getRequiredWorkspacePageContext()`, which performs the same redirects the layout does
- * and returns `user` + `activeOrg` narrowed to non-null.
+ * now does `const ctx = await getRequiredWorkspacePageContext(); if (!ctx) return null;` before
+ * touching `user` / `activeOrg`.
  *
- * Part 1 — unit test of the helper's branching for all five auth states.
- * Part 2 — static guard: no workspace page still contains an unsafe `activeOrg!` / `user!`.
+ * `getRequiredWorkspacePageContext()`:
+ *   - Supabase not configured → returns `null` (NO redirect — the layout keeps rendering the
+ *     `SupabaseNotConfiguredPanel`; redirecting here would race and pre-empt it).
+ *   - configured, no session   → `redirect("/login")`.
+ *   - session, no active org    → `redirect("/no-membership")`.
+ *   - valid workspace           → typed non-null `user` + `activeOrg`.
+ *
+ * Part 1 — unit test of the helper for all five auth states.
+ * Part 2 — static guard: no workspace page contains an unsafe `activeOrg!` / `user!` / raw
+ *          `getWorkspaceContext()`, and every page that uses the helper guards `if (!ctx) return`.
  */
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
@@ -69,10 +77,11 @@ beforeEach(() => {
 });
 
 describe("getRequiredWorkspacePageContext", () => {
-  it("Supabase not configured → redirect(/login), never returns", async () => {
+  it("Supabase not configured → returns null, redirect NOT called (layout keeps the setup panel)", async () => {
     isConfigured.mockReturnValue(false);
-    await expect(getRequiredWorkspacePageContext()).rejects.toBeInstanceOf(RedirectSignal);
-    expect(redirectCalls).toEqual(["/login"]);
+    const ctx = await getRequiredWorkspacePageContext();
+    expect(ctx).toBeNull();
+    expect(redirectCalls).toEqual([]); // must NOT redirect — no org/user work is even possible
   });
 
   it("configured but no session → redirect(/login)", async () => {
@@ -94,16 +103,14 @@ describe("getRequiredWorkspacePageContext", () => {
     serverClient.mockResolvedValue(fakeClient({ user: { id: "u1", email: "u@x.io" }, memberships: MEMBERSHIP }));
     const ctx = await getRequiredWorkspacePageContext();
     expect(redirectCalls).toEqual([]);
-    expect(ctx.user.id).toBe("u1");
-    expect(ctx.activeOrg.id).toBe("org-1");
-    expect(ctx.activeOrg.roles).toEqual(["ADMIN"]);
-    // the whole point: no `!` needed — these are non-null in the type AND at runtime
-    expect(ctx.activeOrg).not.toBeNull();
-    expect(ctx.user).not.toBeNull();
+    expect(ctx).not.toBeNull();
+    expect(ctx!.user.id).toBe("u1");
+    expect(ctx!.activeOrg.id).toBe("org-1");
+    expect(ctx!.activeOrg.roles).toEqual(["ADMIN"]);
   });
 });
 
-describe("no workspace page dereferences a possibly-null auth context", () => {
+describe("workspace pages have a safe auth boundary", () => {
   const WS = join(process.cwd(), "app", "(workspace)");
 
   const walk = (dir: string): string[] =>
@@ -112,16 +119,22 @@ describe("no workspace page dereferences a possibly-null auth context", () => {
       return statSync(p).isDirectory() ? walk(p) : p.endsWith(".tsx") ? [p] : [];
     });
 
-  it("app/(workspace)/**/page.tsx contains no `activeOrg!` / `user!` / raw getWorkspaceContext", () => {
+  it("no page contains `activeOrg!` / `user!` / raw getWorkspaceContext, and every helper caller guards `if (!ctx)`", () => {
     const offenders: string[] = [];
     for (const file of walk(WS)) {
-      if (file.endsWith(`${join("(workspace)", "layout.tsx")}`)) continue; // the layout guards itself
+      if (file.endsWith(join("(workspace)", "layout.tsx"))) continue; // the layout guards itself
       const src = readFileSync(file, "utf8");
       const rel = file.slice(file.indexOf("app/"));
       if (/\bactiveOrg!\s*\./.test(src) || /\bctx\.activeOrg!\b/.test(src)) offenders.push(`${rel}: activeOrg!`);
       if (/\.user!\s*\./.test(src) || /\bctx\.user!\b/.test(src)) offenders.push(`${rel}: user!`);
-      // pages must go through the page-context helper, not the raw context
       if (src.includes("getWorkspaceContext(")) offenders.push(`${rel}: raw getWorkspaceContext()`);
+      // any page that calls the page helper must immediately null-guard its (nullable) result
+      if (
+        src.includes("getRequiredWorkspacePageContext()") &&
+        !/getRequiredWorkspacePageContext\(\);\s*\n\s*if \(!ctx\) return null;/.test(src)
+      ) {
+        offenders.push(`${rel}: missing \`if (!ctx) return null;\` after getRequiredWorkspacePageContext()`);
+      }
     }
     expect(offenders, offenders.join("\n")).toEqual([]);
   });

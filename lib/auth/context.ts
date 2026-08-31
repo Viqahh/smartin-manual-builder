@@ -111,17 +111,20 @@ export type RequiredWorkspacePageContext = {
  * A page renders CONCURRENTLY with its layout, so `app/(workspace)/layout.tsx`'s `redirect()` does
  * NOT stop a child page's body from evaluating first — a page that dereferences `ctx.activeOrg!`
  * throws `TypeError: Cannot read properties of null` for an unauthenticated / no-membership request
- * even though the response ultimately redirects. Every workspace page must call this FIRST. It
- * performs the same redirects the layout does and narrows `user` + `activeOrg` to non-null, so no
- * page needs a `!` assertion or an org query with a null id.
+ * even though the response ultimately redirects. Every workspace page must call this FIRST, then
+ * `if (!ctx) return null;` before touching `user` / `activeOrg` or issuing an org-dependent query.
  *
- * - Supabase not configured / no session → `redirect("/login")` (matches `no-membership` + `/login`;
- *   the workspace layout's own setup-state panel branch is left untouched).
- * - session, no active membership          → `redirect("/no-membership")`.
+ * - Supabase not configured → returns **null**. The page must render nothing; the workspace layout
+ *   stays responsible for the `SupabaseNotConfiguredPanel` setup state (redirecting here would race
+ *   the layout and pre-empt that panel).
+ * - configured, no session   → `redirect("/login")`.
+ * - session, no active org    → `redirect("/no-membership")`.
+ * - valid workspace           → typed non-null `user` + `activeOrg`.
  */
-export async function getRequiredWorkspacePageContext(): Promise<RequiredWorkspacePageContext> {
+export async function getRequiredWorkspacePageContext(): Promise<RequiredWorkspacePageContext | null> {
   const ctx = await getWorkspaceContext();
-  if (!ctx.configured || !ctx.user) redirect("/login");
+  if (!ctx.configured) return null;
+  if (!ctx.user) redirect("/login");
   if (!ctx.activeOrg) redirect("/no-membership");
   return { user: ctx.user, activeOrg: ctx.activeOrg, memberships: ctx.memberships };
 }

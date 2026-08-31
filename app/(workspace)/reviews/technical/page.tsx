@@ -5,7 +5,9 @@ import { ReviewQueue } from "@/features/reviews/review-queue";
 export const dynamic = "force-dynamic";
 
 export default async function TechnicalReviewPage() {
-  const { user, activeOrg } = await getRequiredWorkspacePageContext();
+  const ctx = await getRequiredWorkspacePageContext();
+  if (!ctx) return null; // Supabase not configured — the workspace layout renders the setup panel
+  const { user, activeOrg } = ctx;
   const orgId = activeOrg.id;
   const roles = activeOrg.roles;
   const rows = await listReviewQueue(orgId, user.id, roles, "technical").catch(() => []);

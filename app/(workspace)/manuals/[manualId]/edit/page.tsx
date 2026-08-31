@@ -26,7 +26,9 @@ export default async function ManualBuilderPage({
   params: Promise<{ manualId: string }>;
 }) {
   const { manualId } = await params;
-  const { user, activeOrg } = await getRequiredWorkspacePageContext();
+  const ctx = await getRequiredWorkspacePageContext();
+  if (!ctx) return null; // Supabase not configured — the workspace layout renders the setup panel
+  const { user, activeOrg } = ctx;
   const orgId = activeOrg.id;
   const userId = user.id;
 

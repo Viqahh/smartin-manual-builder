@@ -11,7 +11,9 @@ const ROLE_LABEL: Record<string, string> = {
 export const dynamic = "force-dynamic";
 
 export default async function SettingsPage() {
-  const { user, activeOrg, memberships } = await getRequiredWorkspacePageContext();
+  const ctx = await getRequiredWorkspacePageContext();
+  if (!ctx) return null; // Supabase not configured — the workspace layout renders the setup panel
+  const { user, activeOrg, memberships } = ctx;
 
   return (
     <div className="page-container">

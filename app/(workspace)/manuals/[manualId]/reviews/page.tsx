@@ -24,7 +24,9 @@ export default async function ReviewHistoryPage({
 }) {
   const { manualId } = await params;
   const { v } = await searchParams;
-  const { activeOrg } = await getRequiredWorkspacePageContext();
+  const ctx = await getRequiredWorkspacePageContext();
+  if (!ctx) return null; // Supabase not configured — the workspace layout renders the setup panel
+  const { activeOrg } = ctx;
   const orgId = activeOrg.id;
   if (!canAny(activeOrg.roles, "manual:read")) notFound();
 

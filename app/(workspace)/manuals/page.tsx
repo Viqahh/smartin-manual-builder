@@ -9,7 +9,9 @@ import { listManuals } from "@/features/manuals/queries";
 export const dynamic = "force-dynamic";
 
 export default async function ManualsPage() {
-  const { activeOrg } = await getRequiredWorkspacePageContext();
+  const ctx = await getRequiredWorkspacePageContext();
+  if (!ctx) return null; // Supabase not configured — the workspace layout renders the setup panel
+  const { activeOrg } = ctx;
   const rows = await listManuals(activeOrg.id);
   const canCreateManual = canAny(activeOrg.roles, "manual:create");
 

@@ -8,7 +8,9 @@ import { ProductCreateForm } from "@/features/ea-products/product-create-form";
 export const dynamic = "force-dynamic";
 
 export default async function EAProductsPage() {
-  const { activeOrg } = await getRequiredWorkspacePageContext();
+  const ctx = await getRequiredWorkspacePageContext();
+  if (!ctx) return null; // Supabase not configured — the workspace layout renders the setup panel
+  const { activeOrg } = ctx;
   const products = await listEaProducts(activeOrg.id);
   const canCreateProduct = canAny(activeOrg.roles, "ea_product:create");
 
