@@ -7,6 +7,7 @@
  */
 
 import { richTextToPlainText } from "@/lib/domain/rich-text";
+import { faqItems } from "@/lib/domain/blocks";
 import type { ManualViewModel } from "@/lib/manual/view-model";
 import type { ScanLine } from "./claim-scanner";
 
@@ -41,8 +42,10 @@ export function projectManualLines(vm: ManualViewModel): ScanLine[] {
           push(plain(p.content), `${chapter} — callout`);
           break;
         case "faq":
-          push(typeof p.question === "string" ? p.question : "", `${chapter} — FAQ (pertanyaan)`);
-          push(plain(p.answer), `${chapter} — FAQ (jawaban)`);
+          for (const it of faqItems(p)) {
+            push(it.question, `${chapter} — FAQ (pertanyaan)`);
+            push(plain(it.answer), `${chapter} — FAQ (jawaban)`);
+          }
           break;
         case "steps": {
           const steps = Array.isArray(p.steps) ? (p.steps as Record<string, unknown>[]) : [];

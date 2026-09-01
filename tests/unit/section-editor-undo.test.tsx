@@ -31,6 +31,16 @@ const seed = (type: string, payload: unknown, section = "sec-1") => {
   return id;
 };
 
+// block-editors.tsx statically imports the parameter server actions (via InlineParameterManager);
+// stub them so the jsdom test never pulls in `server-only`.
+vi.mock("@/features/parameters/actions", () => ({
+  getParameterGroups: vi.fn(async () => ({ ok: true, data: { groups: [] } })),
+  createParameter: vi.fn(async () => ({ ok: true, data: { id: "p1" } })),
+  updateParameter: vi.fn(async () => ({ ok: true, data: { id: "p1" } })),
+  deleteParameter: vi.fn(async () => ({ ok: true, data: { id: "p1" } })),
+  createParameterGroup: vi.fn(async () => ({ ok: true, data: { id: "g1" } })),
+}));
+
 vi.mock("@/features/blocks/actions", () => ({
   createBlock: vi.fn(async ({ sectionId, blockType, payload }: { sectionId: string; blockType: string; payload: unknown }) => {
     const id = uid();
@@ -131,6 +141,9 @@ const vm = { parameterGroups: [] } as unknown as ManualViewModel;
 const ctx = {
   images: [],
   groups: [],
+  eaVersionId: "ea-1",
+  parameterGroupsFull: [],
+  onParametersChanged: () => {},
   onUploadImage: async () => ({ ok: false as const }),
   onUpdateImageMeta: async () => {},
 };

@@ -13,6 +13,7 @@
 
 import type { ManualViewModel } from "@/lib/manual/view-model";
 import { richTextToPlainText } from "@/lib/domain/rich-text";
+import { faqItems } from "@/lib/domain/blocks";
 import { eaDeclaresDangerMode } from "@/lib/domain/section-completion";
 import { projectManualLines } from "@/lib/ai/manual-projection";
 import { scanClaims } from "@/lib/ai/claim-scanner";
@@ -63,6 +64,7 @@ export const CHECKLIST_V1: ChecklistItemDef[] = [
   item({ checkKey: "CHK-INTERFACE", label: "Antarmuka EA terdokumentasi", category: "how-it-works", required: true, bappebtiOnly: false, publishBlocking: false, position: 30 }),
 ];
 
+
 // OQ-005 — canonical chapter requirement.
 const CHAPTERS_ALWAYS = [
   "cover", "overview", "requirements", "installation", "quick-start", "how-it-works",
@@ -110,7 +112,7 @@ function sectionText(section: Section | undefined): string {
         parts.push(safePlain(p.content));
         break;
       case "faq":
-        parts.push(typeof p.question === "string" ? p.question : "", safePlain(p.answer));
+        for (const it of faqItems(p)) parts.push(it.question, safePlain(it.answer));
         break;
       case "steps": {
         const steps = Array.isArray(p.steps) ? (p.steps as Record<string, unknown>[]) : [];
@@ -275,27 +277,42 @@ function hasPerformanceFigure(vm: ManualViewModel): boolean {
 // ---------------------------------------------------------------------------
 
 function checkVersiDua(vm: ManualViewModel): RuleOutcome {
+  // Requirement (docs/CONTENT_REQUIREMENTS §0): EA Version and Manual Version are two DISTINCT
+  // metadata concepts, each carried in its own labelled field. This check verifies exactly that:
+  //   - the EA Version field exists
+  //   - the Manual Version field exists
+  //   - both are valid semver MAJOR.MINOR.PATCH
+  // Their VALUES MAY BE IDENTICAL (EA 1.0.0 + Manual 1.0.0 => PASS). This check does NOT require
+  // any additional Cover-body prose such as "Dokumentasi ini berlaku untuk versi X.Y.Z." — that is
+  // a separate authoring nudge surfaced as chapter guidance, not a gate on this rule.
   const ea = (vm.eaVersion.version ?? "").trim();
   const man = (vm.manualVersion.version ?? "").trim();
-  const cover = sectionByKey(vm, "cover");
-  const coverTxt = sectionText(cover).toLowerCase();
-  const mentionsVersion = /\bversi\b|\bversion\b|\bv?\d+\.\d+\.\d+\b|berlaku untuk versi/.test(coverTxt);
-  let state: RuleOutcome["state"];
-  let reason: string;
+  const semverRe = /^\d+\.\d+\.\d+$/;
+
   if (!ea || !man) {
-    state = "MISSING";
-    reason = "Versi EA dan/atau versi Manual tidak tersedia pada data versi.";
-  } else if (ea === man) {
-    state = "WARNING";
-    reason = `Versi EA dan versi Manual bernilai sama (${ea}) sehingga tidak dapat dibedakan sebagai dua nilai.`;
-  } else if (!sectionHasContent(cover) || !mentionsVersion) {
-    state = "WARNING";
-    reason = "Bab Sampul belum menampilkan kedua versi / pernyataan “berlaku untuk versi X.Y.Z” secara eksplisit.";
-  } else {
-    state = "PASS";
-    reason = `Versi EA (${ea}) dan versi Manual (${man}) ditampilkan sebagai dua nilai berbeda di Sampul.`;
+    return {
+      state: "MISSING",
+      reason: "Versi EA dan/atau versi Manual tidak tersedia pada data versi.",
+      evidence: { eaVersion: ea, manualVersion: man },
+      navigateSectionKey: "cover",
+    };
   }
-  return { state, reason, evidence: { eaVersion: ea, manualVersion: man, coverMentionsVersion: mentionsVersion }, navigateSectionKey: "cover" };
+  if (!semverRe.test(ea) || !semverRe.test(man)) {
+    return {
+      state: "WARNING",
+      reason: "Versi EA / versi Manual belum berupa semver MAJOR.MINOR.PATCH yang valid.",
+      evidence: { eaVersion: ea, manualVersion: man },
+      navigateSectionKey: "cover",
+    };
+  }
+  return {
+    state: "PASS",
+    reason: `Versi EA (${ea}) dan versi Manual (${man}) tersedia sebagai dua field metadata terpisah${
+      ea === man ? " (nilai boleh sama)" : ""
+    }.`,
+    evidence: { eaVersion: ea, manualVersion: man, equal: ea === man },
+    navigateSectionKey: "cover",
+  };
 }
 
 const EA_VERSION_MENTION_RE =
@@ -418,22 +435,31 @@ function checkInstalasi(vm: ManualViewModel): RuleOutcome {
 }
 
 function checkInstallAutotrading(vm: ManualViewModel): RuleOutcome {
+  // The real requirement (docs/CONTENT_REQUIREMENTS §4): the manual documents how to ENABLE
+  // automated trading for the supported MetaTrader platform AND how the user can VERIFY the
+  // required status. It does NOT require the legacy "smiley hijau/merah" wording specifically —
+  // any concrete verification signal (status icon, "initialized" log line, active-state label,
+  // panel indicator) satisfies the verify half.
   const section = sectionByKey(vm, "installation");
   const txt = sectionText(section).toLowerCase();
-  const hitAlgo = /algo\s*trading|allow\s*algo|auto\s*trading|autotrading|izinkan trading otomatis/.test(txt);
-  const hitSmiley = /smiley|senyum|ikon.{0,12}(hijau|merah)|wajah.{0,10}(hijau|merah)/.test(txt);
+  const hitAlgo = /algo\s*trading|allow\s*algo|auto\s*trading|autotrading|izinkan trading otomatis|trading otomatis/.test(txt);
+  const hitVerify =
+    /smiley|senyum|ikon\s*(status|senyum)?.{0,14}(hijau|merah|aktif)|wajah.{0,10}(hijau|merah)/.test(txt) ||
+    /log.{0,24}(initialized|inisialisasi|siap)|status.{0,20}(aktif|berjalan|running|menyala)|tombol.{0,20}(hijau|menyala|aktif)|autotrading.{0,12}(aktif|menyala|hijau)|indikator.{0,16}(status|aktif|panel)/.test(
+      txt,
+    );
   if (!sectionHasContent(section)) {
     return { state: "MISSING", reason: "Bab Instalasi belum memiliki isi.", evidence: {}, navigateSectionKey: "installation" };
   }
-  const ok = hitAlgo && hitSmiley;
+  const ok = hitAlgo && hitVerify;
   return {
     state: ok ? "PASS" : hitAlgo ? "WARNING" : "MISSING",
     reason: ok
-      ? "Instalasi menjelaskan Algo Trading / Allow Algo Trading dan arti ikon smiley."
+      ? "Instalasi menjelaskan cara mengaktifkan trading otomatis dan cara memverifikasi statusnya."
       : hitAlgo
-        ? "Algo Trading dijelaskan, tetapi arti ikon smiley (hijau/merah) belum disebut."
-        : "Instalasi belum menjelaskan tombol Algo Trading global + centang Allow Algo Trading pada tab Common.",
-    evidence: { sectionId: section?.id ?? null, mentionsAlgoTrading: hitAlgo, mentionsSmiley: hitSmiley },
+        ? "Aktivasi trading otomatis dijelaskan, tetapi cara memverifikasi status aktif belum disebut (mis. ikon status, baris log “initialized”, atau indikator panel)."
+        : "Instalasi belum menjelaskan cara mengaktifkan trading otomatis (tombol Algo Trading global + Allow Algo Trading pada tab Common).",
+    evidence: { sectionId: section?.id ?? null, mentionsAlgoTrading: hitAlgo, mentionsVerify: hitVerify },
     navigateSectionKey: "installation",
   };
 }
@@ -824,7 +850,9 @@ function checkKontak(vm: ManualViewModel): RuleOutcome {
   let reason: string;
   if (channelKinds.length === 0) {
     state = "MISSING";
-    reason = "Tidak ada kanal kontak pada data EA Version (email/telepon/WhatsApp).";
+    reason =
+      "Data dukungan pada EA Version belum tersedia atau belum lengkap (email/telepon/WhatsApp). " +
+      "Perlu dikonfirmasi Admin/perusahaan — bukan diisi oleh penulis manual.";
   } else if (!sectionHasContent(section)) {
     state = "MISSING";
     reason = "Bab Dukungan belum memuat kontak dukungan.";

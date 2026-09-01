@@ -88,6 +88,7 @@ describe("steps block — ≥5 ordered steps round-trip (AC-P3-7)", () => {
 
 describe("faq / callout rich bodies persist as structured JSON, not strings", () => {
   it("faq answer + callout content survive parse as objects", () => {
+    // legacy v1 payload — normalizeBlockPayload upgrades it to v2 (items[]) on parse
     const faq = parseBlockPayload({
       type: "faq",
       schemaVersion: 1,
@@ -96,8 +97,27 @@ describe("faq / callout rich bodies persist as structured JSON, not strings", ()
     });
     expect(faq.ok).toBe(true);
     if (faq.ok) {
-      const ans = (faq.value as Extract<BlockPayload, { type: "faq" }>).answer;
-      expect(typeof ans).toBe("object");
+      const v = faq.value as Extract<BlockPayload, { type: "faq" }>;
+      expect(v.schemaVersion).toBe(2);
+      expect(v.items).toHaveLength(1);
+      expect(v.items[0].question).toBe("q?");
+      expect(typeof v.items[0].answer).toBe("object");
+    }
+  });
+
+  it("a v2 multi-item faq payload parses with all items", () => {
+    const faq = parseBlockPayload({
+      type: "faq",
+      schemaVersion: 2,
+      items: [
+        { question: "q1?", answer: richTextFromParagraphs(["a1"]) },
+        { question: "q2?", answer: richTextFromParagraphs(["a2"]) },
+      ],
+    });
+    expect(faq.ok).toBe(true);
+    if (faq.ok) {
+      const v = faq.value as Extract<BlockPayload, { type: "faq" }>;
+      expect(v.items.map((i) => i.question)).toEqual(["q1?", "q2?"]);
     }
   });
 });

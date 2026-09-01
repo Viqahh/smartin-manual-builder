@@ -176,6 +176,31 @@ export interface ImageAssetRow extends Timestamps {
   scan_status: ImageScanStatusDb;
 }
 
+export type EvidenceStatusDb = "PENDING" | "ACCEPTED" | "RETURNED" | "SUPERSEDED" | "STALE";
+
+/** UAT-35 — human-evidence submission for a machine false-negative WARNING check (migration 29). */
+export interface ChecklistEvidenceSubmissionRow extends Timestamps {
+  id: string;
+  organization_id: string;
+  manual_version_id: string;
+  checklist_template_id: string;
+  checklist_template_version: number;
+  checklist_item_id: string | null;
+  check_key: string;
+  submitted_by: string;
+  submitted_at: string;
+  section_id: string | null;
+  block_id: string | null;
+  note: string | null;
+  automated_state_at_submit: "PASS" | "WARNING" | "MISSING" | "NOT_APPLICABLE";
+  evidence_content_hash: string;
+  status: EvidenceStatusDb;
+  decided_by: string | null;
+  decided_at: string | null;
+  decision_review_type: "TECHNICAL" | "COMPLIANCE" | null;
+  return_reason: string | null;
+}
+
 export interface AuditEventRow {
   id: string;
   organization_id: string;

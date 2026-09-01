@@ -126,12 +126,16 @@ function changelogBlock(el: Element): ParityBlock {
 function contentDivBlock(el: Element): ParityBlock {
   if (el.querySelector("ol.manual-changelog")) return changelogBlock(el);
   if (el.querySelector("table.parameter-table")) return tableBlock(el);
-  const children = [...el.children];
-  // faq: `<h3>question</h3>` then the RichTextView answer (its <p>s are siblings of the <h3>)
-  if (children[0]?.tagName === "H3" && !el.querySelector(".parameter-group-heading")) {
-    const clone = el.cloneNode(true) as Element;
-    clone.querySelector(":scope > h3")?.remove();
-    return { kind: "faq", question: txt(children[0]), answer: richText(clone) };
+  // faq: `.manual-faq` wrapper with one `.manual-faq-item` (h3 question + RichTextView answer) per item
+  if (el.classList.contains("manual-faq")) {
+    return {
+      kind: "faq",
+      items: [...el.querySelectorAll(":scope > .manual-faq-item")].map((item) => {
+        const clone = item.cloneNode(true) as Element;
+        clone.querySelector(":scope > h3")?.remove();
+        return { question: txt(item.querySelector(":scope > h3")), answer: richText(clone) };
+      }),
+    };
   }
   return { kind: "text", text: richText(el) };
 }

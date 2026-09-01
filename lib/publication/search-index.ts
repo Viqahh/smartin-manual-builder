@@ -12,6 +12,7 @@
  */
 
 import { richTextToPlainText } from "@/lib/domain/rich-text";
+import { faqItems } from "@/lib/domain/blocks";
 import { chapterAnchor, type ManualViewModel } from "@/lib/manual/view-model";
 
 export type PublicSearchEntry = {
@@ -85,7 +86,7 @@ export function buildPublicSearchIndex(vm: ManualViewModel): PublicSearchEntry[]
           break;
         }
         case "faq":
-          push(KIND.faq, [String(payload.question ?? ""), safePlain(payload.answer)].join(" — "));
+          for (const it of faqItems(payload)) push(KIND.faq, [it.question, safePlain(it.answer)].join(" — "));
           break;
         case "parameterTable": {
           const ids = block.parameterGroupIds ?? [];

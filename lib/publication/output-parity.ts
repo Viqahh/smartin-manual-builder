@@ -16,6 +16,7 @@
  * index) + title — `section.key` is not part of the public output, so it is not compared.
  */
 
+import { faqItems } from "@/lib/domain/blocks";
 import { richTextToPlainText } from "@/lib/domain/rich-text";
 import { BROKER_MIN_LOT_NOTE_ID } from "@/lib/domain/setups";
 import {
@@ -38,7 +39,7 @@ export type ParityParam = {
 export type ParityBlock =
   | { kind: "text"; text: string }
   | { kind: "callout"; tone: string; text: string }
-  | { kind: "faq"; question: string; answer: string }
+  | { kind: "faq"; items: { question: string; answer: string }[] }
   | {
       kind: "steps";
       steps: {
@@ -111,7 +112,10 @@ function blockManifest(
     case "callout":
       return { kind: "callout", tone: String(p.tone ?? "info"), text: rt(p.content) };
     case "faq":
-      return { kind: "faq", question: normText(p.question), answer: rt(p.answer) };
+      return {
+        kind: "faq",
+        items: faqItems(p).map((it) => ({ question: normText(it.question), answer: rt(it.answer) })),
+      };
     case "steps": {
       const steps = Array.isArray(p.steps) ? (p.steps as Record<string, unknown>[]) : [];
       return {

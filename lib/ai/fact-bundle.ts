@@ -8,6 +8,7 @@
  */
 
 import { richTextToPlainText } from "@/lib/domain/rich-text";
+import { faqItems } from "@/lib/domain/blocks";
 import type { ManualViewModel } from "@/lib/manual/view-model";
 import type { Fact, FactBundle, TargetField } from "./types";
 
@@ -54,7 +55,7 @@ function blockPlainText(block: Block): string {
     case "callout":
       return safePlain(p.content);
     case "faq":
-      return [typeof p.question === "string" ? p.question : "", safePlain(p.answer)].filter(Boolean).join("\n");
+      return faqItems(p).flatMap((it) => [it.question, safePlain(it.answer)]).filter(Boolean).join("\n");
     case "steps": {
       const steps = Array.isArray(p.steps) ? (p.steps as Record<string, unknown>[]) : [];
       return steps

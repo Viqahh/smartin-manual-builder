@@ -143,7 +143,17 @@ export function ChapterNav({
                     <small>BAB {String(chapter.position).padStart(2, "0")}</small>
                     <strong>{chapter.title}</strong>
                   </span>
-                  {chapter.required && !chapter.isCustom && <LockKeyhole aria-label="Bab wajib" size={12} />}
+                  {!chapter.isCustom && (
+                    <span
+                      className="chapter-lock"
+                      title="Bab wajib dari template Smartin. Judul bab tidak dapat dihapus atau diubah. Isi bab tetap dapat diedit."
+                    >
+                      <LockKeyhole
+                        aria-label="Bab wajib dari template Smartin — judul tidak dapat diubah, isi tetap dapat diedit"
+                        size={12}
+                      />
+                    </span>
+                  )}
                   {chapter.isCustom && <span className="chapter-custom-tag">kustom</span>}
                 </button>
               )}

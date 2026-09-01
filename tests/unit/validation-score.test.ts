@@ -44,6 +44,36 @@ describe("computeScore (AC-P5-3)", () => {
       percent: null,
     });
   });
+
+  // UAT-35 §7 — an eligible WARNING with a current ACCEPTED human-evidence resolution counts
+  // toward the numerator; a MISSING never does.
+  const HE = (
+    required: boolean,
+    state: ItemResult["state"],
+    systemState: ItemResult["state"],
+    resolution: "RESOLVED_BY_HUMAN_REVIEW" | null,
+  ): Pick<ItemResult, "required" | "state" | "systemState" | "humanEvidence"> => ({
+    required,
+    state,
+    systemState,
+    humanEvidence: resolution
+      ? ({ effectiveResolution: resolution } as ItemResult["humanEvidence"])
+      : null,
+  });
+
+  it("a WARNING with RESOLVED_BY_HUMAN_REVIEW counts as resolved in the fraction (state unchanged)", () => {
+    const items = [
+      ...Array.from({ length: 7 }, () => R(true, "PASS")),
+      HE(true, "WARNING", "WARNING", "RESOLVED_BY_HUMAN_REVIEW"),
+      HE(true, "WARNING", "WARNING", null),
+    ];
+    expect(computeScore(items)).toEqual({ numerator: 8, denominator: 9, percent: 89 });
+  });
+
+  it("a MISSING is NEVER counted, even with a (guarded-out) resolution attached", () => {
+    const items = [R(true, "PASS"), HE(true, "MISSING", "MISSING", "RESOLVED_BY_HUMAN_REVIEW")];
+    expect(computeScore(items)).toEqual({ numerator: 1, denominator: 2, percent: 50 });
+  });
 });
 
 describe("computeEligibility (AC-P5-6)", () => {

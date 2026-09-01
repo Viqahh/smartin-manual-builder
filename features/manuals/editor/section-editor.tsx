@@ -23,10 +23,13 @@ import {
   Undo2,
 } from "lucide-react";
 import { BlockEditor, type BlockEditorCtx } from "./block-editors";
+import { ChapterGuidancePanel } from "./chapter-guidance-panel";
 import { SectionContent } from "@/components/manual-renderer/manual-renderer";
 import {
   BLOCK_TYPES,
   draftBlockPayload,
+  faqItems,
+  isBlockContentEmpty,
   isPersistableDraft,
   parseBlockPayload,
   type BlockType,
@@ -167,7 +170,10 @@ function blockSelectedText(type: string, payload: Record<string, unknown>): stri
     case "callout":
       return safeRichPlain(payload.content);
     case "faq":
-      return safeRichPlain(payload.answer);
+      return faqItems(payload)
+        .map((it) => safeRichPlain(it.answer))
+        .filter(Boolean)
+        .join("\n\n");
     case "image":
       return typeof payload.caption === "string" ? payload.caption : "";
     case "steps": {
@@ -204,7 +210,7 @@ export const SectionEditor = forwardRef<SectionEditorHandle, SectionEditorProps>
   },
   ref,
 ) {
-  const initial: EBlock[] = useMemo(
+  const loaded: EBlock[] = useMemo(
     () =>
       section.blocks.map((b) => ({
         key: b.id,
@@ -218,8 +224,37 @@ export const SectionEditor = forwardRef<SectionEditorHandle, SectionEditorProps>
     [section.blocks],
   );
 
+  // UAT-34: legacy persisted blocks with no authored content (empty Text/Callout, zero-item FAQ,
+  // empty Steps) are removed from an editable DRAFT on load — no empty "Tersimpan" card, no
+  // repeated Trash clicks, and they do not reappear after reload / A → B → A. Structural blocks
+  // (image, parameterTable) and anything unrecognised are never touched. Read-only manuals keep
+  // every block untouched.
+  const legacyEmptyIds = useMemo(
+    () =>
+      canEdit
+        ? loaded.filter((b) => b.id && isBlockContentEmpty(b.payload)).map((b) => b.id as string)
+        : [],
+    [loaded, canEdit],
+  );
+  const initial: EBlock[] = useMemo(
+    () => (legacyEmptyIds.length ? loaded.filter((b) => !(b.id && legacyEmptyIds.includes(b.id))) : loaded),
+    [loaded, legacyEmptyIds],
+  );
+
   const [blocks, setBlocks] = useState<EBlock[]>(initial);
   const [history, setHistory] = useState<History<Snapshot>>(() => createHistory(toSnapshot(initial)));
+  const legacyCleanupFired = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    let fired = false;
+    for (const id of legacyEmptyIds) {
+      if (legacyCleanupFired.current.has(id)) continue;
+      legacyCleanupFired.current.add(id);
+      fired = true;
+      void softDeleteBlock({ blockId: id });
+    }
+    // readiness depends on chapter content — re-evaluate once the empty rows are gone
+    if (fired) onBlockSaved?.();
+  }, [legacyEmptyIds, onBlockSaved]);
   const [addOpen, setAddOpen] = useState(false);
   const [deletedCount, setDeletedCount] = useState(0);
   const [conflict, setConflict] = useState<{ key: string; serverRowVersion: number; serverPayload: unknown } | null>(null);
@@ -528,7 +563,14 @@ export const SectionEditor = forwardRef<SectionEditorHandle, SectionEditorProps>
           if (b.type === "callout") {
             nextPayload = { type: "callout", schemaVersion: 1, tone: (b.payload.tone as string) ?? "info", content: { schemaVersion: 2, format: "doc", doc } };
           } else if (b.type === "faq" && targetField === "answer") {
-            nextPayload = { type: "faq", schemaVersion: 1, question: (b.payload.question as string) ?? "", answer: { schemaVersion: 2, format: "doc", doc } };
+            // apply the proposal to the LAST FAQ item's answer (multi-item v2)
+            const cur = faqItems(b.payload);
+            const items = cur.length ? [...cur] : [{ question: "", answer: null as unknown }];
+            items[items.length - 1] = {
+              question: items[items.length - 1].question,
+              answer: { schemaVersion: 2, format: "doc", doc },
+            };
+            nextPayload = { type: "faq", schemaVersion: 2, items };
           } else {
             nextPayload = { type: "text", schemaVersion: 1, content: { schemaVersion: 2, format: "doc", doc } };
             nextType = "text";
@@ -920,6 +962,7 @@ export const SectionEditor = forwardRef<SectionEditorHandle, SectionEditorProps>
 
       <div className="editor-canvas">
         {canvasPrefix}
+        {blocks.length > 0 && <ChapterGuidancePanel sectionKey={section.key} variant="compact" />}
         {blocks.length === 0 ? (
           canvasPrefix ? (
             <p className="editor-empty-optional">
@@ -927,17 +970,22 @@ export const SectionEditor = forwardRef<SectionEditorHandle, SectionEditorProps>
             </p>
           ) : (
             <div className="editor-empty">
-              <h3>Tambah blok pertama</h3>
-              <p>Susun bab ini dari blok terstruktur.</p>
-              {suggested.length > 0 && (
-                <div className="editor-empty-suggested">
-                  {suggested.map((t) => (
-                    <button key={t} type="button" className="secondary-button" onClick={() => addBlock(t)}>
-                      <Plus aria-hidden="true" size={14} /> {BLOCK_LABEL[t]}
-                    </button>
-                  ))}
-                </div>
-              )}
+              <ChapterGuidancePanel sectionKey={section.key} variant="empty" />
+              <div className="editor-empty-add">
+                {suggested.length > 0 ? (
+                  <div className="editor-empty-suggested">
+                    {suggested.map((t) => (
+                      <button key={t} type="button" className="secondary-button" onClick={() => addBlock(t)}>
+                        <Plus aria-hidden="true" size={14} /> {BLOCK_LABEL[t]}
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <button type="button" className="secondary-button" onClick={() => setAddOpen(true)}>
+                    <Plus aria-hidden="true" size={14} /> Tambah blok pertama
+                  </button>
+                )}
+              </div>
             </div>
           )
         ) : (

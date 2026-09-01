@@ -11,6 +11,7 @@ import {
   richTextSchema,
   emptyRichText,
   richTextToPlainText,
+  isRichTextEmpty,
   type RichText,
 } from "@/lib/domain/rich-text";
 
@@ -69,11 +70,22 @@ const parameterTableBlock = z.object({
   groupIds: z.array(z.uuid()).min(1).max(40),
 });
 
+/**
+ * FAQ (UAT-20). v1 was one question+answer per block. v2 is one block holding an ordered list of
+ * Q/A items. Both are accepted for reads; `normalizeBlockPayload` upgrades a v1 payload to v2 on
+ * the way into `parseBlockPayload`, so every NEW write is v2 and a v1 payload already stored (a
+ * draft manual, or an immutable published snapshot) still parses and renders.
+ */
+const faqItemSchema = z.object({
+  question: z.string().trim().min(1).max(500),
+  answer: richTextDocument,
+});
+export type FaqItem = z.infer<typeof faqItemSchema>;
+
 const faqBlock = z.object({
   type: z.literal("faq"),
-  schemaVersion: z.literal(1),
-  question: z.string().min(1).max(500),
-  answer: richTextDocument,
+  schemaVersion: z.literal(2),
+  items: z.array(faqItemSchema).min(1).max(40),
 });
 
 export const blockPayloadSchema = z.discriminatedUnion("type", [
@@ -87,12 +99,42 @@ export const blockPayloadSchema = z.discriminatedUnion("type", [
 
 export type BlockPayload = z.infer<typeof blockPayloadSchema>;
 
+/** Read a FAQ payload (v1 OR v2) as an ordered Q/A list — for the renderer, parity model, editor. */
+export function faqItems(payload: Record<string, unknown> | undefined | null): { question: string; answer: unknown }[] {
+  if (!payload) return [];
+  if (Array.isArray(payload.items)) {
+    return (payload.items as Record<string, unknown>[])
+      .filter((it) => it && typeof it === "object")
+      .map((it) => ({ question: typeof it.question === "string" ? it.question : "", answer: it.answer }));
+  }
+  // v1 shape
+  return [{ question: typeof payload.question === "string" ? payload.question : "", answer: payload.answer }];
+}
+
+/** Upgrade a legacy v1 FAQ payload to the v2 multi-item shape; every other payload is untouched. */
+export function normalizeBlockPayload(input: unknown): unknown {
+  if (
+    input &&
+    typeof input === "object" &&
+    (input as { type?: unknown }).type === "faq" &&
+    !Array.isArray((input as { items?: unknown }).items)
+  ) {
+    const o = input as Record<string, unknown>;
+    return {
+      type: "faq",
+      schemaVersion: 2,
+      items: [{ question: o.question ?? "", answer: o.answer }],
+    };
+  }
+  return input;
+}
+
 export type ParseResult<T> =
   | { ok: true; value: T }
   | { ok: false; issues: { path: string; message: string }[] };
 
 export function parseBlockPayload(input: unknown): ParseResult<BlockPayload> {
-  const result = blockPayloadSchema.safeParse(input);
+  const result = blockPayloadSchema.safeParse(normalizeBlockPayload(input));
   if (result.success) return { ok: true, value: result.data };
   return {
     ok: false,
@@ -116,7 +158,7 @@ export function draftBlockPayload(type: BlockType): Record<string, unknown> {
     case "callout":
       return { type: "callout", schemaVersion: 1, tone: "info", content: emptyRichText() };
     case "faq":
-      return { type: "faq", schemaVersion: 1, question: "", answer: emptyRichText() };
+      return { type: "faq", schemaVersion: 2, items: [{ question: "", answer: emptyRichText() }] };
     case "steps":
       return { type: "steps", schemaVersion: 1, steps: [{ title: "", instruction: "" }] };
     case "image":
@@ -137,6 +179,50 @@ export function draftBlockPayload(type: BlockType): Record<string, unknown> {
  *   - `parameterTable` / `image`: a valid payload already implies a real EA-Version group / asset
  *     reference — that reference IS the meaningful content (spec §3/§4).
  */
+/**
+ * UAT-34: a *persisted* block that carries no meaningful authored content and is therefore safe to
+ * auto-remove from an editable DRAFT on load (a legacy empty "Tersimpan" card the earlier UAT-04
+ * fix now prevents from being created, but which still exists in older rows).
+ *
+ * Deliberately conservative — it works on the RAW payload (legacy rows may not match the current
+ * Zod schema) and returns `false` (i.e. "keep it") for anything it is not certain about:
+ *   - `image` / `parameterTable` — structural / referential, NEVER auto-removed
+ *   - a payload it cannot recognise
+ *   - rich text that throws while being read
+ */
+export function isBlockContentEmpty(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object") return false;
+  const p = payload as Record<string, unknown>;
+  const emptyRich = (v: unknown): boolean => {
+    if (v == null) return true;
+    try {
+      return isRichTextEmpty(v as RichText);
+    } catch {
+      return false;
+    }
+  };
+  const blank = (v: unknown): boolean => typeof v !== "string" || v.trim().length === 0;
+
+  switch (p.type) {
+    case "text":
+    case "callout":
+      return emptyRich(p.content);
+    case "faq": {
+      const items = faqItems(p);
+      return items.length === 0 || items.every((it) => blank(it.question) && emptyRich(it.answer));
+    }
+    case "steps": {
+      const steps = Array.isArray(p.steps) ? (p.steps as Record<string, unknown>[]) : [];
+      return (
+        steps.length === 0 ||
+        steps.every((s) => blank(s?.title) && blank(s?.instruction) && blank(s?.menuPath) && !s?.imageAssetId)
+      );
+    }
+    default:
+      return false;
+  }
+}
+
 export function isPersistableDraft(payload: unknown): boolean {
   const parsed = parseBlockPayload(payload);
   if (!parsed.ok) return false;

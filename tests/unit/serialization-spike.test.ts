@@ -212,19 +212,30 @@ describe("six block types — payload round-trip (DB → editor repr → seriali
     expect(JSON.stringify(out)).not.toMatch(/default|technical|displayName/i);
   });
 
-  it("6. faq — question stays plain text; answer round-trips as structured JSON", () => {
+  it("6. faq (v2 multi-item) — question stays plain text; each answer round-trips as structured JSON", () => {
     const payload: BlockPayload = {
       type: "faq",
-      schemaVersion: 1,
-      question: "Apakah EA butuh VPS?",
-      answer: richTextFromParagraphs(["Disarankan untuk koneksi 24/7."]),
+      schemaVersion: 2,
+      items: [
+        { question: "Apakah EA butuh VPS?", answer: richTextFromParagraphs(["Disarankan untuk koneksi 24/7."]) },
+        { question: "Bisa akun cent?", answer: richTextFromParagraphs(["Ya, mulai dari lot minimum."]) },
+      ],
     };
     const out = assertStructuralRoundTrip(payload, (p) => {
       const f = p as Extract<BlockPayload, { type: "faq" }>;
-      return { type: "faq", schemaVersion: 1, question: f.question, answer: { schemaVersion: 2, format: "doc", doc: upgradeRichText(f.answer) } };
+      return {
+        type: "faq",
+        schemaVersion: 2,
+        items: f.items.map((it) => ({
+          question: it.question,
+          answer: { schemaVersion: 2, format: "doc", doc: upgradeRichText(it.answer) },
+        })),
+      };
     });
-    expect((out as Extract<BlockPayload, { type: "faq" }>).question).toBe("Apakah EA butuh VPS?");
-    expect(richTextToPlainText((out as Extract<BlockPayload, { type: "faq" }>).answer)).toBe("Disarankan untuk koneksi 24/7.");
+    const v = out as Extract<BlockPayload, { type: "faq" }>;
+    expect(v.items.map((i) => i.question)).toEqual(["Apakah EA butuh VPS?", "Bisa akun cent?"]);
+    expect(richTextToPlainText(v.items[0].answer)).toBe("Disarankan untuk koneksi 24/7.");
+    expect(richTextToPlainText(v.items[1].answer)).toBe("Ya, mulai dari lot minimum.");
   });
 });
 

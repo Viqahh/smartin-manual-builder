@@ -18,11 +18,26 @@ import {
   type ValidationView,
 } from "./types";
 import { RULES, ruleApplies, notApplicableReason, eaPbkScope } from "./rules";
+import { isHumanEvidenceEligible } from "./types";
 
-/** AC-P5-3: required, in-scope PASS ÷ required, in-scope. NA excluded both sides. */
-export function computeScore(items: Pick<ItemResult, "required" | "state">[]): ReadinessScore {
+/**
+ * AC-P5-3: required, in-scope PASS ÷ required, in-scope. NA excluded both sides.
+ *
+ * UAT-35 §7: an eligible check whose automated state is WARNING and which has a current
+ * ACCEPTED human-evidence resolution counts toward the numerator (the WARNING is "resolved by
+ * human review"). `state` is unchanged — this only affects the readiness fraction. A MISSING
+ * result can never be counted this way.
+ */
+type ScoreItem = Pick<ItemResult, "required" | "state"> &
+  Partial<Pick<ItemResult, "systemState" | "humanEvidence">>;
+
+function resolvedByHuman(i: ScoreItem): boolean {
+  return i.systemState === "WARNING" && i.humanEvidence?.effectiveResolution === "RESOLVED_BY_HUMAN_REVIEW";
+}
+
+export function computeScore(items: ScoreItem[]): ReadinessScore {
   const inScope = items.filter((i) => i.required && i.state !== "NOT_APPLICABLE");
-  const numerator = inScope.filter((i) => i.state === "PASS").length;
+  const numerator = inScope.filter((i) => i.state === "PASS" || resolvedByHuman(i)).length;
   const denominator = inScope.length;
   return {
     numerator,
@@ -46,6 +61,8 @@ export function computeCounts(items: Pick<ItemResult, "state">[]): Record<Checkl
 }
 
 type EvaluateOptions = {
+  /** the manual_version being evaluated — stamped onto the result so a stale payload is detectable */
+  manualVersionId?: string;
   templateId: string;
   templateVersion: number;
   /**
@@ -100,6 +117,8 @@ export function evaluateManual(
         }
       }
 
+      const humanEvidenceEligible = isHumanEvidenceEligible(item.checkKey);
+
       // 2. a live reviewer N/A override wins (kept across re-evaluation — §26)
       const override = overrides[item.checkKey] ?? null;
       if (override) {
@@ -109,13 +128,15 @@ export function evaluateManual(
           category: item.category,
           required: item.required,
           publishBlocking: item.publishBlocking,
-          state: "NOT_APPLICABLE",
+          state: "NOT_APPLICABLE" as ChecklistState,
           systemState,
-          evaluator: "reviewer",
+          evaluator: "reviewer" as const,
           reason: `Ditandai tidak berlaku oleh reviewer: ${override.reason}`,
           evidence: { ...evidence, systemStateIfReevaluated: systemState },
           navigateSectionKey,
           override,
+          humanEvidenceEligible,
+          humanEvidence: null,
         };
       }
 
@@ -127,15 +148,18 @@ export function evaluateManual(
         publishBlocking: item.publishBlocking,
         state: systemState,
         systemState,
-        evaluator: "system",
+        evaluator: "system" as const,
         reason,
         evidence,
         navigateSectionKey,
         override: null,
+        humanEvidenceEligible,
+        humanEvidence: null,
       };
     });
 
   return {
+    manualVersionId: opts.manualVersionId ?? vm.manualVersion.id,
     templateId: opts.templateId,
     templateVersion: opts.templateVersion,
     pbkScope: scope,

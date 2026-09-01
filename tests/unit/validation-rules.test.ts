@@ -89,9 +89,11 @@ describe("no item silently defaults to PASS (§9 J)", () => {
       expect(view.items.find((i) => i.checkKey === key)!.state, key).toBe("MISSING");
     }
     expect(view.items.filter((i) => i.state === "MISSING").length).toBeGreaterThan(15);
-    // the only PASSes an empty manual can earn are the two "nothing contradicts / nothing prohibited" scans
+    // The only PASSes an all-empty-CONTENT manual can earn are the metadata / "nothing contradicts"
+    // checks that do not depend on chapter body: the two version-metadata checks (§2 — EA + manual
+    // version are two valid semver fields, values may match) and the two "nothing prohibited" scans.
     expect(view.items.filter((i) => i.state === "PASS").map((i) => i.checkKey).sort()).toEqual(
-      ["CHK-NO-PROHIBITED-CLAIMS", "CHK-VERSI-MATCH"],
+      ["CHK-NO-PROHIBITED-CLAIMS", "CHK-VERSI-DUA", "CHK-VERSI-MATCH"],
     );
   });
 });
@@ -393,12 +395,26 @@ describe("CHK-ONBOARDING-MARGIN (PRD-COMP-005, Pasal 5(7))", () => {
 // ===========================================================================
 // identity / version / changelog
 // ===========================================================================
-describe("CHK-VERSI-DUA (PRD-VER-003)", () => {
-  it("WARNING when EA version and manual version are identical", () => {
-    expect(evalKey(base({ eaVersion: "1.0.0", manualVersion: "1.0.0" }), "CHK-VERSI-DUA").state).toBe("WARNING");
+describe("CHK-VERSI-DUA (PRD-VER-003) — UAT-12A/§2: identical semver is VALID, no body prose required", () => {
+  it("PASS when EA version and manual version are identical (two distinct metadata fields)", () => {
+    // the requirement is two DISTINCT metadata concepts, not two different strings
+    expect(evalKey(base({ eaVersion: "1.0.0", manualVersion: "1.0.0" }), "CHK-VERSI-DUA").state).toBe("PASS");
   });
-  it("PASS when both versions are distinct and shown on the cover", () => {
+  it("PASS when both versions are distinct", () => {
     expect(evalKey(base(), "CHK-VERSI-DUA").state).toBe("PASS");
+  });
+  it("PASS even when the Cover body has no 'Dokumentasi ini berlaku untuk versi X.Y.Z' sentence (§2 — that is a separate concern)", () => {
+    const c = passingContent();
+    c.cover = [textBlock("Manual EA TestEA untuk MetaTrader 5. Diterbitkan oleh PT Smartin Advisor Sistem.")];
+    const out = evalKey(base({ content: c, eaVersion: "1.0.0", manualVersion: "1.0.0" }), "CHK-VERSI-DUA");
+    expect(out.state).toBe("PASS");
+    expect(out.reason).not.toMatch(/berlaku untuk versi/i);
+  });
+  it("WARNING only when a version is not valid semver", () => {
+    expect(evalKey(base({ eaVersion: "v1", manualVersion: "1.0.0" }), "CHK-VERSI-DUA").state).toBe("WARNING");
+  });
+  it("MISSING when a version value is absent", () => {
+    expect(evalKey(base({ eaVersion: "" }), "CHK-VERSI-DUA").state).toBe("MISSING");
   });
 });
 

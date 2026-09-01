@@ -54,25 +54,41 @@ export function ReviewControls(props: ReviewControlsProps) {
   // --- DRAFT: submit for technical review ---
   if (props.status === "DRAFT") {
     if (!props.canSubmit) return null;
-    const reason =
-      props.blockingReasons.length > 0
-        ? "Lengkapi item wajib terlebih dahulu."
-        : !props.technicalReviewerSet
-          ? "Reviewer teknis belum ditetapkan."
-          : !props.complianceReviewerSet
-            ? "Reviewer kepatuhan belum ditetapkan."
-            : null;
+    const missingReviewers = [
+      !props.technicalReviewerSet ? "Reviewer teknis belum ditetapkan" : null,
+      !props.complianceReviewerSet ? "Reviewer kepatuhan belum ditetapkan" : null,
+    ].filter((x): x is string => x !== null);
+    const blockerCount = props.blockingReasons.length + missingReviewers.length;
+    const blocked = blockerCount > 0;
     return (
       <div className="review-controls">
         <button
           className="primary-button"
-          disabled={pending || reason !== null}
-          title={reason ?? "Kirim manual untuk review teknis"}
+          disabled={pending || blocked}
+          title={blocked ? "Belum siap dikirim" : "Kirim manual untuk review teknis"}
           onClick={() => run(() => submitForTechnicalReview({ manualId: props.manualId }))}
         >
           <Send aria-hidden="true" size={15} /> Kirim review
         </button>
-        {reason && <p className="review-controls-reason">{reason}</p>}
+        {blocked && (
+          <details className="review-blockers">
+            <summary>
+              Belum siap dikirim · {blockerCount} hal perlu dilengkapi
+            </summary>
+            <ul>
+              {props.blockingReasons.map((r, i) => (
+                <li key={`b${i}`}>{r}</li>
+              ))}
+              {missingReviewers.map((r, i) => (
+                <li key={`r${i}`}>
+                  {r}
+                  {" — "}
+                  <span className="review-blocker-owner">ditetapkan oleh Admin (tab Metadata)</span>
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
         {error && (
           <p className="review-controls-error" role="alert">
             <AlertTriangle aria-hidden="true" size={13} /> {error}

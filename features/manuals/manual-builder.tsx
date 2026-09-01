@@ -31,6 +31,8 @@ import {
 import { uploadManualImage, updateImageAsset, signImageUrl } from "@/features/images/actions";
 import { sectionCompletionBlockers, eaDeclaresDangerMode } from "@/lib/domain/section-completion";
 import type { OrgImage } from "@/features/images/queries";
+import type { ParameterGroupWithParams } from "@/features/parameters/queries";
+import { getParameterGroups } from "@/features/parameters/actions";
 
 export type ReviewBundle = {
   manualId: string;
@@ -120,11 +122,13 @@ function Inspector({
   completionBlockers,
   aiProviderMode,
   manualId,
+  manualVersionId,
   aiTarget,
   aiApplyState,
   editorRef,
   initialValidation,
   validationNonce,
+  evidenceSections,
   onNavigateSection,
   onFocusBlock,
   onTab,
@@ -143,11 +147,13 @@ function Inspector({
   completionBlockers: string[];
   aiProviderMode: "mock" | "configured" | "config-error";
   manualId: string;
+  manualVersionId: string;
   aiTarget: AiBlockTarget | null;
   aiApplyState: SaveState | null;
   editorRef: React.RefObject<SectionEditorHandle | null>;
   initialValidation: ValidationView | null;
   validationNonce: number;
+  evidenceSections: { id: string; key: string; title: string; blocks: { id: string; label: string }[] }[];
   onNavigateSection: (sectionKey: string) => void;
   onFocusBlock: (sectionKey: string, blockId: string) => void;
   onTab: (t: InspectorTab) => void;
@@ -205,9 +211,11 @@ function Inspector({
         <div className="inspector-content">
           <ValidationPanel
             manualId={manualId}
+            manualVersionId={manualVersionId}
             canReview={canReview}
             initial={initialValidation}
             refreshNonce={validationNonce}
+            evidenceSections={evidenceSections}
             onNavigateSection={onNavigateSection}
           />
           <section>
@@ -345,8 +353,8 @@ function Inspector({
                   </dd>
                 </div>
               </dl>
-              <p className="publish-phase7-note">
-                Snapshot publik telah dibuat. Halaman publik tersedia pada Phase 7.
+              <p className="publish-snapshot-note">
+                Snapshot publik telah dibuat; halaman publik untuk versi ini sudah tersedia.
               </p>
             </section>
           )}
@@ -381,6 +389,7 @@ export function ManualBuilder({
   canReview = false,
   images: initialImages = [],
   groups = [],
+  parameterGroups: initialParameterGroups = [],
   aiProviderMode = "mock",
   initialValidation = null,
   review = null,
@@ -393,6 +402,7 @@ export function ManualBuilder({
   canReview?: boolean;
   images?: OrgImage[];
   groups?: { id: string; name: string; count: number }[];
+  parameterGroups?: ParameterGroupWithParams[];
   aiProviderMode?: "mock" | "configured" | "config-error";
   initialValidation?: ValidationView | null;
   review?: ReviewBundle | null;
@@ -402,7 +412,29 @@ export function ManualBuilder({
 }) {
   const identity = manualIdentity(vm);
   const [sections, setSections] = useState(vm.sections);
-  const [selectedId, setSelectedId] = useState(vm.sections[0]?.id ?? "");
+  // UAT-25 — restore the last-edited chapter when returning to the editor (per manual, per tab).
+  const chapterMemoKey = `smb:lastChapter:${vm.manual.id}`;
+  const [selectedId, setSelectedIdRaw] = useState(() => {
+    const first = vm.sections[0]?.id ?? "";
+    if (typeof window === "undefined") return first;
+    try {
+      const saved = window.sessionStorage.getItem(chapterMemoKey);
+      return saved && vm.sections.some((s) => s.id === saved) ? saved : first;
+    } catch {
+      return first;
+    }
+  });
+  const setSelectedId = useCallback(
+    (id: string) => {
+      setSelectedIdRaw(id);
+      try {
+        window.sessionStorage.setItem(chapterMemoKey, id);
+      } catch {
+        /* private mode / storage disabled — non-fatal */
+      }
+    },
+    [chapterMemoKey],
+  );
   const [mobilePanel, setMobilePanel] = useState<"chapters" | "inspector" | null>(null);
   const [tab, setTab] = useState<InspectorTab>("Validasi");
   const [pendingBlockFocus, setPendingBlockFocus] = useState<string | null>(null);
@@ -430,7 +462,7 @@ export function ManualBuilder({
         setMobilePanel(null);
       }
     },
-    [vm.sections],
+    [vm.sections, setSelectedId],
   );
 
   // Review-comment anchor navigation (§17): jump to the block's section, then focus + flash the
@@ -442,7 +474,7 @@ export function ManualBuilder({
       setMobilePanel(null);
       setPendingBlockFocus(blockId);
     },
-    [vm.sections],
+    [vm.sections, setSelectedId],
   );
   useEffect(() => {
     if (!pendingBlockFocus) return;
@@ -457,6 +489,18 @@ export function ManualBuilder({
   );
   const section = useMemo(() => sections.find((s) => s.id === selectedId) ?? sections[0], [sections, selectedId]);
   const sectionId = section?.id ?? "";
+
+  // UAT-35 — slim chapter/block list for the human-evidence chapter+block picker in the inspector
+  const evidenceSections = useMemo(
+    () =>
+      sections.map((s) => ({
+        id: s.id,
+        key: s.key,
+        title: s.title,
+        blocks: s.blocks.map((b, i) => ({ id: b.id, label: `Blok #${i + 1} · ${b.type}` })),
+      })),
+    [sections],
+  );
 
   // the AI target belongs to the mounted SectionEditor — drop it when the chapter changes
   // (store-previous-prop render-phase reset; see react.dev "You Might Not Need an Effect")
@@ -622,7 +666,7 @@ export function ManualBuilder({
         setSelectedId(res.data.id);
       });
     },
-    [vm.manualVersion.id],
+    [vm.manualVersion.id, setSelectedId],
   );
 
   const handleRenameChapter = useCallback(
@@ -658,14 +702,30 @@ export function ManualBuilder({
         }
       });
     },
-    [selectedId, completionSaver],
+    [selectedId, completionSaver, setSelectedId],
   );
+
+  // -------------------------------------------------------------- parameter groups (inline mgmt)
+  const [paramGroups, setParamGroups] = useState<ParameterGroupWithParams[]>(initialParameterGroups);
+  const groupSummaries = useMemo(
+    () => paramGroups.map((g) => ({ id: g.id, name: g.name, count: g.parameters.length })),
+    [paramGroups],
+  );
+  const handleParametersChanged = useCallback(() => {
+    void getParameterGroups({ eaVersionId: vm.eaVersion.id }).then((res) => {
+      if (res.ok) setParamGroups(res.data.groups);
+    });
+    scheduleValidationRefresh();
+  }, [vm.eaVersion.id, scheduleValidationRefresh]);
 
   // -------------------------------------------------------------- image ctx
   const editorCtx: BlockEditorCtx = useMemo(
     () => ({
       images,
-      groups,
+      groups: groupSummaries.length ? groupSummaries : groups,
+      eaVersionId: vm.eaVersion.id,
+      parameterGroupsFull: paramGroups,
+      onParametersChanged: handleParametersChanged,
       onUploadImage: async (file, altText) => {
         const fd = new FormData();
         fd.set("file", file);
@@ -697,7 +757,7 @@ export function ManualBuilder({
         );
       },
     }),
-    [images, groups],
+    [images, groups, groupSummaries, paramGroups, vm.eaVersion.id, handleParametersChanged],
   );
 
   const chapterNavProps = {
@@ -734,8 +794,8 @@ export function ManualBuilder({
           )}
         </div>
         <div className="builder-top-actions">
-          <Link className="secondary-button" href={`/manuals/${vm.manual.id}/preview`}>
-            <Eye aria-hidden="true" size={17} /> Preview manual
+          <Link className="secondary-button compact-action" href={`/manuals/${vm.manual.id}/preview`} prefetch>
+            <Eye aria-hidden="true" size={16} /> Preview
           </Link>
           {review && (
             <ReviewControls
@@ -794,12 +854,44 @@ export function ManualBuilder({
               <p className="eyebrow">BAB {String(section?.position ?? 0).padStart(2, "0")}</p>
               <h1 id="chapter-title">{section?.title}</h1>
             </div>
-            <div>
+            <div className="editor-toolbar-right">
               <span className="block-count">
                 {(section && blockCounts[section.id]) ?? section?.blocks.length ?? 0} blok
               </span>
+              {section &&
+                (canEdit ? (
+                  <label className="chapter-completion" data-state={section.completionState}>
+                    <span className="sr-only">Status bab {section.title}</span>
+                    <StateIcon state={section.completionState} />
+                    <select
+                      aria-label={`Status penyelesaian bab ${section.title}`}
+                      value={section.completionState}
+                      onChange={(e) => setCompletion(e.target.value as CompletionState)}
+                    >
+                      {(["incomplete", "in_progress", "complete", "issue"] as const).map((s) => (
+                        <option
+                          key={s}
+                          value={s}
+                          disabled={s === "complete" && completionBlockers.length > 0}
+                        >
+                          {COMPLETION_LABEL[s]}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : (
+                  <span className="chapter-completion" data-state={section.completionState}>
+                    <StateIcon state={section.completionState} /> {COMPLETION_LABEL[section.completionState]}
+                  </span>
+                ))}
             </div>
           </div>
+          {section && canEdit && section.completionState !== "complete" && completionBlockers.length > 0 && (
+            <p className="chapter-completion-blocked" role="status">
+              <AlertTriangle aria-hidden="true" size={13} /> Belum bisa ditandai selesai: {completionBlockers[0]}
+              {completionBlockers.length > 1 && ` (+${completionBlockers.length - 1} lagi)`}
+            </p>
+          )}
           {section && (
             <SectionEditor
               key={section.id}
@@ -844,11 +936,13 @@ export function ManualBuilder({
             completionBlockers={completionBlockers}
             aiProviderMode={aiProviderMode}
             manualId={vm.manual.id}
+            manualVersionId={vm.manualVersion.id}
             aiTarget={aiTarget}
             aiApplyState={aiApplyState}
             editorRef={sectionEditorRef}
             initialValidation={initialValidation}
             validationNonce={validationNonce}
+            evidenceSections={evidenceSections}
             onNavigateSection={navigateToSection}
             onFocusBlock={handleFocusBlock}
             onTab={setTab}
@@ -879,11 +973,13 @@ export function ManualBuilder({
               completionBlockers={completionBlockers}
               aiProviderMode={aiProviderMode}
               manualId={vm.manual.id}
+              manualVersionId={vm.manualVersion.id}
               aiTarget={aiTarget}
               aiApplyState={aiApplyState}
               editorRef={sectionEditorRef}
               initialValidation={initialValidation}
               validationNonce={validationNonce}
+              evidenceSections={evidenceSections}
               onNavigateSection={navigateToSection}
               onFocusBlock={handleFocusBlock}
               onTab={setTab}

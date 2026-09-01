@@ -146,7 +146,7 @@ describe.skipIf(!RUN)("AC-P7-4 visual — shared manual document", () => {
         calloutHasBg: calloutBg.every((c) => c !== "rgba(0, 0, 0, 0)" && c !== "transparent"),
         paramTables: all(".a4-document table.parameter-table").length,
         longParamTable: bigTable,
-        faqHeadings: all(".a4-document .manual-content > h3").length,
+        faqHeadings: all(".a4-document .manual-faq-item > h3, .a4-document .manual-content > h3").length,
         figures: figs.length,
         figuresWithCaption: figs.filter((f) => f.querySelector("figcaption")).length,
         imagesDecoded: [...document.images].every((im) => im.complete && im.naturalWidth > 0),

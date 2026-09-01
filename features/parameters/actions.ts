@@ -1,5 +1,6 @@
 "use server";
 
+import { z } from "zod";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { mapPostgrestError } from "@/lib/supabase/errors";
 import { requireActiveOrg, AuthError } from "@/lib/auth/context";
@@ -7,6 +8,7 @@ import { assertCan, AuthorizationError } from "@/lib/permissions/actions";
 import { ok, fail, validationFail, type ActionResult } from "@/lib/errors";
 import { writeAudit } from "@/features/audit/write";
 import { nextPosition, validateReorder } from "@/lib/domain/positions";
+import { listParameterGroups, type ParameterGroupWithParams } from "./queries";
 import {
   createGroupSchema,
   createParameterSchema,
@@ -17,6 +19,28 @@ import {
   parameterIdSchema,
   reorderParametersSchema,
 } from "./schema";
+
+/**
+ * Read the parameter groups + parameters for an EA VERSION (GI-11 source of truth). Client-callable
+ * so the inline parameter manager in the Manual Builder can re-read after a mutation without a
+ * full route refresh. Read-only; still `ea_version:read` gated.
+ */
+export async function getParameterGroups(
+  input: unknown,
+): Promise<ActionResult<{ groups: ParameterGroupWithParams[] }>> {
+  try {
+    const { orgId, roles } = await requireActiveOrg();
+    assertCan(roles, "ea_version:read");
+    const parsed = z.object({ eaVersionId: z.uuid() }).safeParse(input);
+    if (!parsed.success) return validationFail([{ path: "eaVersionId", message: "ID versi EA tidak valid." }]);
+    const groups = await listParameterGroups(orgId, parsed.data.eaVersionId);
+    return ok({ groups });
+  } catch (e) {
+    if (e instanceof AuthError) return fail(e.code, e.message);
+    if (e instanceof AuthorizationError) return fail("FORBIDDEN", e.message);
+    return fail("INTERNAL", "Gagal memuat parameter.");
+  }
+}
 
 function authFail(e: unknown): ActionResult<never> | null {
   if (e instanceof AuthError) return fail(e.code, e.message);

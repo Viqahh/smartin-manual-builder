@@ -52,6 +52,7 @@ export default async function ManualPreviewPage({
       <header className="preview-toolbar">
         <div>
           <Link
+            prefetch
             className="icon-button"
             href={`/manuals/${manualId}/edit`}
             aria-label={canEdit ? "Kembali ke editor" : "Kembali ke tampilan bab"}
@@ -67,7 +68,7 @@ export default async function ManualPreviewPage({
         </div>
         <div>
           {canEdit && (
-            <Link className="secondary-button" href={`/manuals/${manualId}/edit`}>
+            <Link prefetch className="secondary-button" href={`/manuals/${manualId}/edit`}>
               <Pencil aria-hidden="true" size={17} /> Edit manual
             </Link>
           )}

@@ -1,4 +1,5 @@
 import { AlertTriangle, Info, Lightbulb } from "lucide-react";
+import { faqItems } from "@/lib/domain/blocks";
 import { BROKER_MIN_LOT_NOTE_ID } from "@/lib/domain/setups";
 import {
   chapterAnchor,
@@ -150,9 +151,13 @@ function BlockView({ block, vm }: { block: Block; vm: ManualViewModel }) {
     }
     case "faq":
       return (
-        <div className="manual-content">
-          <h3>{String(block.payload.question ?? "")}</h3>
-          <RichTextView value={block.payload.answer} />
+        <div className="manual-content manual-faq">
+          {faqItems(block.payload).map((item, i) => (
+            <div className="manual-faq-item" key={i}>
+              <h3>{item.question}</h3>
+              <RichTextView value={item.answer} />
+            </div>
+          ))}
         </div>
       );
     default:

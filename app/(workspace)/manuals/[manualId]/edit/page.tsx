@@ -161,11 +161,15 @@ export default async function ManualBuilderPage({
 
   return (
     <ManualBuilder
+      // remount cleanly when the route switches to a different manual — every `useState(prop)`
+      // in the builder (sections, validation view, block counts) is seeded once at mount.
+      key={vm.manual.id}
       vm={vm}
       canEdit={canEdit}
       canReview={canReview}
       images={images}
       groups={groups.map((g) => ({ id: g.id, name: g.name, count: g.parameters.length }))}
+      parameterGroups={groups}
       aiProviderMode={currentProviderMode()}
       initialValidation={validation}
       review={review}

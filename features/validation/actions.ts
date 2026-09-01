@@ -22,7 +22,17 @@ import { SupabaseManualDataSource } from "@/features/manuals/data-source";
 import { assembleManualViewModel } from "@/lib/manual/view-model";
 import { evaluateManual, computeScore, computeEligibility, computeCounts } from "@/lib/validation/evaluate";
 import { CHECKLIST_V1 } from "@/lib/validation/rules";
-import type { ChecklistItemDef, ChecklistState, ItemResult, ValidationView } from "@/lib/validation/types";
+import { isHumanEvidenceEligible } from "@/lib/validation/types";
+import { evidenceFingerprint } from "@/lib/validation/evidence";
+import type {
+  ChecklistItemDef,
+  ChecklistState,
+  EvidenceStatus,
+  HumanEvidence,
+  ItemResult,
+  ValidationView,
+} from "@/lib/validation/types";
+import type { ManualViewModel } from "@/lib/manual/view-model";
 
 const manualRef = z.object({ manualId: z.uuid() });
 const overrideInput = z.object({
@@ -114,6 +124,101 @@ async function resolveActorNames(ids: string[]): Promise<Map<string, string>> {
 }
 
 // ---------------------------------------------------------------------------
+// UAT-35 — human-evidence submissions. Read-only overlay on the ValidationView. The
+// deterministic checklist_results row is NEVER touched; this attaches a parallel human record
+// and re-derives the readiness fraction only.
+// ---------------------------------------------------------------------------
+type EvidenceRow = {
+  id: string;
+  check_key: string;
+  status: EvidenceStatus;
+  automated_state_at_submit: ChecklistState;
+  submitted_by: string;
+  submitted_at: string;
+  section_id: string | null;
+  block_id: string | null;
+  note: string | null;
+  decided_by: string | null;
+  decided_at: string | null;
+  decision_review_type: "TECHNICAL" | "COMPLIANCE" | null;
+  return_reason: string | null;
+  evidence_content_hash: string;
+  checklist_template_id: string;
+};
+
+async function loadEvidence(manualVersionId: string): Promise<EvidenceRow[]> {
+  const supabase = await createSupabaseServerClient();
+  const { data } = await supabase
+    .from("checklist_evidence_submissions")
+    .select(
+      "id, check_key, status, automated_state_at_submit, submitted_by, submitted_at, section_id, block_id, note, decided_by, decided_at, decision_review_type, return_reason, evidence_content_hash, checklist_template_id",
+    )
+    .eq("manual_version_id", manualVersionId)
+    .order("submitted_at", { ascending: false });
+  return (data ?? []) as EvidenceRow[];
+}
+
+/** the one submission that matters per check: a live PENDING/ACCEPTED wins, else the newest. */
+function currentEvidenceByCheck(rows: EvidenceRow[]): Map<string, EvidenceRow> {
+  const out = new Map<string, EvidenceRow>();
+  for (const r of rows) {
+    const cur = out.get(r.check_key);
+    const live = (x: EvidenceRow) => x.status === "PENDING" || x.status === "ACCEPTED";
+    if (!cur || (live(r) && !live(cur))) out.set(r.check_key, r);
+  }
+  return out;
+}
+
+async function attachHumanEvidence(view: ValidationView, vm: ManualViewModel): Promise<ValidationView> {
+  const rows = await loadEvidence(vm.manualVersion.id);
+  if (rows.length === 0) return view;
+  const current = currentEvidenceByCheck(rows);
+  const names = await resolveActorNames([
+    ...rows.map((r) => r.submitted_by),
+    ...rows.map((r) => r.decided_by ?? "").filter(Boolean),
+  ]);
+  const sectionKeyById = new Map(vm.sections.map((s) => [s.id, s.key]));
+  const sectionByKey = new Map(vm.sections.map((s) => [s.key, s]));
+
+  const items = view.items.map((it): ItemResult => {
+    const row = current.get(it.checkKey);
+    if (!row) return it;
+    const sectionKey = row.section_id ? sectionKeyById.get(row.section_id) ?? null : null;
+    const section = sectionKey ? sectionByKey.get(sectionKey) ?? null : null;
+    // secondary staleness: recompute the fingerprint from CURRENT content (the DB triggers are the
+    // primary signal; this catches anything they miss and a template-identity change).
+    const drifted =
+      row.checklist_template_id !== view.templateId ||
+      evidenceFingerprint(section, row.block_id) !== row.evidence_content_hash;
+    const isStale = row.status === "STALE" || ((row.status === "PENDING" || row.status === "ACCEPTED") && drifted);
+    const effectiveResolution =
+      row.status === "ACCEPTED" && !isStale && it.humanEvidenceEligible && it.systemState === "WARNING"
+        ? ("RESOLVED_BY_HUMAN_REVIEW" as const)
+        : null;
+    const humanEvidence: HumanEvidence = {
+      id: row.id,
+      status: row.status,
+      automatedStateAtSubmit: row.automated_state_at_submit,
+      submittedByName: names.get(row.submitted_by) ?? null,
+      submittedAt: row.submitted_at,
+      sectionId: row.section_id,
+      sectionKey,
+      blockId: row.block_id,
+      note: row.note,
+      decidedByName: row.decided_by ? names.get(row.decided_by) ?? null : null,
+      decidedAt: row.decided_at,
+      decisionReviewType: row.decision_review_type,
+      returnReason: row.return_reason,
+      isStale,
+      effectiveResolution,
+    };
+    return { ...it, humanEvidence };
+  });
+
+  return { ...view, items, score: computeScore(items) };
+}
+
+// ---------------------------------------------------------------------------
 // Evaluate + persist. Server-owned (service client). Preserves reviewer N/A overrides.
 // ---------------------------------------------------------------------------
 async function evaluateAndPersist(
@@ -140,7 +245,7 @@ async function evaluateAndPersist(
   }
 
   const evaluatedAt = new Date().toISOString();
-  const view = evaluateManual(vm, items, { templateId, templateVersion: version, overrides, evaluatedAt });
+  const view = evaluateManual(vm, items, { manualVersionId: vm.manualVersion.id, templateId, templateVersion: version, overrides, evaluatedAt });
 
   const service = createSupabaseServiceClient();
   const rows = view.items.map((it) => ({
@@ -170,7 +275,7 @@ async function evaluateAndPersist(
     await logServerError("validation", "checklist_results upsert failed", { code: error.code });
     throw new Error("persist failed");
   }
-  return view;
+  return attachHumanEvidence(view, vm);
 }
 
 class NotFound extends Error {}
@@ -179,6 +284,7 @@ class NotFound extends Error {}
 // Shape persisted rows -> ValidationView (no rule re-run).
 // ---------------------------------------------------------------------------
 function shapeFromRows(
+  manualVersionId: string,
   rows: ExistingRow[],
   items: ChecklistItemDef[],
   templateId: string,
@@ -214,9 +320,12 @@ function shapeFromRows(
         evidence: ev,
         navigateSectionKey: (ev._navigateSectionKey as string | null) ?? null,
         override,
+        humanEvidenceEligible: isHumanEvidenceEligible(item.checkKey),
+        humanEvidence: null,
       };
     });
   return {
+    manualVersionId,
     templateId,
     templateVersion,
     pbkScope,
@@ -251,7 +360,7 @@ export async function getValidation(input: unknown): Promise<ActionResult<Valida
     const scope = (vm.eaVersion.requirements?.pbkScope === "OUT_OF_SCOPE" ? "OUT_OF_SCOPE" : "IN_SCOPE") as
       | "IN_SCOPE"
       | "OUT_OF_SCOPE";
-    return ok(shapeFromRows(existing, items, templateId, version, scope, nameMap));
+    return ok(await attachHumanEvidence(shapeFromRows(vm.manualVersion.id, existing, items, templateId, version, scope, nameMap), vm));
   } catch (e) {
     if (e instanceof NotFound) return fail("NOT_FOUND", "Manual tidak ditemukan.");
     return authFail(e) ?? fail("INTERNAL", "Gagal memuat kesiapan dokumentasi.");
@@ -350,4 +459,113 @@ export async function overrideChecklistItem(input: unknown): Promise<ActionResul
     if (e instanceof NotFound) return fail("NOT_FOUND", "Manual tidak ditemukan.");
     return authFail(e) ?? fail("INTERNAL", "Gagal memproses penandaan tidak berlaku.");
   }
+}
+
+// ---------------------------------------------------------------------------
+// UAT-35 — "Sudah ada di manual" human-evidence submission + reviewer decision.
+// Both go through SECURITY DEFINER RPCs (migration 29) called with the USER-scoped client so
+// auth.uid(), role, workflow stage, eligibility, and the WARNING-only rule are enforced in SQL.
+// The fingerprint is computed HERE (server) from the assembled VM — never supplied by the browser.
+// ---------------------------------------------------------------------------
+const submitEvidenceInput = z.object({
+  manualId: z.uuid(),
+  checkKey: z.string().min(3).max(64),
+  sectionKey: z.string().min(1).max(64),
+  blockId: z.uuid().nullish(),
+  note: z.string().trim().max(2000).optional(),
+});
+
+export async function submitChecklistEvidence(input: unknown): Promise<ActionResult<ValidationView>> {
+  try {
+    const { orgId, roles } = await requireActiveOrg();
+    if (!canAny(roles, "manual:update")) {
+      return fail("FORBIDDEN", "Hanya penulis manual yang dapat mengajukan bukti.");
+    }
+    const parsed = submitEvidenceInput.safeParse(input);
+    if (!parsed.success) {
+      return validationFail(parsed.error.issues.map((i) => ({ path: i.path.join("."), message: i.message })));
+    }
+    const { manualId, checkKey, sectionKey, blockId, note } = parsed.data;
+    if (!isHumanEvidenceEligible(checkKey)) {
+      return fail("FORBIDDEN", "Pemeriksaan ini tidak menerima bukti “sudah ada di manual”.");
+    }
+
+    const vm = await assembleManualViewModel(new SupabaseManualDataSource(orgId), manualId);
+    if (!vm) return fail("NOT_FOUND", "Manual tidak ditemukan.");
+    const section = vm.sections.find((s) => s.key === sectionKey);
+    if (!section) return fail("NOT_FOUND", "Bab bukti tidak ditemukan.");
+    if (blockId && !section.blocks.some((b) => b.id === blockId)) {
+      return fail("VALIDATION", "Blok bukti tidak ada di bab tersebut.");
+    }
+
+    const fingerprint = evidenceFingerprint(section, blockId ?? null);
+    const supabase = await createSupabaseServerClient();
+    const { error } = await supabase.rpc("submit_checklist_evidence", {
+      p_manual_version_id: vm.manualVersion.id,
+      p_check_key: checkKey,
+      p_section_id: section.id,
+      p_block_id: blockId ?? null,
+      p_note: note ?? null,
+      p_evidence_hash: fingerprint,
+    });
+    if (error) {
+      await logServerError("validation", "submit_checklist_evidence failed", { code: error.code });
+      return fail("INTERNAL", humanRpcError(error.message) ?? "Gagal mengajukan bukti.");
+    }
+    return getValidation({ manualId });
+  } catch (e) {
+    if (e instanceof NotFound) return fail("NOT_FOUND", "Manual tidak ditemukan.");
+    return authFail(e) ?? fail("INTERNAL", "Gagal mengajukan bukti.");
+  }
+}
+
+const decideEvidenceInput = z.object({
+  manualId: z.uuid(),
+  submissionId: z.uuid(),
+  decision: z.enum(["ACCEPT", "RETURN"]),
+  returnReason: z.string().trim().max(2000).optional(),
+});
+
+export async function decideChecklistEvidence(input: unknown): Promise<ActionResult<ValidationView>> {
+  try {
+    const { roles } = await requireActiveOrg();
+    if (!canReview(roles)) {
+      return fail("FORBIDDEN", "Hanya reviewer yang dapat memutuskan bukti.");
+    }
+    const parsed = decideEvidenceInput.safeParse(input);
+    if (!parsed.success) {
+      return validationFail(parsed.error.issues.map((i) => ({ path: i.path.join("."), message: i.message })));
+    }
+    const { manualId, submissionId, decision, returnReason } = parsed.data;
+    if (decision === "RETURN" && (returnReason ?? "").trim().length < 5) {
+      return validationFail([{ path: "returnReason", message: "Berikan alasan pengembalian minimal 5 karakter." }]);
+    }
+    const supabase = await createSupabaseServerClient();
+    const { error } = await supabase.rpc("decide_checklist_evidence", {
+      p_submission_id: submissionId,
+      p_decision: decision,
+      p_return_reason: returnReason ?? null,
+    });
+    if (error) {
+      await logServerError("validation", "decide_checklist_evidence failed", { code: error.code });
+      return fail("INTERNAL", humanRpcError(error.message) ?? "Gagal memproses keputusan bukti.");
+    }
+    return getValidation({ manualId });
+  } catch (e) {
+    if (e instanceof NotFound) return fail("NOT_FOUND", "Manual tidak ditemukan.");
+    return authFail(e) ?? fail("INTERNAL", "Gagal memproses keputusan bukti.");
+  }
+}
+
+/** surface the safe, user-meaningful part of a known RPC exception; hide the rest. */
+function humanRpcError(msg: string): string | null {
+  const m = msg.toLowerCase();
+  if (m.includes("does not accept")) return "Pemeriksaan ini tidak menerima bukti “sudah ada di manual”.";
+  if (m.includes("only a warning result")) return "Bukti manusia hanya berlaku untuk hasil berstatus “Perlu ditinjau”.";
+  if (m.includes("live evidence submission already exists")) return "Sudah ada bukti aktif untuk pemeriksaan ini.";
+  if (m.includes("only be submitted while the manual is editable")) return "Bukti hanya dapat diajukan saat manual masih dapat disunting.";
+  if (m.includes("assigned reviewer of the current review stage")) return "Hanya reviewer yang ditugaskan pada tahap review saat ini yang dapat memutuskan.";
+  if (m.includes("return needs a reason")) return "Pengembalian memerlukan alasan.";
+  if (m.includes("not been evaluated")) return "Jalankan “Perbarui” dulu agar pemeriksaan ini dievaluasi.";
+  return null;
 }

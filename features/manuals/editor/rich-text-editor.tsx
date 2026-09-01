@@ -13,18 +13,32 @@ import { stableStringify } from "@/lib/editor/autosave-queue";
  * set (`buildEditorExtensions`) can only produce allowlisted nodes/marks; pasted HTML is mapped
  * by TipTap onto that set and re-sanitised via `transformPastedHTML` before it enters the doc.
  */
+/** true when the doc has no visible text (only empty paragraphs / whitespace). */
+function isDocEmpty(doc: RichTextDoc): boolean {
+  const walk = (n: unknown): string => {
+    if (!n || typeof n !== "object") return "";
+    const node = n as { text?: string; content?: unknown[] };
+    if (typeof node.text === "string") return node.text;
+    return (node.content ?? []).map(walk).join("");
+  };
+  return walk(doc).trim().length === 0;
+}
+
 export function RichTextEditor({
   value,
   onChange,
   readOnly = false,
   ariaLabel,
   minimalToolbar = false,
+  placeholder,
 }: {
   value: RichTextDoc;
   onChange: (doc: RichTextDoc) => void;
   readOnly?: boolean;
   ariaLabel: string;
   minimalToolbar?: boolean;
+  /** UI-only helper text shown when the surface is empty — never persisted, never in output. */
+  placeholder?: string;
 }) {
   // canonical form of the doc this editor last emitted — so an incoming `value` that is just the
   // echo of our own keystroke is ignored, but an EXTERNAL change (app-level undo/redo, or the
@@ -70,6 +84,8 @@ export function RichTextEditor({
   }, [editor, value]);
 
   if (!editor) return <div className="rte" aria-busy="true" />;
+
+  const showPlaceholder = !readOnly && !!placeholder && isDocEmpty(editor.getJSON() as RichTextDoc);
 
   if (readOnly) {
     return (
@@ -140,7 +156,14 @@ export function RichTextEditor({
           <Redo2 aria-hidden="true" size={15} />
         </button>
       </div>
-      <EditorContent editor={editor} />
+      <div className="rte-body">
+        {showPlaceholder && (
+          <span className="rte-placeholder" aria-hidden="true" onMouseDown={() => editor.chain().focus().run()}>
+            {placeholder}
+          </span>
+        )}
+        <EditorContent editor={editor} />
+      </div>
     </div>
   );
 }

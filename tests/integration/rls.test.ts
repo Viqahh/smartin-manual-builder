@@ -4600,3 +4600,246 @@ describe.skipIf(!HAS_SERVICE)("Phase 7 slice 1 — global publication namespace"
     expect(await snapRow(mv1.id), "snapshot now exists").toBeTruthy();
   });
 });
+
+// ===========================================================================
+// UAT-35 — human-evidence ("Sudah ada di manual") workflow. Machine false-negative WARNING only;
+// deterministic checklist_results.state is NEVER rewritten; MISSING is never cleared.
+// ===========================================================================
+describe.skipIf(!HAS_SERVICE)("UAT-35 — checklist human-evidence submissions", () => {
+  const svc = () => service();
+  const CT = "c5000000-0000-4000-8000-000000000001"; // active checklist template v1
+  const createdManualIds: string[] = [];
+  let dev!: SupabaseClient, technical!: SupabaseClient, compliance!: SupabaseClient, outsider!: SupabaseClient;
+  let DEV = "", REV = "", COMP = "";
+  let MV = "", SECTION = "", BLOCK = "", OTHER_BLOCK = "";
+
+  const seedResult = (key: string, state: string, required = true) =>
+    svc().from("checklist_results").insert({
+      organization_id: ORG_A, manual_version_id: MV, checklist_template_id: CT, checklist_template_version: 1,
+      check_key: key, category: "identity", required, state, evaluator: "system",
+    });
+
+  async function freshManual() {
+    const manual = must(
+      await svc().from("manuals").insert({ organization_id: ORG_A, ea_product_id: VMAX_PRODUCT, template_id: SYSTEM_TEMPLATE, locale: "id" }).select("id").single(),
+      "insert manual",
+    ) as { id: string };
+    createdManualIds.push(manual.id);
+    const mv = must(
+      await svc().from("manual_versions").insert({
+        organization_id: ORG_A, manual_id: manual.id, ea_version_id: VMAX_EA_VERSION,
+        version: `0.${Math.floor(Math.random()*100000)}.0`, template_id: SYSTEM_TEMPLATE, template_version: 1,
+      }).select("id").single(),
+      "insert mv",
+    ) as { id: string };
+    const sec = must(
+      await svc().from("manual_sections").insert({
+        organization_id: ORG_A, manual_version_id: mv.id, section_key: `installation-${rnd()}`,
+        title: "Instalasi", required: false, is_custom: true, position: 0,
+      }).select("id").single(),
+      "insert section",
+    ) as { id: string };
+    const blk = must(
+      await svc().from("manual_blocks").insert({
+        organization_id: ORG_A, manual_section_id: sec.id, block_type: "text",
+        payload: { type: "text", schemaVersion: 1, content: { schemaVersion: 2, format: "doc", doc: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Aktifkan Algo Trading, lalu pastikan ikon status hijau." }] }] } } },
+        position: 0,
+      }).select("id").single(),
+      "insert block",
+    ) as { id: string };
+    return { mvId: mv.id, sectionId: sec.id, blockId: blk.id };
+  }
+
+  const HASH = "a".repeat(64);
+  const submit = (client: SupabaseClient, over: Record<string, unknown> = {}) =>
+    client.rpc("submit_checklist_evidence", {
+      p_manual_version_id: MV, p_check_key: "CHK-INSTALL-AUTOTRADING",
+      p_section_id: SECTION, p_block_id: null, p_note: "paragraf menjelaskan verifikasi status", p_evidence_hash: HASH,
+      ...over,
+    });
+  const liveRow = async () =>
+    (await svc().from("checklist_evidence_submissions").select("*").eq("manual_version_id", MV).eq("check_key", "CHK-INSTALL-AUTOTRADING").order("submitted_at", { ascending: false })).data ?? [];
+
+  beforeAll(async () => {
+    dev = await signIn("developer@smartin.demo");
+    technical = await signIn("reviewer@smartin.demo");
+    compliance = await signIn("compliance@smartin.demo");
+    outsider = await signIn("outsider@smartin.demo");
+    DEV = (await dev.auth.getUser()).data.user!.id;
+    REV = (await technical.auth.getUser()).data.user!.id;
+    COMP = (await compliance.auth.getUser()).data.user!.id;
+    const f = await freshManual();
+    MV = f.mvId; SECTION = f.sectionId; BLOCK = f.blockId;
+    const other = await freshManual();
+    OTHER_BLOCK = other.blockId;
+    await seedResult("CHK-INSTALL-AUTOTRADING", "WARNING"); // eligible — prose-detection false negative
+    await seedResult("CHK-INSTALASI", "MISSING"); // publish-blocking + MISSING + not eligible
+    // WARNING but INELIGIBLE per the explicit audit — must all be rejected by the RPC:
+    await seedResult("CHK-VERSI-DUA", "WARNING"); // author-owned, but invalid-SemVer data-quality (not prose)
+    await seedResult("CHK-CARA-KERJA", "WARNING"); // source-of-truth (strategy)
+    await seedResult("CHK-PARAM-DEFAULT-MATCH", "WARNING"); // source-of-truth (EA-Version defaults)
+    await seedResult("CHK-KONTAK", "WARNING"); // organisation (EA-Version support data)
+    await seedResult("CHK-DEV-LEGAL", "WARNING"); // organisation
+    await seedResult("CHK-NO-PROHIBITED-CLAIMS", "WARNING"); // compliance (claim scan)
+    await seedResult("CHK-TRANSPARANSI", "WARNING"); // compliance
+  });
+
+  afterAll(async () => {
+    if (!HAS_SERVICE) return;
+    for (const id of createdManualIds) await svc().from("manuals").delete().eq("id", id);
+  });
+
+  beforeEach(async () => {
+    await svc().from("checklist_evidence_submissions").delete().eq("manual_version_id", MV);
+    await svc().from("manual_versions").update({ status: "DRAFT", technical_reviewer_id: null, compliance_reviewer_id: null }).eq("id", MV);
+    await svc().from("checklist_results").update({ state: "WARNING" }).eq("manual_version_id", MV).eq("check_key", "CHK-INSTALL-AUTOTRADING");
+  });
+
+  it("an eligible WARNING check accepts an author submission; automated state is UNCHANGED", async () => {
+    const r = await submit(dev);
+    expect(r.error, "developer submits evidence for an eligible WARNING check").toBeNull();
+    const rows = await liveRow();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe("PENDING");
+    expect(rows[0].automated_state_at_submit).toBe("WARNING");
+    expect(rows[0].submitted_by).toBe(DEV);
+    const cr = (await svc().from("checklist_results").select("state").eq("manual_version_id", MV).eq("check_key", "CHK-INSTALL-AUTOTRADING").single()).data;
+    expect(cr!.state, "deterministic result stays WARNING").toBe("WARNING");
+  });
+
+  it("INELIGIBLE WARNING checks are ALL rejected — including CHK-VERSI-DUA (invalid-SemVer data, not prose)", async () => {
+    for (const key of [
+      "CHK-VERSI-DUA", // author-owned WARNING, but a data-quality defect — re-audited INELIGIBLE
+      "CHK-CARA-KERJA", // source-of-truth (strategy)
+      "CHK-PARAM-DEFAULT-MATCH", // source-of-truth (EA-Version defaults)
+      "CHK-KONTAK", // organisation (EA-Version support data)
+      "CHK-DEV-LEGAL", // organisation
+      "CHK-NO-PROHIBITED-CLAIMS", // compliance (claim scan)
+      "CHK-TRANSPARANSI", // compliance
+    ]) {
+      const r = await dev.rpc("submit_checklist_evidence", {
+        p_manual_version_id: MV, p_check_key: key, p_section_id: SECTION, p_block_id: null, p_note: null, p_evidence_hash: HASH,
+      });
+      expect(r.error?.message ?? "", `${key} (ineligible WARNING) must be rejected`).toMatch(/does not accept/i);
+    }
+  });
+
+  it("a MISSING result is rejected even for an eligible check — a missing fact can't be attested", async () => {
+    await svc().from("checklist_results").update({ state: "MISSING" }).eq("manual_version_id", MV).eq("check_key", "CHK-INSTALL-AUTOTRADING");
+    const r = await submit(dev);
+    expect(r.error?.message ?? "", "MISSING rejected").toMatch(/only to a WARNING/i);
+  });
+
+  it("a cross-manual block anchor is rejected (anchor trigger)", async () => {
+    const r = await submit(dev, { p_block_id: OTHER_BLOCK, p_section_id: SECTION });
+    expect(r.error, "block from another manual version rejected").toBeTruthy();
+  });
+
+  it("a reviewer / outsider cannot submit (author-only)", async () => {
+    expect((await submit(technical)).error, "technical reviewer cannot submit").toBeTruthy();
+    expect((await submit(outsider)).error, "org B cannot submit").toBeTruthy();
+  });
+
+  it("submission is rejected once the manual leaves an editable status", async () => {
+    await svc().from("manual_versions").update({ status: "TECHNICAL_REVIEW", technical_reviewer_id: REV, compliance_reviewer_id: COMP }).eq("id", MV);
+    const r = await submit(dev);
+    expect(r.error?.message ?? "", "not editable").toMatch(/editable/i);
+  });
+
+  it("only the assigned reviewer of the CURRENT stage may decide; review type is server-derived", async () => {
+    await submit(dev);
+    const id = (await liveRow())[0].id;
+    expect((await technical.rpc("decide_checklist_evidence", { p_submission_id: id, p_decision: "ACCEPT", p_return_reason: null })).error, "no decision in DRAFT").toBeTruthy();
+    await svc().from("manual_versions").update({ status: "TECHNICAL_REVIEW", technical_reviewer_id: REV, compliance_reviewer_id: COMP }).eq("id", MV);
+    expect((await compliance.rpc("decide_checklist_evidence", { p_submission_id: id, p_decision: "ACCEPT", p_return_reason: null })).error, "compliance reviewer wrong for technical stage").toBeTruthy();
+    expect((await outsider.rpc("decide_checklist_evidence", { p_submission_id: id, p_decision: "ACCEPT", p_return_reason: null })).error, "outsider cannot decide").toBeTruthy();
+    const ok = await technical.rpc("decide_checklist_evidence", { p_submission_id: id, p_decision: "ACCEPT", p_return_reason: null });
+    expect(ok.error, "assigned technical reviewer accepts").toBeNull();
+    const row = (await liveRow())[0];
+    expect(row.status).toBe("ACCEPTED");
+    expect(row.decided_by).toBe(REV);
+    expect(row.decision_review_type, "type derived from the stage, not the client").toBe("TECHNICAL");
+    const cr = (await svc().from("checklist_results").select("state").eq("manual_version_id", MV).eq("check_key", "CHK-INSTALL-AUTOTRADING").single()).data;
+    expect(cr!.state, "still WARNING after acceptance").toBe("WARNING");
+  });
+
+  it("RETURN requires a reason; a returned row is historical and resubmission inserts a NEW row", async () => {
+    await submit(dev);
+    const id = (await liveRow())[0].id;
+    await svc().from("manual_versions").update({ status: "TECHNICAL_REVIEW", technical_reviewer_id: REV, compliance_reviewer_id: COMP }).eq("id", MV);
+    expect((await technical.rpc("decide_checklist_evidence", { p_submission_id: id, p_decision: "RETURN", p_return_reason: "  " })).error?.message ?? "").toMatch(/reason/i);
+    const ret = await technical.rpc("decide_checklist_evidence", { p_submission_id: id, p_decision: "RETURN", p_return_reason: "bab yang dirujuk belum menjelaskan verifikasi" });
+    expect(ret.error).toBeNull();
+    await svc().from("manual_versions").update({ status: "CHANGES_REQUESTED" }).eq("id", MV);
+    const again = await submit(dev);
+    expect(again.error, "author resubmits after a return").toBeNull();
+    const rows = await liveRow();
+    expect(rows).toHaveLength(2);
+    expect(rows.filter((r: { status: string }) => r.status === "RETURNED")).toHaveLength(1);
+    expect(rows.filter((r: { status: string }) => r.status === "PENDING")).toHaveLength(1);
+  });
+
+  it("editing the anchored chapter content STALES a live submission", async () => {
+    await submit(dev);
+    await svc().from("manual_blocks").update({
+      payload: { type: "text", schemaVersion: 1, content: { schemaVersion: 2, format: "doc", doc: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "teks yang sudah diubah total" }] }] } } },
+    }).eq("id", BLOCK);
+    expect((await liveRow())[0].status, "content changed → STALE").toBe("STALE");
+  });
+
+  it("soft-deleting a block in the anchored chapter STALES a live submission", async () => {
+    await submit(dev);
+    await svc().from("manual_blocks").update({ deleted_at: new Date().toISOString() }).eq("id", BLOCK);
+    expect((await liveRow())[0].status).toBe("STALE");
+    await svc().from("manual_blocks").update({ deleted_at: null }).eq("id", BLOCK);
+  });
+
+  it("audit events are written for submit + accept", async () => {
+    await submit(dev);
+    const id = (await liveRow())[0].id;
+    await svc().from("manual_versions").update({ status: "TECHNICAL_REVIEW", technical_reviewer_id: REV, compliance_reviewer_id: COMP }).eq("id", MV);
+    await technical.rpc("decide_checklist_evidence", { p_submission_id: id, p_decision: "ACCEPT", p_return_reason: null });
+    const actions = ((await svc().from("audit_events").select("action").eq("entity_type", "checklist_evidence_submission").eq("entity_id", id)).data ?? []).map((r: { action: string }) => r.action);
+    expect(actions).toContain("checklist_evidence:submitted");
+    expect(actions).toContain("checklist_evidence:accepted");
+  });
+
+  it("RLS: an org-B user cannot read org-A evidence rows", async () => {
+    await submit(dev);
+    const seen = (await outsider.from("checklist_evidence_submissions").select("id").eq("manual_version_id", MV)).data ?? [];
+    expect(seen).toHaveLength(0);
+  });
+
+  it("publish gate (app.publish_warning_blockers): eligible+ACCEPTED excused; ineligible / MISSING / STALE never excused", async () => {
+    await svc().from("checklist_results").update({ state: "WARNING" }).eq("manual_version_id", MV).eq("check_key", "CHK-INSTALASI");
+    await svc().from("checklist_evidence_submissions").insert({
+      organization_id: ORG_A, manual_version_id: MV, checklist_template_id: CT, checklist_template_version: 1,
+      check_key: "CHK-INSTALASI", submitted_by: DEV, section_id: SECTION,
+      automated_state_at_submit: "WARNING", evidence_content_hash: HASH, status: "ACCEPTED",
+    });
+    const b1 = (await svc().rpc("publish_warning_blockers", { p_manual_version_id: MV })).data as string[];
+    expect(b1, "ineligible check NOT excused").toContain("CHK-INSTALASI");
+
+    await svc().from("checklist_items").update({ human_evidence_eligible: true }).eq("checklist_template_id", CT).eq("check_key", "CHK-INSTALASI");
+    const b2 = (await svc().rpc("publish_warning_blockers", { p_manual_version_id: MV })).data as string[];
+    expect(b2, "eligible + ACCEPTED → excused").not.toContain("CHK-INSTALASI");
+
+    await svc().from("checklist_evidence_submissions").update({ status: "STALE" }).eq("manual_version_id", MV).eq("check_key", "CHK-INSTALASI");
+    const b3 = (await svc().rpc("publish_warning_blockers", { p_manual_version_id: MV })).data as string[];
+    expect(b3, "STALE evidence does not excuse").toContain("CHK-INSTALASI");
+
+    // restore metadata + fixture
+    await svc().from("checklist_items").update({ human_evidence_eligible: false }).eq("checklist_template_id", CT).eq("check_key", "CHK-INSTALASI");
+    await svc().from("checklist_evidence_submissions").delete().eq("manual_version_id", MV).eq("check_key", "CHK-INSTALASI");
+    await svc().from("checklist_results").update({ state: "MISSING" }).eq("manual_version_id", MV).eq("check_key", "CHK-INSTALASI");
+  });
+
+  it("a reviewer N/A override on the same check is independent of the evidence record", async () => {
+    await submit(dev);
+    await svc().from("checklist_results").update({
+      state: "NOT_APPLICABLE", evaluator: "reviewer", override_actor_id: REV, override_reason: "n/a", override_at: new Date().toISOString(),
+    }).eq("manual_version_id", MV).eq("check_key", "CHK-INSTALL-AUTOTRADING");
+    expect((await liveRow())[0].status, "evidence row untouched by the N/A override").toBe("PENDING");
+    await svc().from("checklist_results").update({ state: "WARNING", evaluator: "system", override_actor_id: null, override_reason: null, override_at: null }).eq("manual_version_id", MV).eq("check_key", "CHK-INSTALL-AUTOTRADING");
+  });
+});

@@ -43,7 +43,7 @@ const navGroups = [
     label: "Dokumentasi",
     items: [
       { href: "/manuals", label: "Manual Book", icon: FileText },
-      { href: "/templates", label: "Template", icon: BookOpenText },
+      { href: "/templates", label: "Template Manual", icon: BookOpenText },
     ],
   },
   {
@@ -57,7 +57,7 @@ const navGroups = [
     label: "Sumber Daya",
     items: [
       { href: "/resources/guide", label: "Panduan Dokumentasi", icon: CircleHelp },
-      { href: "/resources/compliance", label: "Checklist Kepatuhan", icon: ClipboardCheck },
+      { href: "/resources/compliance", label: "Referensi Kepatuhan", icon: ClipboardCheck },
     ],
   },
 ];
