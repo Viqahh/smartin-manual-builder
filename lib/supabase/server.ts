@@ -1,7 +1,7 @@
 import "server-only";
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
-import { publicEnv, isSupabaseConfigured } from "@/lib/env";
+import { publicEnv, isSupabaseConfigured, assertSupabaseProjectMatchesEnv } from "@/lib/env";
 
 export class SupabaseNotConfiguredError extends Error {
   readonly code = "NOT_CONFIGURED" as const;
@@ -17,6 +17,7 @@ export class SupabaseNotConfiguredError extends Error {
  */
 export async function createSupabaseServerClient() {
   if (!isSupabaseConfigured()) throw new SupabaseNotConfiguredError();
+  assertSupabaseProjectMatchesEnv(); // fail closed if this env points at the wrong project
   const cookieStore = await cookies();
   return createServerClient(publicEnv.supabaseUrl, publicEnv.supabasePublishableKey, {
     cookies: {

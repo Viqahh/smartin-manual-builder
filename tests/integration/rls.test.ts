@@ -3,11 +3,14 @@
  * environment — the schema has not been applied to any project — so every group is skipped via
  * `describe.skipIf(...)` on ALL of its prerequisites. No test silently `return`s.
  *
- * Prerequisites (docs/PHASE_2.md §14):
- *   SUPABASE_TEST_URL        project URL
- *   SUPABASE_TEST_ANON_KEY   sb_publishable_ / anon key
- *   SUPABASE_SECRET_KEY      sb_secret_ / service-role key   (groups that need a raw-DDL fixture)
- * ...and `supabase/migrations` + `supabase/seed.sql` applied.
+ * Prerequisites (docs/PHASE_2.md §14, docs/ENVIRONMENTS.md):
+ *   SUPABASE_TEST_URL         project URL — MUST be the DEV project (guard fails closed otherwise)
+ *   SUPABASE_TEST_ANON_KEY    sb_publishable_ / anon key
+ *   SUPABASE_TEST_SECRET_KEY  sb_secret_ / service-role key (falls back to SUPABASE_SECRET_KEY)
+ * ...and `supabase/migrations` + `supabase/seed.sql` applied to that DEV project.
+ *
+ * Phase 8A.5: this suite WRITES and runs DEV-only. `assertIntegrationTargetIsDev()` (below)
+ * throws `ABORT — …` if a configured target is not provably the DEV project.
  *
  * Seeded identities (supabase/seed.sql), password "demo-password-123":
  *   developer@smartin.demo   DEVELOPER + TECHNICAL_REVIEWER   org A  (multi-role fixture)
@@ -23,10 +26,16 @@ import { computeSnapshotHash } from "@/lib/publication/snapshot";
 import { snapshotImageDescriptors, mimeForStorageKey } from "@/lib/publication/snapshot-image";
 import { snapshotToViewModel } from "@/lib/publication/snapshot-view-model";
 import { createHash } from "node:crypto";
+import { assertIntegrationTargetIsDev } from "./_guard";
+
+// Phase 8A.5 — fail closed before anything connects: a configured target must provably be the
+// DEV/Preview project. No target configured → the groups below self-skip via `HAS_API`.
+assertIntegrationTargetIsDev();
 
 const URL = process.env.SUPABASE_TEST_URL;
 const ANON = process.env.SUPABASE_TEST_ANON_KEY;
-const SECRET = process.env.SUPABASE_SECRET_KEY;
+// Prefer a dedicated test service key so the suite never borrows the app's Production secret.
+const SECRET = process.env.SUPABASE_TEST_SECRET_KEY || process.env.SUPABASE_SECRET_KEY;
 
 // node 20's global fetch (undici) can wedge a pooled connection after a PL/pgSQL RAISE, leaving a
 // later request hanging with no timeout — vitest's per-test timeout then can't abort it. Bound

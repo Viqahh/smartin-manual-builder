@@ -8,9 +8,9 @@ import { readinessChecks } from "@/lib/env";
  * The endpoint itself keeps responding regardless.
  */
 export function GET() {
-  const { ready, checks } = readinessChecks();
+  const { ready, env, checks } = readinessChecks();
   return NextResponse.json(
-    { ok: true, ready, checks },
+    { ok: true, ready, env, checks },
     { status: ready ? 200 : 503 },
   );
 }

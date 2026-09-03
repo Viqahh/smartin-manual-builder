@@ -1,7 +1,6 @@
 import "server-only";
 import { createClient } from "@supabase/supabase-js";
-import { publicEnv } from "@/lib/env";
-import { serverSecrets } from "@/lib/env";
+import { publicEnv, serverSecrets, assertSupabaseProjectMatchesEnv } from "@/lib/env";
 
 /**
  * Service-role client — BYPASSES RLS. Server-only, used exclusively by trusted jobs:
@@ -15,6 +14,7 @@ export function createSupabaseServiceClient() {
   if (!publicEnv.supabaseUrl || !supabaseSecretKey) {
     throw new Error("Service client requires NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SECRET_KEY.");
   }
+  assertSupabaseProjectMatchesEnv(); // fail closed if this env points at the wrong project
   return createClient(publicEnv.supabaseUrl, supabaseSecretKey, {
     auth: { autoRefreshToken: false, persistSession: false },
   });
