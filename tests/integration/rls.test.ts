@@ -544,6 +544,105 @@ describe.skipIf(!HAS_SERVICE)("Finding 5 — block CRUD round-trip (AC-P2-15/16/
 });
 
 // ---------------------------------------------------------------------------
+describe.skipIf(!HAS_SERVICE)("Phase 8A.5 — manual_blocks.client_token at-most-once (migration 32)", () => {
+  const svc = () => service();
+  let sectionId: string;
+  const doc = (p: string) => ({
+    type: "text",
+    schemaVersion: 1,
+    content: { schemaVersion: 1, format: "plain-paragraphs", paragraphs: [p] },
+  });
+  const mkUuid = () => crypto.randomUUID();
+  const cleanup: string[] = [];
+
+  beforeAll(async () => {
+    const s = await svc()
+      .from("manual_sections")
+      .select("id")
+      .eq("manual_version_id", VMAX_MV)
+      .eq("section_key", "overview")
+      .single();
+    sectionId = s.data!.id;
+  });
+  afterAll(async () => {
+    if (cleanup.length) await svc().from("manual_blocks").delete().in("id", cleanup);
+  });
+
+  it("a second LIVE insert with the same (section, client_token) is rejected (23505)", async () => {
+    const token = mkUuid();
+    const first = await svc()
+      .from("manual_blocks")
+      .insert({ organization_id: ORG_A, manual_section_id: sectionId, block_type: "text", payload: doc("first"), position: 0, client_token: token })
+      .select("id")
+      .single();
+    expect(first.error).toBeNull();
+    cleanup.push(first.data!.id);
+
+    const dup = await svc()
+      .from("manual_blocks")
+      .insert({ organization_id: ORG_A, manual_section_id: sectionId, block_type: "text", payload: doc("dup"), position: 1, client_token: token })
+      .select("id")
+      .single();
+    expect(dup.error?.code).toBe("23505");
+
+    // the section still holds exactly one live block for that token
+    const live = await svc()
+      .from("manual_blocks")
+      .select("id")
+      .eq("manual_section_id", sectionId)
+      .eq("client_token", token)
+      .is("deleted_at", null);
+    expect((live.data ?? []).length).toBe(1);
+  });
+
+  it("NULL client_token is unconstrained — many legacy-style rows coexist", async () => {
+    const rows = await svc()
+      .from("manual_blocks")
+      .insert([
+        { organization_id: ORG_A, manual_section_id: sectionId, block_type: "text", payload: doc("n1"), position: 10, client_token: null },
+        { organization_id: ORG_A, manual_section_id: sectionId, block_type: "text", payload: doc("n2"), position: 11, client_token: null },
+      ])
+      .select("id");
+    expect(rows.error).toBeNull();
+    cleanup.push(...(rows.data ?? []).map((r) => r.id));
+    expect((rows.data ?? []).length).toBe(2);
+  });
+
+  it("different tokens → two independent live rows", async () => {
+    const [a, b] = [mkUuid(), mkUuid()];
+    const ins = await svc()
+      .from("manual_blocks")
+      .insert([
+        { organization_id: ORG_A, manual_section_id: sectionId, block_type: "text", payload: doc("A"), position: 20, client_token: a },
+        { organization_id: ORG_A, manual_section_id: sectionId, block_type: "text", payload: doc("B"), position: 21, client_token: b },
+      ])
+      .select("id, client_token");
+    expect(ins.error).toBeNull();
+    cleanup.push(...(ins.data ?? []).map((r) => r.id));
+    expect(new Set((ins.data ?? []).map((r) => r.client_token)).size).toBe(2);
+  });
+
+  it("soft-deleting a token's row frees the token for a fresh live insert", async () => {
+    const token = mkUuid();
+    const first = await svc()
+      .from("manual_blocks")
+      .insert({ organization_id: ORG_A, manual_section_id: sectionId, block_type: "text", payload: doc("v1"), position: 30, client_token: token })
+      .select("id")
+      .single();
+    cleanup.push(first.data!.id);
+    await svc().from("manual_blocks").update({ deleted_at: new Date().toISOString() }).eq("id", first.data!.id);
+
+    const reinsert = await svc()
+      .from("manual_blocks")
+      .insert({ organization_id: ORG_A, manual_section_id: sectionId, block_type: "text", payload: doc("v2"), position: 31, client_token: token })
+      .select("id")
+      .single();
+    expect(reinsert.error).toBeNull();
+    if (reinsert.data) cleanup.push(reinsert.data.id);
+  });
+});
+
+// ---------------------------------------------------------------------------
 describe.skipIf(!HAS_SERVICE)("private image access (AC-P2-19)", () => {
   const svc = () => service();
   let assetId: string;

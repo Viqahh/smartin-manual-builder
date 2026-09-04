@@ -60,7 +60,10 @@ type Entity<P> = {
   pending: P | null; // latest desired payload not yet confirmed persisted
   lastPersisted: P | null; // last payload the server confirmed (self-race detection)
   inFlight: boolean;
+  /** resolves when this entity is fully drained (pending === null) or terminally paused/errored */
+  inFlightPromise: Promise<void> | null;
   paused: boolean; // true after a genuine external conflict — no auto-writes until resolved
+  lastError: boolean; // last completed attempt was a transient error (for flushAll reporting)
   timer: ReturnType<typeof setTimeout> | null;
 };
 
@@ -85,19 +88,47 @@ export function createAutosaveQueue<P>(opts: AutosaveQueueOptions<P>) {
   function get(key: string, seedVersion: number): Entity<P> {
     let e = map.get(key);
     if (!e) {
-      e = { rowVersion: seedVersion, pending: null, lastPersisted: null, inFlight: false, paused: false, timer: null };
+      e = {
+        rowVersion: seedVersion,
+        pending: null,
+        lastPersisted: null,
+        inFlight: false,
+        inFlightPromise: null,
+        paused: false,
+        lastError: false,
+        timer: null,
+      };
       map.set(key, e);
     }
     return e;
   }
 
-  async function flush(key: string): Promise<void> {
+  /**
+   * Returns a promise that resolves only once `key` is fully drained (pending === null) or has
+   * terminally paused/errored. Safe to call repeatedly — it dedupes onto the in-flight run and
+   * `flushAll()` / `flushPending()` can await it. The create→update transition never depends on
+   * React render timing: `opts.save` decides create-vs-update from a synchronously-updated id
+   * map, and a coalesced follow-up here is AWAITED (not fire-and-forget).
+   */
+  function flush(key: string): Promise<void> {
+    const e = map.get(key);
+    if (!e || e.paused || e.pending == null) return e?.inFlightPromise ?? Promise.resolve();
+    if (e.inFlight) return e.inFlightPromise ?? Promise.resolve();
+    e.inFlightPromise = doFlush(key).finally(() => {
+      const cur = map.get(key);
+      if (cur && !cur.inFlight && cur.pending == null) cur.inFlightPromise = null;
+    });
+    return e.inFlightPromise;
+  }
+
+  async function doFlush(key: string): Promise<void> {
     const e = map.get(key);
     if (!e || e.inFlight || e.paused || e.pending == null) return;
 
     const payload = e.pending;
     e.pending = null;
     e.inFlight = true;
+    e.lastError = false;
     opts.onState(key, "saving");
 
     let out: SaveOutcome;
@@ -114,7 +145,7 @@ export function createAutosaveQueue<P>(opts: AutosaveQueueOptions<P>) {
       opts.onVersion?.(key, out.rowVersion);
       if (e.pending != null && !eq(e.pending, payload)) {
         opts.onState(key, "dirty");
-        void flush(key); // a newer desired state arrived while we were saving
+        await doFlush(key); // a newer desired state arrived while we were saving — AWAIT it
       } else {
         e.pending = null;
         opts.onState(key, "saved");
@@ -131,7 +162,7 @@ export function createAutosaveQueue<P>(opts: AutosaveQueueOptions<P>) {
       e.rowVersion = out.serverRowVersion;
       opts.onVersion?.(key, e.rowVersion);
       e.pending = e.pending ?? payload; // re-send the latest desired state
-      void flush(key);
+      await doFlush(key);
       return;
     }
 
@@ -145,6 +176,7 @@ export function createAutosaveQueue<P>(opts: AutosaveQueueOptions<P>) {
 
     // transient error — keep the draft, allow retry
     e.pending = e.pending ?? payload;
+    e.lastError = true;
     opts.onState(key, "error", { message: out.message });
   }
 
@@ -178,6 +210,58 @@ export function createAutosaveQueue<P>(opts: AutosaveQueueOptions<P>) {
         e.timer = null;
       }
       void flush(key);
+    },
+
+    /**
+     * Phase 8A.5 save barrier — persist EVERYTHING now and wait for it. Fires every pending
+     * debounce timer immediately, awaits every in-flight save and any coalesced follow-up, and
+     * reports which entities did NOT reach a clean persisted state (conflict / transient error /
+     * still-pending). Callers (chapter navigation, Preview) MUST await this and refuse to
+     * navigate on `ok === false`.
+     *
+     * Bounded by `timeoutMs` (default 15s) so a wedged network request can never hang navigation
+     * forever: on timeout it resolves `ok:false` (the in-flight save keeps going; a later retry
+     * re-drains it) rather than leaving the caller — and the Preview button — stuck.
+     */
+    async flushAll(timeoutMs = 15_000): Promise<{ ok: boolean; failedKeys: string[]; timedOut: boolean }> {
+      let timedOut = false;
+      const drain = (async () => {
+        for (let guard = 0; guard < 100 && !timedOut; guard += 1) {
+          const keys = [...map.keys()].filter((k) => {
+            const e = map.get(k);
+            // Drain timers, in-flight saves, and freshly-coalesced edits — but do NOT auto-retry
+            // an entity whose last attempt was a transient error (that stays for the user's
+            // explicit retry) or a genuine conflict (paused). Those surface as failedKeys.
+            return !!e && (e.timer != null || e.inFlight || (e.pending != null && !e.paused && !e.lastError));
+          });
+          if (keys.length === 0) break;
+          await Promise.all(
+            keys.map((k) => {
+              const e = map.get(k);
+              if (e?.timer) {
+                clearTimeout(e.timer);
+                e.timer = null;
+              }
+              return flush(k);
+            }),
+          );
+        }
+      })();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        drain,
+        new Promise<void>((resolve) => {
+          timer = setTimeout(() => {
+            timedOut = true;
+            resolve();
+          }, timeoutMs);
+        }),
+      ]);
+      if (timer) clearTimeout(timer);
+      const failedKeys = [...map.entries()]
+        .filter(([, e]) => e.paused || e.lastError || e.pending != null || e.inFlight)
+        .map(([k]) => k);
+      return { ok: failedKeys.length === 0 && !timedOut, failedKeys, timedOut };
     },
 
     /** Adopt a row_version bumped out-of-band (reorder/duplicate/restore/undo-redo). */
@@ -240,9 +324,20 @@ export function createAutosaveQueue<P>(opts: AutosaveQueueOptions<P>) {
       if (e) e.pending = null;
     },
 
+    /**
+     * Best-effort only. Correctness comes from an explicit `await flushAll()` BEFORE navigation
+     * (Phase 8A.5) — never from this unmount path. We still fire any pending save so a stray
+     * unmount that wasn't preceded by a barrier does not silently lose an edit; the map is kept
+     * so an in-flight `doFlush` can still complete its write.
+     */
     dispose() {
-      for (const e of map.values()) if (e.timer) clearTimeout(e.timer);
-      map.clear();
+      for (const [key, e] of map.entries()) {
+        if (e.timer) {
+          clearTimeout(e.timer);
+          e.timer = null;
+        }
+        if (e.pending != null && !e.paused && !e.inFlight) void flush(key);
+      }
     },
   };
 }

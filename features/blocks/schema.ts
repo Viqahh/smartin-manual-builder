@@ -6,6 +6,13 @@ export const createBlockSchema = z.object({
   blockType: z.enum(BLOCK_TYPES),
   payload: z.unknown(),
   position: z.number().int().min(0).optional(),
+  /**
+   * Phase 8A.5 — stable client identity of one logical draft block. Generated once when the
+   * draft is created and resent on every create retry, so a duplicate create for the same
+   * logical block reconciles to the same row instead of inserting another. Never derived from
+   * content. Optional: server-side inserts (clone/duplicate/tests) may omit it.
+   */
+  clientToken: z.uuid().optional(),
 });
 export type CreateBlockInput = z.infer<typeof createBlockSchema>;
 

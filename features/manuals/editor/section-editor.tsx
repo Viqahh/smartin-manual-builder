@@ -90,6 +90,13 @@ const SUGGESTED: Record<string, BlockType[]> = {
 type EBlock = {
   key: string;
   id: string | null;
+  /**
+   * Phase 8A.5 — stable identity of this logical block for the create path. Generated once when
+   * a draft is added; unchanged across debounce / autosave / retry / re-render; never derived
+   * from content. Sent on every `createBlock` so a duplicate create reconciles to one DB row.
+   * For already-persisted (loaded) blocks it just mirrors the DB id and is never used.
+   */
+  clientToken: string;
   type: BlockType;
   payload: Record<string, unknown>;
   rowVersion: number;
@@ -129,6 +136,13 @@ export type SectionEditorHandle = {
    * (Phase 6 slice 3, §17). Returns false when the block is not in this mounted section.
    */
   focusBlock: (blockId: string) => boolean;
+  /**
+   * Phase 8A.5 SAVE BARRIER. Persist every pending / in-flight block edit now and wait for it,
+   * then lift the committed set to the builder. The builder MUST await this before ANY chapter
+   * or Preview navigation and refuse to navigate when `ok` is false (a block is in conflict /
+   * error / still unsaved). Never relies on React unmount cleanup for persistence.
+   */
+  flushPending: () => Promise<{ ok: boolean; failedKeys: string[] }>;
 };
 
 type SectionEditorProps = {
@@ -215,6 +229,7 @@ export const SectionEditor = forwardRef<SectionEditorHandle, SectionEditorProps>
       section.blocks.map((b) => ({
         key: b.id,
         id: b.id,
+        clientToken: b.id, // persisted already — mirrors the id, never used for a create
         type: b.type,
         payload: b.payload,
         rowVersion: b.rowVersion,
@@ -318,13 +333,24 @@ export const SectionEditor = forwardRef<SectionEditorHandle, SectionEditorProps>
       const check = parseBlockPayload(payload);
       if (!check.ok) return { ok: false, kind: "error", message: check.issues[0]?.message ?? "Blok belum valid." };
 
-      const res = b.id
-        ? await updateBlock({ blockId: b.id, expectedRowVersion, blockType: b.type, payload })
-        : await createBlock({ sectionId: section.id, blockType: b.type, payload });
+      // Phase 8A.5 — the create→update transition must NOT depend on React render timing.
+      // `keyToId` is a ref written synchronously the moment a create returns its id, so a
+      // coalesced follow-up flush (which the queue now AWAITS) sees the id here and takes the
+      // update path — even though `blocksRef.current` hasn't re-rendered with `b.id` yet.
+      const persistedId = b.id ?? keyToId.current.get(key) ?? null;
+
+      const res = persistedId
+        ? await updateBlock({ blockId: persistedId, expectedRowVersion, blockType: b.type, payload })
+        : await createBlock({
+            sectionId: section.id,
+            blockType: b.type,
+            payload,
+            clientToken: b.clientToken, // DB backstop: same token on every retry → one row
+          });
 
       if (res.ok) {
         const data = res.data as { id?: string; rowVersion?: number };
-        if (!b.id && data.id) {
+        if (!persistedId && data.id) {
           keyToId.current.set(key, data.id);
           setBlocks((p) => p.map((x) => (x.key === key ? { ...x, id: data.id ?? null } : x)));
         }
@@ -342,8 +368,8 @@ export const SectionEditor = forwardRef<SectionEditorHandle, SectionEditorProps>
         );
         return { ok: true, rowVersion: data.rowVersion ?? 1 };
       }
-      if (res.code === "CONFLICT" && b.id) {
-        const st = await getBlockState({ blockId: b.id });
+      if (res.code === "CONFLICT" && persistedId) {
+        const st = await getBlockState({ blockId: persistedId });
         if (st.ok && st.data.exists) {
           const serverJson = stableStringify(st.data.payload);
           // recognise the server content: the payload we loaded, or any payload in OUR history
@@ -534,12 +560,49 @@ export const SectionEditor = forwardRef<SectionEditorHandle, SectionEditorProps>
     [onAiTargetChange, onAiApplyStateChange],
   );
 
+  // UAT-01 / Phase 8A.5: lift the committed block set to the builder. The builder folds it into
+  // `sections` so a later remount of this editor for the same chapter is not stale. Drafts
+  // (never persisted) are excluded; ids are resolved through `keyToId` so a block created moments
+  // ago is included even before React commits its id. The builder dedupes an unchanged set.
+  const emitCommitted = useCallback(() => {
+    if (!onSectionBlocksCommitted) return;
+    const committed: Section["blocks"] = blocksRef.current
+      .map((b, i) => {
+        const id = b.id ?? keyToId.current.get(b.key) ?? null;
+        if (!id) return null;
+        return {
+          id,
+          type: b.type,
+          payload: b.payload,
+          position: i,
+          imageAssetId:
+            typeof b.payload.imageAssetId === "string" && b.payload.imageAssetId
+              ? (b.payload.imageAssetId as string)
+              : null,
+          parameterGroupIds: Array.isArray(b.payload.groupIds) ? (b.payload.groupIds as string[]) : [],
+          rowVersion: b.rowVersion,
+        };
+      })
+      .filter((b): b is NonNullable<typeof b> => b !== null);
+    onSectionBlocksCommitted(section.id, committed);
+  }, [onSectionBlocksCommitted, section.id]);
+
   useImperativeHandle(
     ref,
     (): SectionEditorHandle => ({
       blockPayloadHash: (blockKey) => {
         const b = blocksRef.current.find((x) => x.key === blockKey);
         return b ? stableStringify(b.payload) : null;
+      },
+      flushPending: async () => {
+        if (historyPushTimer.current) {
+          clearTimeout(historyPushTimer.current);
+          historyPushTimer.current = null;
+        }
+        const r = await saver.flushAll();
+        // lift the now-persisted set to the builder BEFORE it swaps the chapter / navigates
+        emitCommitted();
+        return r;
       },
       focusBlock: (blockId) => {
         if (typeof document === "undefined") return false;
@@ -602,7 +665,7 @@ export const SectionEditor = forwardRef<SectionEditorHandle, SectionEditorProps>
         return { ok: true, changed: true };
       },
     }),
-    [saver, currentRv, pushSnapshot, onAiApplyStateChange],
+    [saver, currentRv, pushSnapshot, onAiApplyStateChange, emitCommitted],
   );
 
   useEffect(() => () => saver.dispose(), [saver]);
@@ -615,29 +678,6 @@ export const SectionEditor = forwardRef<SectionEditorHandle, SectionEditorProps>
     lastReported.current = c;
     onBlocksChanged(c);
   }, [blocks, onBlocksChanged]);
-
-  // UAT-01: lift the committed block set to the builder whenever it is settled (no dirty / saving
-  // / error block). The builder folds it into `sections` state so a later remount of this editor
-  // for the same chapter is not stale. Drafts (id === null) are never included; the builder
-  // dedupes so an unchanged set is a no-op.
-  const emitCommitted = useCallback(() => {
-    if (!onSectionBlocksCommitted) return;
-    const committed: Section["blocks"] = blocksRef.current
-      .filter((b) => b.id !== null)
-      .map((b, i) => ({
-        id: b.id as string,
-        type: b.type,
-        payload: b.payload,
-        position: i,
-        imageAssetId:
-          typeof b.payload.imageAssetId === "string" && b.payload.imageAssetId
-            ? (b.payload.imageAssetId as string)
-            : null,
-        parameterGroupIds: Array.isArray(b.payload.groupIds) ? (b.payload.groupIds as string[]) : [],
-        rowVersion: b.rowVersion,
-      }));
-    onSectionBlocksCommitted(section.id, committed);
-  }, [onSectionBlocksCommitted, section.id]);
 
   useEffect(() => {
     const settled = blocks.every((b) => b.id === null || b.save === "idle" || b.save === "saved");
@@ -660,6 +700,7 @@ export const SectionEditor = forwardRef<SectionEditorHandle, SectionEditorProps>
       const eb: EBlock = {
         key,
         id: null,
+        clientToken: crypto.randomUUID(), // one stable token for this logical draft, forever
         type,
         payload,
         rowVersion: 1,
@@ -722,6 +763,7 @@ export const SectionEditor = forwardRef<SectionEditorHandle, SectionEditorProps>
         const copy: EBlock = {
           key: res.data.id,
           id: res.data.id,
+          clientToken: res.data.id, // already persisted by the duplicate RPC — never re-created
           type: b.type,
           payload: structuredClone(b.payload),
           rowVersion: 1,
@@ -794,6 +836,7 @@ export const SectionEditor = forwardRef<SectionEditorHandle, SectionEditorProps>
         return {
           key: s.key,
           id,
+          clientToken: l?.clientToken ?? id ?? crypto.randomUUID(),
           type: s.type,
           payload: s.payload,
           rowVersion: l?.rowVersion ?? s.rowVersion,
@@ -1030,7 +1073,14 @@ export const SectionEditor = forwardRef<SectionEditorHandle, SectionEditorProps>
                   </button>
                   <span className="block-item-type">{BLOCK_LABEL[b.type]}</span>
                   <span className="block-item-state" role="status">
-                    {b.error ? b.error : SAVE_STATE_LABEL[b.save === "idle" ? "saved" : b.save]}
+                    {b.error
+                      ? b.error
+                      : b.save === "idle"
+                        ? // a never-persisted draft must not claim "Tersimpan"; a loaded block genuinely is
+                          b.id
+                          ? SAVE_STATE_LABEL.saved
+                          : SAVE_STATE_LABEL.idle
+                        : SAVE_STATE_LABEL[b.save]}
                   </span>
                   <div className="block-item-actions">
                     <button

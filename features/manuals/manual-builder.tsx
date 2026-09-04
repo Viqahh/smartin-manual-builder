@@ -2,11 +2,14 @@
 
 import { AlertTriangle, Check, ChevronRight, Circle, Eye, Info, PanelLeft, PanelRight, Save, X } from "lucide-react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { manualIdentity, type ManualViewModel } from "@/lib/manual/view-model";
 import { STATUS_LABELS } from "./manual-table";
 import { SAVE_STATE_LABEL, type SaveState } from "@/lib/domain/autosave";
 import { saveSection } from "./autosave-actions";
+import { revalidateManualRoutes } from "./actions";
+import { openPreviewTransition } from "./preview-nav";
 import { ChapterNav } from "./editor/chapter-nav";
 import { SectionEditor, type AiBlockTarget, type SectionEditorHandle } from "./editor/section-editor";
 import type { BlockEditorCtx } from "./editor/block-editors";
@@ -411,7 +414,16 @@ export function ManualBuilder({
   publication?: PublicationBundle | null;
 }) {
   const identity = manualIdentity(vm);
+  const router = useRouter();
   const [sections, setSections] = useState(vm.sections);
+  // Phase 8A.5 — navigation save barrier. `navInFlightRef` is the SYNCHRONOUS re-entrancy guard
+  // (a repeated click before React re-renders must not start a second transition); `navBusy` /
+  // `previewOpening` drive the disabled + loading UI; `navMsg` surfaces a failed flush or a
+  // failed Preview transition so navigation never fails silently.
+  const navInFlightRef = useRef(false);
+  const [navBusy, setNavBusy] = useState(false);
+  const [previewOpening, setPreviewOpening] = useState(false);
+  const [navMsg, setNavMsg] = useState<string | null>(null);
   // UAT-25 — restore the last-edited chapter when returning to the editor (per manual, per tab).
   const chapterMemoKey = `smb:lastChapter:${vm.manual.id}`;
   const [selectedId, setSelectedIdRaw] = useState(() => {
@@ -424,7 +436,16 @@ export function ManualBuilder({
       return first;
     }
   });
-  const setSelectedId = useCallback(
+  // Every internal chapter/section switch funnels through here. Phase 8A.5: it is the SINGLE
+  // save barrier — persist the mounted editor's pending edits and wait, then navigate. On a
+  // failed flush (conflict / error / still unsaved) it does NOT navigate; the user stays put and
+  // the unsaved warning shows. Correctness never depends on React unmount cleanup.
+  const sectionEditorRef = useRef<SectionEditorHandle | null>(null);
+  const selectedIdRef = useRef(selectedId);
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+  });
+  const commitSelectedId = useCallback(
     (id: string) => {
       setSelectedIdRaw(id);
       try {
@@ -435,12 +456,34 @@ export function ManualBuilder({
     },
     [chapterMemoKey],
   );
+  const setSelectedId = useCallback(
+    async (id: string) => {
+      if (!id || id === selectedIdRef.current) return;
+      if (navInFlightRef.current) return; // synchronous: ignore a click while a transition runs
+      navInFlightRef.current = true;
+      setNavBusy(true);
+      try {
+        const r = await sectionEditorRef.current?.flushPending();
+        if (r && !r.ok) {
+          setNavMsg("Perubahan belum tersimpan — perbaiki blok yang gagal sebelum berpindah bab.");
+          return;
+        }
+        setNavMsg(null);
+        commitSelectedId(id);
+      } catch {
+        setNavMsg("Gagal menyimpan perubahan bab ini. Coba lagi.");
+      } finally {
+        navInFlightRef.current = false;
+        setNavBusy(false);
+      }
+    },
+    [commitSelectedId],
+  );
   const [mobilePanel, setMobilePanel] = useState<"chapters" | "inspector" | null>(null);
   const [tab, setTab] = useState<InspectorTab>("Validasi");
   const [pendingBlockFocus, setPendingBlockFocus] = useState<string | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [images, setImages] = useState<OrgImage[]>(initialImages);
-  const sectionEditorRef = useRef<SectionEditorHandle | null>(null);
   const [aiTarget, setAiTarget] = useState<AiBlockTarget | null>(null);
   const [aiApplyState, setAiApplyState] = useState<SaveState | null>(null);
   // Phase 5 — bump this after a persisted builder change so the readiness panel re-evaluates
@@ -683,9 +726,11 @@ export function ManualBuilder({
     (id: string) => {
       // Optimistically drop the chapter AND recompact positions so BAB numbering closes the gap
       // immediately; the server also recompacts (AC-P3-5) and resyncSectionVersions reconciles.
+      // The chapter (and its unsaved block edits) is being discarded — skip the save barrier and
+      // switch directly, so a pending edit in the deleted chapter can't strand the user here.
       setSections((prev) => {
         const next = prev.filter((s) => s.id !== id).map((s, i) => ({ ...s, position: i }));
-        if (selectedId === id) setSelectedId(next[0]?.id ?? "");
+        if (selectedIdRef.current === id) commitSelectedId(next[0]?.id ?? "");
         return next;
       });
       void deleteCustomSection({ sectionId: id }).then((res) => {
@@ -702,7 +747,7 @@ export function ManualBuilder({
         }
       });
     },
-    [selectedId, completionSaver, setSelectedId],
+    [completionSaver, commitSelectedId],
   );
 
   // -------------------------------------------------------------- parameter groups (inline mgmt)
@@ -788,15 +833,41 @@ export function ManualBuilder({
           {canEdit ? (
             <>
               <Save aria-hidden="true" size={15} /> {SAVE_STATE_LABEL[saveState]}
+              {navMsg && (
+                <span className="save-state-warn" role="alert">
+                  {" "}
+                  · {navMsg}
+                </span>
+              )}
             </>
           ) : (
             <span className="readonly-flag">Tampilan baca-saja</span>
           )}
         </div>
         <div className="builder-top-actions">
-          <Link className="secondary-button compact-action" href={`/manuals/${vm.manual.id}/preview`} prefetch>
-            <Eye aria-hidden="true" size={16} /> Preview
-          </Link>
+          {/* Phase 8A.5 — Preview: synchronous re-entrancy guard → save barrier (flushPending) →
+              navigate. `/preview` is `force-dynamic` and never prefetched, so `router.push`
+              always renders fresh; route revalidation is fired non-blocking (the block save
+              actions already `revalidatePath` on every write) so it never adds nav latency. The
+              button shows "Membuka preview…" and stays disabled for the whole transition. */}
+          <button
+            type="button"
+            className="secondary-button compact-action"
+            disabled={navBusy || previewOpening}
+            aria-busy={previewOpening}
+            onClick={() =>
+              void openPreviewTransition({
+                guard: navInFlightRef,
+                flushPending: () => sectionEditorRef.current?.flushPending() ?? Promise.resolve(undefined),
+                revalidate: () => void revalidateManualRoutes(vm.manual.id),
+                navigate: () => router.push(`/manuals/${vm.manual.id}/preview`),
+                setOpening: setPreviewOpening,
+                setMessage: setNavMsg,
+              })
+            }
+          >
+            <Eye aria-hidden="true" size={16} /> {previewOpening ? "Membuka preview…" : "Preview"}
+          </button>
           {review && (
             <ReviewControls
               manualId={review.manualId}

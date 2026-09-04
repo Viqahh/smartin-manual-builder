@@ -1,5 +1,6 @@
 "use server";
 
+import { revalidatePath } from "next/cache";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { mapPostgrestError } from "@/lib/supabase/errors";
 import { requireActiveOrg, AuthError } from "@/lib/auth/context";
@@ -45,6 +46,70 @@ async function sectionOrgOrNull(sectionId: string, orgId: string) {
   return data ? supabase : null;
 }
 
+type Sb = Awaited<ReturnType<typeof createSupabaseServerClient>>;
+
+/** Resolve the owning `manuals.id` for a section or block, so a write can revalidate the
+ *  dependent `/edit` and `/preview` routes (Phase 8A.5 — Preview consistency). Best-effort. */
+async function manualIdFor(
+  supabase: Sb,
+  orgId: string,
+  ref: { sectionId?: string; blockId?: string },
+): Promise<string | null> {
+  let sectionId = ref.sectionId ?? null;
+  if (!sectionId && ref.blockId) {
+    const { data } = await supabase
+      .from("manual_blocks")
+      .select("manual_section_id")
+      .eq("organization_id", orgId)
+      .eq("id", ref.blockId)
+      .maybeSingle();
+    sectionId = (data?.manual_section_id as string | undefined) ?? null;
+  }
+  if (!sectionId) return null;
+  const { data: sec } = await supabase
+    .from("manual_sections")
+    .select("manual_version_id")
+    .eq("organization_id", orgId)
+    .eq("id", sectionId)
+    .maybeSingle();
+  const versionId = sec?.manual_version_id as string | undefined;
+  if (!versionId) return null;
+  const { data: ver } = await supabase
+    .from("manual_versions")
+    .select("manual_id")
+    .eq("organization_id", orgId)
+    .eq("id", versionId)
+    .maybeSingle();
+  return (ver?.manual_id as string | undefined) ?? null;
+}
+
+/** Mark the manual's editor + preview routes stale so Preview never needs a hard refresh. */
+function revalidateManual(manualId: string | null): void {
+  if (!manualId) return;
+  revalidatePath(`/manuals/${manualId}/edit`);
+  revalidatePath(`/manuals/${manualId}/preview`);
+}
+
+/** The one live block backing (section, client_token), or null. */
+async function liveBlockByToken(
+  supabase: Sb,
+  orgId: string,
+  sectionId: string,
+  clientToken: string,
+): Promise<{ id: string; position: number; rowVersion: number } | null> {
+  const { data } = await supabase
+    .from("manual_blocks")
+    .select("id, position, row_version")
+    .eq("organization_id", orgId)
+    .eq("manual_section_id", sectionId)
+    .eq("client_token", clientToken)
+    .is("deleted_at", null)
+    .maybeSingle();
+  return data
+    ? { id: data.id as string, position: Number(data.position), rowVersion: Number(data.row_version ?? 1) }
+    : null;
+}
+
 export async function createBlock(
   input: unknown,
 ): Promise<ActionResult<{ id: string; position: number; rowVersion: number }>> {
@@ -67,6 +132,18 @@ export async function createBlock(
     const supabase = await sectionOrgOrNull(parsed.data.sectionId, orgId);
     if (!supabase) return fail("NOT_FOUND", "Bab tidak ditemukan.");
 
+    const clientToken = parsed.data.clientToken ?? null;
+
+    // Phase 8A.5 — at-most-once. A retry / coalesced re-save for the same logical draft block
+    // reconciles to the row it already created instead of inserting another. The partial unique
+    // index (manual_section_id, client_token) WHERE client_token IS NOT NULL AND deleted_at IS
+    // NULL is the concurrency backstop; this pre-check is the common (non-racing) fast path.
+    const existingByToken = clientToken ? await liveBlockByToken(supabase, orgId, parsed.data.sectionId, clientToken) : null;
+    if (existingByToken) {
+      revalidateManual(await manualIdFor(supabase, orgId, { sectionId: parsed.data.sectionId }));
+      return ok(existingByToken);
+    }
+
     const { data: live } = await supabase
       .from("manual_blocks")
       .select("position")
@@ -83,14 +160,27 @@ export async function createBlock(
         block_type: parsed.data.blockType,
         payload: payloadCheck.value,
         position,
+        client_token: clientToken,
         image_asset_id: payloadCheck.value.type === "image" ? payloadCheck.value.imageAssetId : null,
         parameter_group_ids: groupIdsFor(parsed.data.blockType, payloadCheck.value),
       })
       .select("id, position, row_version")
       .single();
-    if (error) return mapPostgrestError(error);
+    if (error) {
+      // 23505 on the client_token index == a concurrent create for the SAME logical block won
+      // the race. Reconcile to that row rather than surfacing a conflict or double-inserting.
+      if (error.code === "23505" && clientToken) {
+        const raced = await liveBlockByToken(supabase, orgId, parsed.data.sectionId, clientToken);
+        if (raced) {
+          revalidateManual(await manualIdFor(supabase, orgId, { sectionId: parsed.data.sectionId }));
+          return ok(raced);
+        }
+      }
+      return mapPostgrestError(error);
+    }
 
     await writeAudit(orgId, userId, "manual:update", "manual_block", data.id as string, { op: "create" });
+    revalidateManual(await manualIdFor(supabase, orgId, { sectionId: parsed.data.sectionId }));
     return ok({
       id: data.id as string,
       position: Number(data.position),
@@ -171,6 +261,7 @@ export async function updateBlock(input: unknown): Promise<ActionResult<{ rowVer
         ? fail("CONFLICT", "Konflik perubahan — muat ulang blok.")
         : fail("NOT_FOUND", "Blok tidak ditemukan.");
     }
+    revalidateManual(await manualIdFor(supabase, orgId, { blockId: parsed.data.blockId }));
     return ok({ rowVersion: Number(data.row_version) });
   } catch (e) {
     return authFail(e) ?? fail("INTERNAL", "Gagal menyimpan blok.");
@@ -193,6 +284,7 @@ export async function softDeleteBlock(input: unknown): Promise<ActionResult<{ id
       .is("deleted_at", null);
     if (error) return mapPostgrestError(error);
     await writeAudit(orgId, userId, "manual:update", "manual_block", parsed.data.blockId, { op: "soft_delete" });
+    revalidateManual(await manualIdFor(supabase, orgId, { blockId: parsed.data.blockId }));
     return ok({ id: parsed.data.blockId });
   } catch (e) {
     return authFail(e) ?? fail("INTERNAL", "Gagal menghapus blok.");

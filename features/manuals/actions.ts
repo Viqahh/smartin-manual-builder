@@ -133,3 +133,24 @@ export async function createManual(input: unknown): Promise<ActionResult<{ manua
     return authFail(e) ?? fail("INTERNAL", "Gagal membuat manual.");
   }
 }
+
+/**
+ * Phase 8A.5 — Preview consistency boundary. Called by the client immediately AFTER the editor's
+ * save barrier (`flushPending`) confirms persistence and BEFORE navigating to Preview, so the
+ * `/preview` (and `/edit`) RSC is rebuilt from current data with no browser hard refresh. Does
+ * not disable caching — it just marks the two dependent routes stale. Membership-gated.
+ */
+export async function revalidateManualRoutes(manualId: unknown): Promise<ActionResult<{ ok: true }>> {
+  try {
+    const { roles } = await requireActiveOrg();
+    assertCan(roles, "manual:read");
+    if (typeof manualId !== "string" || !/^[0-9a-f-]{36}$/i.test(manualId)) {
+      return validationFail([{ path: "manualId", message: "ID manual tidak valid." }]);
+    }
+    revalidatePath(`/manuals/${manualId}/edit`);
+    revalidatePath(`/manuals/${manualId}/preview`);
+    return ok({ ok: true });
+  } catch (e) {
+    return authFail(e) ?? fail("INTERNAL", "Gagal menyegarkan tampilan.");
+  }
+}
