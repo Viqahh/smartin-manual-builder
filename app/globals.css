@@ -16,6 +16,11 @@
   --ring: #2563eb;
   --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.06);
   --shadow-lg: 0 18px 44px rgba(15, 23, 42, 0.18);
+  /* Vertical separation between two adjacent content blocks in a chapter body. ONE token,
+     every rendered surface (Preview / Public Manual / PDF / editor read-view); the editor's
+     block list uses --block-list-gap. Paragraph spacing inside a block is unrelated. */
+  --block-stack-gap: 26px;
+  --block-list-gap: 18px;
 }
 
 * { box-sizing: border-box; }
@@ -438,19 +443,32 @@ button, a, input, select, textarea { touch-action: manipulation; }
 
 .manual-content { color: #26364a; }
 .manual-content .lead { margin: 0 0 22px; color: #3c4b60; font-size: 14px; line-height: 1.7; }
+
+/* --- Block stack: the ONE place block-to-block separation is defined. `.generic-chapter` is the
+   chapter body that stacks every content block (Text, Callout, FAQ, Steps, Image, Parameter
+   table, …) — bare or wrapped in `.rc-anchor-block`. A single owl rule + token gives an equal,
+   visibly-larger-than-paragraph gap for EVERY type combination. No per-block-type margins, no
+   blank-paragraph spacers. Surfaces below only re-point the token. --- */
+.generic-chapter > .rc-anchor-block > * { margin-top: 0; margin-bottom: 0; }
+.generic-chapter > * { margin-top: var(--block-stack-gap); margin-bottom: 0; }
+.generic-chapter > :first-child { margin-top: 0; }
+/* SupportedConfigTable renders a note callout INSIDE one stack member — keep it separated from
+   the table above it (this is not block-to-block spacing). Excludes the stack itself, whose
+   direct children are governed only by the token above. */
+.manual-content:not(.generic-chapter) > .manual-callout { margin-top: 16px; }
 .step-list { display: grid; gap: 14px; }
 .step-list article { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 12px; }
 .step-list article > span { width: 30px; height: 30px; display: grid; place-items: center; color: white; background: #1d4ed8; border-radius: 50%; font-size: 12px; font-weight: 750; }
 .step-list h3 { margin: 1px 0 3px; color: #172235; font-size: 13px; }
 .step-list p { margin: 0; color: #475569; font-size: 12px; line-height: 1.6; }
 .manual-content code { padding: 1px 4px; color: #1e3a8a; background: #eff6ff; border-radius: 3px; font-size: .9em; }
-.manual-image-block { margin: 22px 0; overflow: hidden; border: 1px solid #cbd5e1; border-radius: 5px; }
+.manual-image-block { overflow: hidden; border: 1px solid #cbd5e1; border-radius: 5px; }
 .manual-image-block img { width: 100%; height: auto; }
 .manual-image-block figcaption { padding: 8px 11px; color: #64748b; background: #f8fafc; border-top: 1px solid #dfe5ec; font-size: 9px; overflow-wrap: anywhere; }
 .manual-step-image { margin: 8px 0 0; overflow: hidden; border: 1px solid #dfe5ec; border-radius: 5px; }
 .manual-step-image img { width: 100%; height: auto; }
 .manual-step-image figcaption { padding: 6px 9px; color: #64748b; background: #f8fafc; border-top: 1px solid #edf0f3; font-size: 9px; overflow-wrap: anywhere; }
-.manual-callout { display: flex; gap: 10px; margin-top: 22px; padding: 12px; border: 1px solid; border-radius: 5px; }
+.manual-callout { display: flex; gap: 10px; padding: 12px; border: 1px solid; border-radius: 5px; }
 .manual-callout svg { width: 18px; flex: none; }
 .manual-callout strong { font-size: 11px; }
 .manual-callout p { margin: 2px 0 0; font-size: 10px; line-height: 1.6; }
@@ -513,8 +531,8 @@ button, a, input, select, textarea { touch-action: manipulation; }
 .manual-page .step-list article > span { width: 24px; height: 24px; font-size: 9px; }
 .manual-page .step-list h3 { font-size: 10px; }
 .manual-page .step-list p { font-size: 9px; }
-.manual-page .manual-image-block { margin: 14px 0; }
-.manual-page .manual-callout { margin-top: 13px; padding: 9px; }
+.manual-page .generic-chapter { --block-stack-gap: 16px; }
+.manual-page .manual-callout { padding: 9px; }
 
 /* Phase 7 slices 1–2 — public reading shell: header (search + versions) + TOC sidebar + document.
    Minimal on purpose; final public UX styling is a later slice. */
@@ -610,7 +628,8 @@ html:has(.pm-shell) { scroll-behavior: auto; }
 .public-manual .step-list article > span { width: 26px; height: 26px; font-size: 11px; }
 .public-manual .step-list h3 { font-size: 13.5px; }
 .public-manual .step-list p { font-size: 13px; line-height: 1.62; }
-.public-manual .manual-callout { margin-top: 18px; padding: 12px 14px; border-radius: 7px; }
+.public-manual .generic-chapter { --block-stack-gap: 22px; }
+.public-manual .manual-callout { padding: 12px 14px; border-radius: 7px; }
 .public-manual .manual-callout p { font-size: 12.5px; line-height: 1.6; }
 .public-manual .manual-callout svg { width: 18px; }
 .public-manual .parameter-group-heading { margin: 26px 0 12px; }
@@ -620,7 +639,7 @@ html:has(.pm-shell) { scroll-behavior: auto; }
 .public-manual .parameter-table th { padding: 9px 10px; font-size: 10px; letter-spacing: .03em; text-transform: uppercase; }
 .public-manual .parameter-table td { padding: 9px 10px; }
 .public-manual .manual-content code { font-size: 12px; }
-.public-manual .manual-image-block { margin: 24px 0; border-radius: 7px; }
+.public-manual .manual-image-block { border-radius: 7px; }
 .public-manual .manual-image-block figcaption,
 .public-manual .manual-step-image figcaption { padding: 9px 12px; font-size: 11px; }
 .public-manual .manual-step-image { margin-top: 10px; border-radius: 7px; }
@@ -794,6 +813,7 @@ html:has(.pm-shell) { scroll-behavior: auto; }
    ============================================================ */
 .pdf-shell { background: white; color: #0f172a; }
 .pdf-shell .a4-document { width: auto; max-width: none; gap: 0; display: block; box-shadow: none; }
+.pdf-shell .generic-chapter { --block-stack-gap: 16px; }
 
 @page { size: A4; }
 
@@ -1013,7 +1033,7 @@ html:has(.pm-shell) { scroll-behavior: auto; }
 .editor-empty p { margin: 0; color: #64748b; font-size: 13px; }
 .editor-empty-suggested { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
 
-.block-list { list-style: none; margin: 0; padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+.block-list { list-style: none; margin: 0; padding: 16px; display: flex; flex-direction: column; gap: var(--block-list-gap); }
 .block-item { border: 1px solid #dfe5ec; border-radius: 8px; background: #fff; overflow: hidden; }
 .block-item[data-save="error"] { border-color: var(--danger); }
 .block-item[data-save="conflict"] { border-color: var(--warning); }
