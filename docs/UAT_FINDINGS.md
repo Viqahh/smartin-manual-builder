@@ -84,3 +84,48 @@ Coalesced client-side history push ~400 ms after typing stops (deduped), so undo
 waiting for autosave; UAT-01/UAT-04 fixes remove the state-loss that broke structural undo;
 Undo/Redo controls state that history is session-scoped. No persistent version-control added.
 Tests: extended `tests/unit/section-editor-undo.test.tsx`.
+
+## Phase 8A.5 follow-up — Supabase environment isolation + persistence/navigation hardening
+
+Real-user Production UAT (2026-09-04) surfaced a second, deeper instance of the UAT-01 class of
+bug, plus a correction to the UAT-25 fix below. Full technical detail in `docs/PHASE_8.md`
+("Phase 8A.5") and `docs/ENVIRONMENTS.md`. This entry preserves history — UAT-25's original 8A-P2
+status line above is left as written; this is a correction, not a rewrite.
+
+### UAT-25 — correction: the 8A-P2 fix (`<Link prefetch>`) is SUPERSEDED
+The 8A-P2 fix reduced apparent Edit ↔ Preview latency but reintroduced a correctness bug: the
+prefetched `/preview` RSC payload could be served stale — edits made after the prefetch fired were
+not reflected in Preview until a hard browser refresh, and users sometimes had to click Preview
+more than once. **Superseded (8A.5):** Preview is no longer a prefetched `<Link>`. It is a save
+barrier transition (`features/manuals/preview-nav.ts::openPreviewTransition`): a synchronous
+re-entrancy guard → `await flushPending()` (every pending block edit persisted) → fire-and-forget
+route revalidation → `router.push`. `/preview` stays `force-dynamic` and is never prefetched, so
+navigation always renders current data. Single click; the button shows "Membuka preview…" and
+stays disabled for the whole transition; a failed flush blocks navigation with a visible message
+instead of showing stale content. **Status: FIXED (8A.5)**, replacing "IMPROVED (8A-P2)" above.
+
+### 8A.5-01 — Manual Builder block create/update race → duplicate DB row (found live on Production)
+**Status: FIXED (8A.5), Migration 32.** Discovered on a hand-authored Production manual, not a
+fixture. Typing through a new block's `createBlock` round-trip could leave a duplicate
+`manual_blocks` row (the client tracked only the second, orphaning the first); fast chapter
+navigation could drop a pending debounced save (UAT-01's class of bug, recurring at a lower
+layer); Preview could show stale or duplicated content. Root cause: the create→update decision
+read a React-deferred ref, so a coalesced autosave immediately after a successful `createBlock`
+re-ran the CREATE path before the new id was reconciled. Fixed at both layers: `keyToId`
+(synchronous ref, not render timing) decides create vs. update; `client_token` (migration 32,
+partial unique index on live rows) makes the database itself reject a duplicate create for the
+same logical block; `flushAll()` is a bounded, awaitable save barrier that chapter/Preview
+navigation cannot bypass. Verified clean on Production post-fix: one live row per non-null
+`client_token`, 0 new NULL-token duplicates, 0 exact-payload duplicate groups. The one
+pre-existing duplicate (created before the fix) is a soft-deleted, non-live row, left untouched.
+
+### Block spacing — style polish, not a defect
+Two adjacent chapter blocks (e.g. Text → Text) rendered with no visible gap. Fixed with one
+layout-level spacing token instead of per-block-type margins, consistent across Editor, Preview,
+Public Manual, and PDF. No content mutation. **Status: DONE (8A.5).**
+
+## Phase 8B-4 — chapter delete safety (new finding, not a regression)
+
+| ID | Sev | Area | Summary | Status |
+|---|---|---|---|---|
+| 8B-01 | MEDIUM | authoring UX | Deleting a custom chapter had neither a confirmation step nor an undo affordance, unlike block delete (which stashes the removed block and offers a "Pulihkan" restore control). | **FIXED (8B-4)** — the delete trigger now opens an inline confirmation naming the chapter title; Cancel is the default-focused/safe action; Escape cancels; only an explicit confirm click deletes. No change to reorder/rename/add or block-level behaviour. |

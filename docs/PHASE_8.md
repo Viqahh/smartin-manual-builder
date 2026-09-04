@@ -1,7 +1,20 @@
 # Phase 8 — Quality & real-user hardening
 
-> **Status: PHASE 8A (Real User UAT Correction Pass) — IN PROGRESS. Baseline
-> `c5764f2` (Phase 7 complete). No migration (28). Not committed / not pushed / Production untouched.**
+> **Status (2026-09-04):**
+> - **Phase 8A (Real User UAT Correction Pass) — CLOSED.** Slices 8A-P0 / 8A-P1+P2 / 8A-FINAL /
+>   UAT-35 (migrations 29–31), all findings tracked in [`docs/UAT_FINDINGS.md`](./UAT_FINDINGS.md).
+> - **Phase 8A.5 (Supabase environment isolation + Production persistence/navigation hardening) —
+>   CLOSED.** See "Phase 8A.5" below. Migration 32. Isolation contract in
+>   [`docs/ENVIRONMENTS.md`](./ENVIRONMENTS.md).
+> - **Phase 8B (Final Quality & Release Closeout) — IN PROGRESS.** Closes the original `AC-P8-1`
+>   through `AC-P8-10` (never formally walked until now — see the closure matrix once complete).
+>   Phase 8 as a whole is **NOT YET marked complete** — that happens only once every 8B release
+>   gate is green (final slice of this document).
+> - **Production**, live commit at last update: `5bd8582` (`style(manual): add consistent block
+>   spacing across rendered surfaces`), Supabase project `wotidyhpbltoxmzvdqkj`, migration 32,
+>   drift 0. **DEV/Preview**, Supabase project `tmrwhkhydkjaubpuegqa`, migration 32, drift 0.
+>
+> Baseline for this whole Phase 8 document remains `c5764f2` (Phase 7 complete, migration 28).
 
 Phase 8A is a **real-user UAT correction pass**, not a feature phase. A developer built a
 complete VMax EA UAT manual by hand; automated tests were green but real authoring exposed
@@ -648,3 +661,147 @@ Verified on Preview (via `data-he-eligible`, no interaction needed):
     `.v-ev-open` count = 0 → NO button.
   • VMax EA UAT — no WARNING → no button. Console clean.
 Unit **585 pass**, integration **148 pass**, typecheck/lint/build clean, migrations **31**.
+
+---
+
+# Phase 8A — CLOSED
+
+All findings above (8A-P0 correctness blockers, 8A-P1+P2 authoring/validator/presentation pass,
+8A-FINAL validation UX correction, UAT-35 human-evidence workflow + its two eligibility
+re-audits) are resolved and verified. Final state: unit **585 pass**, integration **148 pass**,
+migrations **1–31**, typecheck/lint/build clean. No open 8A finding remains (`docs/UAT_FINDINGS.md`
+has no row without a `FIXED`/`IMPLEMENTED`/`IMPROVED` status).
+
+---
+
+# Phase 8A.5 — Supabase environment isolation + Production persistence/navigation hardening — CLOSED
+
+Not a UAT slice — triggered by discovering that Vercel Preview *and* Production shared one
+Supabase project (`tmrwhkhydkjaubpuegqa`), then by a real Production data-integrity defect found
+during the resulting cutover UAT. Full guard/mapping detail lives in
+[`docs/ENVIRONMENTS.md`](./ENVIRONMENTS.md); this section is the narrative record.
+
+## Environment isolation
+
+DEV/Preview and Production now use separate Supabase projects (`tmrwhkhydkjaubpuegqa` /
+`wotidyhpbltoxmzvdqkj`). `lib/env.ts` → `assertSupabaseProjectMatchesEnv()` is a **hard** runtime
+guard at the server/service Supabase client boundary: `production` may only use the PROD ref,
+`development`/`preview` may only use the DEV ref, an unrecognised ref or a mismatch throws and
+stops client creation. `/api/health` surfaces the same check non-fatally (`env` + "APP_ENV/project
+match"). A parallel guard (`tests/integration/_guard.ts`) keeps the integration suite DEV-only,
+and `scripts/fixtures/_guard.mjs` keeps ad-hoc fixture/UAT scripts DEV-only + explicit-opt-in.
+First Production identity was bootstrapped via `supabase/prod-bootstrap.sql` (a template, no real
+values committed) — one real organisation, one ADMIN membership, no demo/UAT data.
+
+## Migration 32 — `client_token` idempotency (`20260901003100_phase8a5_block_client_token.sql`)
+
+**Root cause found live on Production** (a hand-authored manual, not a fixture): the Manual
+Builder's autosave queue could coalesce a second save for a still-new block immediately after
+`createBlock` succeeded, before the returned id was reconciled into the React-deferred
+`blocksRef` — so the coalesced save re-ran the CREATE path and produced a **second**
+`manual_blocks` row that the client then abandoned (an orphan live row, reappearing on reload as
+apparent duplication). A second, related defect: chapter navigation had no save barrier, so a
+fast chapter switch could drop a pending debounced edit (`dispose()` on unmount cleared timers
+without flushing) — the same class of bug as UAT-01, recurring at a lower layer.
+
+**Database-level fix (forward migration, not a rewrite of 1–31):** `manual_blocks.client_token
+uuid` — a stable, content-independent identity generated once when a draft block is created,
+resent on every create retry, never derived from text. Partial unique index
+`(manual_section_id, client_token) WHERE client_token IS NOT NULL AND deleted_at IS NULL` — at
+most one **live** row per logical client-created block; a duplicate create attempt with the same
+token reconciles to the existing row (pre-check, plus a `23505`-recovery path for the concurrent
+case) instead of inserting another. Legacy rows keep `client_token = NULL`, unconstrained, never
+backfilled.
+
+**Application-level fix:**
+- `features/manuals/editor/section-editor.tsx` — the create→update decision is resolved from
+  `keyToId` (a synchronous ref updated the instant a create succeeds), never from React render
+  timing.
+- `lib/editor/autosave-queue.ts` — `flushAll()`: a single awaitable, ~15s-bounded save barrier
+  that drains every pending/in-flight/coalesced write and reports which entities did not reach a
+  clean persisted state; `dispose()` is reduced to best-effort only — correctness comes from an
+  explicit `await flushPending()` before every chapter/section switch and before Preview
+  navigation, never from unmount cleanup. A failed flush blocks navigation and shows an explicit
+  message instead of silently proceeding or losing the edit.
+- `features/manuals/preview-nav.ts` — `openPreviewTransition()`: a synchronous re-entrancy guard
+  (a repeated click before React re-renders is a no-op) → the save barrier → fire-and-forget route
+  revalidation → navigate exactly once. The Preview control is a `<button>` (never a prefetched
+  `<Link>`); `/preview` stays `force-dynamic`, so navigation always renders current data with no
+  hard refresh. The button shows "Membuka preview…" and stays disabled for the whole transition.
+- `features/blocks/actions.ts` — `createBlock`/`updateBlock`/`softDeleteBlock` also
+  `revalidatePath` the manual's `/edit` + `/preview` routes on every successful write.
+
+**UAT-25 correction** (does not delete the original finding — see `docs/UAT_FINDINGS.md`): the
+8A-P2 fix for UAT-25 used `<Link prefetch>` to mask Edit↔Preview latency, which reintroduced a
+staleness risk the barrier above now removes properly.
+
+**Verification:** unit **644 pass** (autosave-queue-barrier ×8, preview-nav ×7,
+section-editor-persistence ×5, block-spacing ×9, chapter-nav-delete ×7, env-guards ×24, plus the
+existing suite), integration **152 pass** on DEV (incl. 4 `client_token` DB-constraint
+assertions), typecheck/lint/build clean. Migration 32 applied to DEV first, full regression green,
+Preview UAT passed, only then applied to Production (drift 0 on both). Post-fix Production DB
+inspection: exactly one live row per non-null `client_token`, 0 new NULL-token duplicates, 0
+exact-payload duplicate groups. The one pre-existing duplicate (created before the fix, on the
+Production smoke-test manual) is a soft-deleted, non-live row — left untouched per instruction.
+
+## Block spacing (style, not a defect fix)
+
+Two adjacent chapter blocks (e.g. Text→Text) could render with no visible gap. Fixed with one
+layout-level token (`--block-stack-gap` on `.generic-chapter`, an owl rule + `:first-child` reset)
+instead of per-block-type margins — consistent across Editor read-view, Preview, Public Manual,
+and PDF; in-block paragraph spacing untouched and stays visibly smaller. No content mutation.
+Shipped as its own commit (`5bd8582`) after the persistence fix (`32c63dd`) landed and was smoke-
+verified. Tests: `tests/unit/block-spacing.test.tsx` (9).
+
+## DEV-only cleanup
+
+Two pre-existing orphan scratch functions (`public._c_guard()`, `public._do_del(int)`) —
+unreferenced by any migration, trigger, RPC, test, or application code; their bodies referenced
+tables (`_log`, `_c`) that don't exist in the schema — were dropped from DEV only (Phase 8B-2). No
+Production migration; Production never had them.
+
+---
+
+# Phase 8B — Final Quality & Release Closeout — IN PROGRESS
+
+Closes the original `AC-P8-1..10` (never formally walked before now), tracked as a closure matrix
+in the final slice of this document. No new product feature; no Phase 9.
+
+## 8B-1 — Documentation synchronisation (this update)
+`docs/PHASE_8.md` (this file), `docs/UAT_FINDINGS.md` (UAT-25 correction, no history deleted),
+`docs/ENVIRONMENTS.md` (status refresh), `docs/IMPLEMENTATION_PLAN.md` (Phase 8 row: 8A/8A.5
+closed, 8B in progress — **not** yet marked complete).
+
+## 8B-2 — DEV-only cleanup
+Done — see "DEV-only cleanup" above.
+
+## 8B-3 — CI integration gate
+`.github/workflows/ci.yml` gained an `integration` job (`needs: verify`, i.e. runs only after
+lint/typecheck/unit/build are green) using repo secrets `SUPABASE_TEST_URL` /
+`SUPABASE_TEST_ANON_KEY` / `SUPABASE_TEST_SECRET_KEY` + `APP_ENV=development`. The existing
+`tests/integration/_guard.ts` fail-closed project-ref check (DEV ref only, Production ref
+hard-aborts) is unchanged and remains the sole target-safety enforcement — nothing below weakens
+or replaces it.
+
+Hardened secret-presence handling (so a missing secret can never look like a green pass): a PR
+from a fork is detected (`github.event.pull_request.head.repo.full_name != github.repository`)
+and explicitly **skipped** with a logged reason — GitHub never exposes repository secrets to fork
+PRs, so this is expected, not a failure. On the authoritative repository (a push to `main`, or a
+PR from a branch of this same repo) a step asserts all three secrets are non-empty *before* the
+suite runs; if any is missing, the job **fails** with `::error::` naming which secret(s) are
+missing (never the values) instead of letting the suite's own `describe.skipIf` self-skip report
+a false green. **Operational once the three secrets are added in the repository settings**
+(secret *values* are never committed).
+
+## 8B-4 — Chapter delete safety
+Deleting a custom chapter had neither confirmation nor undo (unlike block delete, which stashes
+the removed block and offers a restore control). Fixed with the smallest safe UX:
+`features/manuals/editor/chapter-nav.tsx` — the first "Hapus bab" click now only opens an inline
+confirmation naming the chapter title ("Hapus bab "…"? Tidak dapat dibatalkan."); Cancel is the
+default-focused action (Enter is always safe); Escape cancels; only an explicit click (or Enter
+with that button itself focused) on "Ya, hapus bab …" calls the real delete. No change to reorder,
+rename, add, or block-level behaviour. Tests: `tests/unit/chapter-nav-delete.test.tsx` (7).
+
+_Slices 8B-5 through 8B-12 (live accessibility/responsive audit, empty/loading/error-state audit,
+security/RBAC/RLS closure, performance evidence, dependency/dead-code review, full DEV/Preview
+E2E lifecycle, the `AC-P8-1..10` evidence matrix, and final release/handover) are not yet started._

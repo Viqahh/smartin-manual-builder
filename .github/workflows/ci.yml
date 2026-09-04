@@ -36,3 +36,61 @@ jobs:
           NEXT_PUBLIC_SUPABASE_URL: ""
           NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ""
           APP_URL: http://localhost:3000
+
+  # Phase 8B-3 — DEV-only live-Supabase integration suite. Runs only after lint/typecheck/unit/
+  # build are green. Never touches Production: `tests/integration/_guard.ts` asserts
+  # `SUPABASE_TEST_URL` resolves to the known DEV project ref and hard-aborts on the Production
+  # ref, an unrecognised ref, or APP_ENV=production (docs/ENVIRONMENTS.md) — that guard is NOT
+  # weakened or replaced by anything below.
+  #
+  # A fork PR never receives repository secrets (GitHub platform behaviour), so the three
+  # SUPABASE_TEST_* secrets are genuinely unavailable there — that case is skipped explicitly,
+  # with a log line stating why, and is NOT a failure. On the authoritative repository (a push to
+  # `main`, or a PR from a branch of this same repo) the secrets MUST be present; if any is
+  # missing the job FAILS with a clear configuration error instead of silently reporting green via
+  # the suite's own self-skip. No step below ever echoes a secret's value.
+  integration:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Skip — fork PR (repository secrets are not available to it)
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+        run: |
+          echo "::notice::Skipping DEV integration tests: this PR is from a fork, and GitHub does not expose this repository's secrets (SUPABASE_TEST_URL / SUPABASE_TEST_ANON_KEY / SUPABASE_TEST_SECRET_KEY) to fork PRs. This is expected for external contributions, not a failure. The suite runs for real on pushes/PRs within this repository."
+
+      - name: Verify required DEV integration secrets are configured
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          missing=""
+          [ -z "$SUPABASE_TEST_URL" ] && missing="$missing SUPABASE_TEST_URL"
+          [ -z "$SUPABASE_TEST_ANON_KEY" ] && missing="$missing SUPABASE_TEST_ANON_KEY"
+          [ -z "$SUPABASE_TEST_SECRET_KEY" ] && missing="$missing SUPABASE_TEST_SECRET_KEY"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing required DEV integration secret(s):$missing — add them under Settings > Secrets and variables > Actions (DEV Supabase project ONLY; see docs/ENVIRONMENTS.md). Refusing to report a false green by letting the suite self-skip."
+            exit 1
+          fi
+          echo "DEV integration secrets are present (values not shown)."
+        env:
+          SUPABASE_TEST_URL: ${{ secrets.SUPABASE_TEST_URL }}
+          SUPABASE_TEST_ANON_KEY: ${{ secrets.SUPABASE_TEST_ANON_KEY }}
+          SUPABASE_TEST_SECRET_KEY: ${{ secrets.SUPABASE_TEST_SECRET_KEY }}
+
+      - name: DEV integration tests
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        run: npm run test:integration
+        env:
+          # DEV/Preview project ONLY — never Production. See docs/ENVIRONMENTS.md.
+          SUPABASE_TEST_URL: ${{ secrets.SUPABASE_TEST_URL }}
+          SUPABASE_TEST_ANON_KEY: ${{ secrets.SUPABASE_TEST_ANON_KEY }}
+          SUPABASE_TEST_SECRET_KEY: ${{ secrets.SUPABASE_TEST_SECRET_KEY }}
+          APP_ENV: development

@@ -4,6 +4,13 @@ Architecture-first repository for **PT Smartin Advisor Sistem's EA Developer Too
 
 ## Current delivery
 
+**Phases 1–7 are implemented and phases 8A / 8A.5 are closed; Phase 8B — Final Quality & Release
+Closeout is in progress** (not yet complete). DEV/Preview and Production run on separate Supabase
+projects (`docs/ENVIRONMENTS.md`); migration 32 is applied to both, drift 0. Status, the migration
+history, and the environment map: [`docs/PHASE_8.md`](docs/PHASE_8.md) and
+[`docs/ENVIRONMENTS.md`](docs/ENVIRONMENTS.md). The phase-by-phase history below is preserved as
+written at the time each phase shipped.
+
 **Phase 2 — Data & CRUD is implemented** (Supabase Postgres + Auth + Storage, RLS, organisation/role model, EA product/version/supported-configuration/parameter CRUD, manual + manual-version + section + block persistence, private image upload, real dynamic manual routing, action-based server authorization, `row_version` autosave with conflict handling, unit tests, CI). `lint`, `typecheck`, `test`, and `build` all pass.
 
 The schema is applied to Supabase DEV and the Phase 2 live integration suite (`tests/integration/rls.test.ts`) passes **27 / 0 / 0** — see [`docs/PHASE_2.md`](docs/PHASE_2.md).
@@ -75,9 +82,17 @@ Open `http://localhost:3000`. The app boots; `/api/health` reports `ready:false`
 ```bash
 npm run lint
 npm run typecheck
-npm run test        # 39 unit tests; RLS integration tests are credential-gated
+npm run test              # unit tests; RLS/data-layer integration tests are credential-gated (self-skip)
+npm run test:integration  # live DEV Supabase only — see docs/ENVIRONMENTS.md before running this
 npm run build
 ```
+
+`npm run test:integration` requires `SUPABASE_TEST_URL` / `SUPABASE_TEST_ANON_KEY` (and optionally
+`SUPABASE_TEST_SECRET_KEY`, else it falls back to `SUPABASE_SECRET_KEY`) pointed at the **DEV**
+Supabase project. A fail-closed guard (`tests/integration/_guard.ts`) aborts the whole suite if
+the target resolves to Production or an unrecognised project — see `docs/ENVIRONMENTS.md`. CI runs
+this same job automatically on `main` once the three secrets are configured in the repository's
+Actions settings.
 
 ## Product guardrails
 
@@ -90,4 +105,8 @@ npm run build
 
 ## Next step
 
-Phase 2 was verified live against Supabase DEV (`docs/PHASE_2.md` §0c). Phase 3 (document editor) is implemented — see `docs/PHASE_3.md`; it awaits review and applying migration `20260901000800` to DEV.
+Phase 8B — Final Quality & Release Closeout is in progress: documentation sync, DEV cleanup, and
+the CI integration gate are done; the live accessibility/responsive audit, security/RBAC/RLS
+closure, performance evidence, dependency review, full DEV/Preview E2E lifecycle, and the formal
+`AC-P8-1..10` evidence matrix are next. See [`docs/PHASE_8.md`](docs/PHASE_8.md) for current
+status — Phase 8 is marked complete only once every 8B release gate passes.

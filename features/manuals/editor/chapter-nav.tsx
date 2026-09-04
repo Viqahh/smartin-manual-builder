@@ -43,6 +43,10 @@ export function ChapterNav({
   const [newTitle, setNewTitle] = useState("");
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameTitle, setRenameTitle] = useState("");
+  // Phase 8B-4 — chapter delete has no undo (unlike block delete's restore stash), so it requires
+  // an explicit inline confirmation: Cancel is the default focus, Hapus needs its own click/Enter,
+  // Escape cancels. Never fires onDelete from the initial Trash2 click.
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const dragFrom = useRef<number | null>(null);
   const [dragOver, setDragOver] = useState<number | null>(null);
 
@@ -158,7 +162,36 @@ export function ChapterNav({
                 </button>
               )}
 
-              {canEdit && renamingId !== chapter.id && (
+              {canEdit && renamingId !== chapter.id && deletingId === chapter.id && (
+                <div
+                  className="chapter-delete-confirm"
+                  role="group"
+                  aria-label={`Konfirmasi hapus bab ${chapter.title}`}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") setDeletingId(null);
+                  }}
+                >
+                  <span className="chapter-delete-confirm-text">
+                    Hapus bab &ldquo;{chapter.title}&rdquo;? Tidak dapat dibatalkan.
+                  </span>
+                  {/* Cancel is the default focus target — Enter here is always safe. */}
+                  <button type="button" className="secondary-button" autoFocus onClick={() => setDeletingId(null)}>
+                    Batal
+                  </button>
+                  <button
+                    type="button"
+                    className="chapter-delete-confirm-danger"
+                    aria-label={`Ya, hapus bab ${chapter.title}`}
+                    onClick={() => {
+                      setDeletingId(null);
+                      onDelete(chapter.id);
+                    }}
+                  >
+                    <Trash2 aria-hidden="true" size={12} /> Hapus
+                  </button>
+                </div>
+              )}
+              {canEdit && renamingId !== chapter.id && deletingId !== chapter.id && (
                 <div className="chapter-row-actions">
                   <button
                     type="button"
@@ -189,7 +222,8 @@ export function ChapterNav({
                       >
                         <Pencil aria-hidden="true" size={12} />
                       </button>
-                      <button type="button" aria-label={`Hapus bab ${chapter.title}`} onClick={() => onDelete(chapter.id)}>
+                      {/* First click only opens the inline confirmation — never deletes directly. */}
+                      <button type="button" aria-label={`Hapus bab ${chapter.title}`} onClick={() => setDeletingId(chapter.id)}>
                         <Trash2 aria-hidden="true" size={12} />
                       </button>
                     </>

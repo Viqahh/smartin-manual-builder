@@ -113,13 +113,32 @@ Creates exactly one `organizations` row and one ADMIN `memberships` row. No auth
 
 Never run the integration suite or fixture/UAT scripts against Production.
 
-## Production bootstrap status (2026-09-03)
+## Production status (2026-09-04)
 
-- Migrations 1–31 applied to `wotidyhpbltoxmzvdqkj`; `migration list` — all 31 rows `local == remote`.
-- `seed.sql` **not** run. Verified empty: 0 organizations / profiles / auth users / memberships /
-  ea_products / manuals / manual_versions / checklist_results / audit_events / public_manuals.
-- Structural parity with DEV: 29 tables, 29 RLS-enabled, 67 policies, 50 triggers, 18 template
-  sections, 31 checklist items, `human_evidence_eligible` = {CHK-INSTALL-AUTOTRADING, CHK-PACKAGE-FILES}.
-- Vercel Production Supabase env vars **not yet repointed** — pending explicit go-ahead.
-- Known DEV-only drift (pre-existing, unrelated): two scratch functions `public._c_guard()`,
-  `public._do_del(int)` exist on DEV only — leave alone for now; not a Production blocker.
+- **Cutover complete.** Vercel Production Supabase env vars repointed to `wotidyhpbltoxmzvdqkj` +
+  `APP_ENV=production`; Preview stays on DEV `tmrwhkhydkjaubpuegqa` + `APP_ENV=preview`. Verified
+  live via `/api/health` → `env:"production"`, `APP_ENV/project match: ok`.
+- Migrations **1–32** applied to `wotidyhpbltoxmzvdqkj`; `migration list` — all 32 rows
+  `local == remote`, drift 0. Migration 32 (`client_token` idempotency, Phase 8A.5) applied after
+  full DEV regression + Preview UAT passed.
+- `seed.sql` **never** run on Production. First identity: one real organisation + one ADMIN
+  membership via `supabase/prod-bootstrap.sql` (template, no real values committed) after the
+  first admin signed up through the Production Auth dashboard directly.
+- Post-persistence-fix DB inspection (read-only): exactly one live `manual_blocks` row per
+  non-null `(manual_section_id, client_token)`; 0 new NULL-token duplicates; 0 exact-payload
+  duplicate groups. One pre-existing duplicate (created before the fix, on the Production
+  smoke-test manual) is a soft-deleted, non-live row — left untouched, not hard-deleted.
+- **DEV-only cleanup done (Phase 8B-2):** the two orphan scratch functions `public._c_guard()` /
+  `public._do_del(int)` (unreferenced by any migration/trigger/RPC/test/app code; bodies pointed
+  at tables that don't exist) were dropped from DEV only. Production never had them — no
+  Production migration was needed or made.
+- **CI (Phase 8B-3):** `.github/workflows/ci.yml` runs a DEV-only `integration` job after
+  lint/typecheck/unit/build, using repo secrets `SUPABASE_TEST_URL` / `SUPABASE_TEST_ANON_KEY` /
+  `SUPABASE_TEST_SECRET_KEY` + `APP_ENV=development`. The project-ref guard
+  (`assertIntegrationTargetIsDev()`) is unchanged and remains the sole target-safety check. The
+  workflow itself hardens the *secret-presence* case: on a PR from a fork, GitHub never exposes
+  repository secrets, so that case is skipped explicitly with a logged reason (not a failure); on
+  the authoritative repository (a push to `main`, or a same-repo PR) the three secrets are
+  required — if any is missing the job **fails** with a configuration error rather than letting
+  the suite's own self-skip report a false green. No step ever prints a secret value. Becomes
+  fully operational once the three secrets are added in the repository's Actions settings.
