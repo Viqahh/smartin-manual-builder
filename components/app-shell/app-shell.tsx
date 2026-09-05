@@ -19,8 +19,11 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { SignOutButton } from "@/app/login/sign-out-button";
+
+const FOCUSABLE_SELECTOR =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 const ROLE_LABEL: Record<string, string> = {
   DEVELOPER: "Developer",
@@ -150,12 +153,39 @@ export function AppShell({
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
+  // Phase 8B-5 (live audit finding) — the mobile drawer renders behind a visual scrim but
+  // previously let Tab escape into the page underneath it (invisible, unreachable by sighted
+  // keyboard users). It is a modal overlay, so it must trap focus like one: Tab/Shift+Tab cycle
+  // within the drawer only, opening it moves focus in, and closing it returns focus to the
+  // trigger button that opened it.
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const menuTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
     if (!menuOpen) return;
     const closeOnEscape = (event: KeyboardEvent) => event.key === "Escape" && setMenuOpen(false);
+    const trapTab = (event: KeyboardEvent) => {
+      if (event.key !== "Tab" || !menuRef.current) return;
+      const focusable = Array.from(menuRef.current.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+      if (event.shiftKey ? active === first || !menuRef.current.contains(active) : active === last) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      }
+    };
     document.addEventListener("keydown", closeOnEscape);
-    return () => document.removeEventListener("keydown", closeOnEscape);
+    document.addEventListener("keydown", trapTab);
+    const toFocus = menuRef.current?.querySelector<HTMLElement>(".drawer-close");
+    toFocus?.focus();
+    const trigger = menuTriggerRef.current;
+    return () => {
+      document.removeEventListener("keydown", closeOnEscape);
+      document.removeEventListener("keydown", trapTab);
+      trigger?.focus();
+    };
   }, [menuOpen]);
 
   return (
@@ -165,7 +195,7 @@ export function AppShell({
       {menuOpen && (
         <div className="drawer-layer" role="presentation">
           <button className="drawer-scrim" aria-label="Tutup navigasi" onClick={() => setMenuOpen(false)} />
-          <div className="mobile-sidebar">
+          <div className="mobile-sidebar" ref={menuRef} role="dialog" aria-modal="true" aria-label="Navigasi">
             <button className="icon-button drawer-close" aria-label="Tutup navigasi" onClick={() => setMenuOpen(false)}>
               <X aria-hidden="true" size={20} />
             </button>
@@ -175,7 +205,12 @@ export function AppShell({
       )}
       <div className="workspace">
         <header className="workspace-header">
-          <button className="icon-button mobile-menu-button" aria-label="Buka navigasi" onClick={() => setMenuOpen(true)}>
+          <button
+            className="icon-button mobile-menu-button"
+            aria-label="Buka navigasi"
+            ref={menuTriggerRef}
+            onClick={() => setMenuOpen(true)}
+          >
             <Menu aria-hidden="true" size={21} />
           </button>
           <div className="header-search">

@@ -1,21 +1,16 @@
 import "server-only";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import type { ManualStatusDb } from "@/lib/supabase/database.types";
+import { dedupeLatestManualVersion, type ManualListRow } from "@/lib/manual/list-dedupe";
 
-export type ManualListRow = {
-  manualId: string;
-  eaName: string;
-  platform: "MT4" | "MT5";
-  eaVersion: string;
-  manualVersion: string;
-  status: ManualStatusDb;
-  updatedAt: string;
-  sectionsTotal: number;
-};
+export type { ManualListRow };
 
 /**
- * Manuals for the org, shaped for /manuals and the dashboard. One row per manual, showing
- * its latest manual version. Real data only — no localStorage (AC-P2-24).
+ * Manuals for the org, shaped for /manuals and the dashboard. One row per manual, showing its
+ * highest-numbered manual version (see `dedupeLatestManualVersion` — decided by version number,
+ * never by `updated_at` or row order). List order (which manual appears first) follows
+ * `updated_at` DESC, i.e. most recently active manuals first. Real data only — no localStorage
+ * (AC-P2-24).
  */
 export async function listManuals(orgId: string): Promise<ManualListRow[]> {
   const supabase = await createSupabaseServerClient();
@@ -42,7 +37,7 @@ export async function listManuals(orgId: string): Promise<ManualListRow[]> {
     manual_sections: { count: number }[];
   };
 
-  return ((data ?? []) as unknown as RawRow[]).map((r): ManualListRow => {
+  const rows = ((data ?? []) as unknown as RawRow[]).map((r): ManualListRow => {
     const manualRel = r.manuals;
     const product = Array.isArray(manualRel.ea_products) ? manualRel.ea_products[0] : manualRel.ea_products;
     const eaVer = Array.isArray(r.ea_versions) ? r.ea_versions[0] : r.ea_versions;
@@ -58,6 +53,8 @@ export async function listManuals(orgId: string): Promise<ManualListRow[]> {
       sectionsTotal: secCount,
     };
   });
+
+  return dedupeLatestManualVersion(rows);
 }
 
 export type DashboardMetrics = {

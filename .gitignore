@@ -13,3 +13,6 @@ test-results/
 supabase/.temp/
 supabase/.branches/
 .vercel
+
+# local browser/dev-server tooling (per-machine, never ships with the product)
+.claude/

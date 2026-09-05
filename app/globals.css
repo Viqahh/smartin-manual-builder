@@ -755,6 +755,14 @@ html:has(.pm-shell) { scroll-behavior: auto; }
   .wizard-footer > .ghost-button { padding-inline: 8px; }
   .builder-topbar { grid-template-columns: minmax(0, 1fr) auto; }
   .save-state { display: none; }
+  /* Phase 8B-5 (live audit finding): an `auto` grid track sizes to its item's max-content width
+     unless the item can shrink; without `min-width: 0` the readiness disclosure's one-line
+     summary text forced this column to ~320px, squeezing `.builder-breadcrumb` down to ~12px —
+     the "Manual Book" back-link became unusable. Letting the column shrink allows the summary
+     text to wrap instead. */
+  .builder-top-actions { min-width: 0; }
+  .builder-top-actions .review-controls { min-width: 0; max-width: 200px; }
+  .builder-top-actions .review-blockers summary { overflow-wrap: anywhere; }
   .builder-top-actions .primary-button { display: none; }
   .builder-top-actions .secondary-button { padding-inline: 10px; font-size: 0; }
   .builder-top-actions .secondary-button svg { margin: 0; }
