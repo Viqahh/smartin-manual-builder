@@ -1,5 +1,6 @@
 import "server-only";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { signManualImageUrls } from "@/lib/images/sign-urls";
 import type { ManualDataSource, ManualViewModel } from "@/lib/manual/view-model";
 import type { BlockType } from "@/lib/domain/blocks";
 import type {
@@ -188,16 +189,23 @@ export class SupabaseManualDataSource implements ManualDataSource {
         .from("image_assets")
         .select("id, storage_key, alt_text, caption")
         .in("id", assetIds);
-      for (const a of assets ?? []) {
-        const { data: signed } = await supabase.storage
-          .from("manual-images")
-          .createSignedUrl(a.storage_key as string, 60 * 30);
-        vm.images[a.id as string] = {
-          id: a.id as string,
-          altText: (a.alt_text as string | null) ?? null,
-          caption: (a.caption as string | null) ?? null,
-          signedUrl: signed?.signedUrl ?? null,
-        };
+      const rows = assets ?? [];
+      if (rows.length) {
+        // Phase 8B-8 — sign every image the manual references in ONE request rather than one
+        // round-trip per image (an image-heavy chapter was N sequential Storage calls on every
+        // builder load). Same 30-min TTL / private bucket / auth.
+        const urlByKey = await signManualImageUrls(
+          supabase.storage,
+          rows.map((a) => a.storage_key as string),
+        );
+        for (const a of rows) {
+          vm.images[a.id as string] = {
+            id: a.id as string,
+            altText: (a.alt_text as string | null) ?? null,
+            caption: (a.caption as string | null) ?? null,
+            signedUrl: urlByKey.get(a.storage_key as string) ?? null,
+          };
+        }
       }
     }
 

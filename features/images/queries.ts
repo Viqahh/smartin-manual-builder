@@ -1,5 +1,6 @@
 import "server-only";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { signManualImageUrls } from "@/lib/images/sign-urls";
 
 export type OrgImage = {
   id: string;
@@ -24,19 +25,21 @@ export async function listOrgImages(orgId: string, limit = 60): Promise<OrgImage
     .limit(limit);
   if (error) throw error;
 
-  const out: OrgImage[] = [];
-  for (const a of data ?? []) {
-    const { data: signed } = await supabase.storage
-      .from("manual-images")
-      .createSignedUrl(a.storage_key as string, 60 * 30);
-    out.push({
-      id: a.id as string,
-      altText: (a.alt_text as string | null) ?? null,
-      caption: (a.caption as string | null) ?? null,
-      width: (a.width as number | null) ?? null,
-      height: (a.height as number | null) ?? null,
-      signedUrl: signed?.signedUrl ?? null,
-    });
-  }
-  return out;
+  const rows = data ?? [];
+  if (rows.length === 0) return [];
+
+  // Phase 8B-8 — one batched sign request for the whole picker list, not one round-trip per image.
+  const urlByKey = await signManualImageUrls(
+    supabase.storage,
+    rows.map((a) => a.storage_key as string),
+  );
+
+  return rows.map((a) => ({
+    id: a.id as string,
+    altText: (a.alt_text as string | null) ?? null,
+    caption: (a.caption as string | null) ?? null,
+    width: (a.width as number | null) ?? null,
+    height: (a.height as number | null) ?? null,
+    signedUrl: urlByKey.get(a.storage_key as string) ?? null,
+  }));
 }

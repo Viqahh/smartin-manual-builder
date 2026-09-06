@@ -963,6 +963,70 @@ release):**
    the DEV `NEXT_PUBLIC_*` / `SUPABASE_SECRET_KEY` values into those names (the `_guard` still
    verifies the DEV ref). Documentation note only.
 
-_Slices 8B-8 through 8B-12 (performance evidence, dependency/dead-code review, full DEV/Preview
-E2E lifecycle, the `AC-P8-1..10` evidence matrix, and final release/handover) are not yet
-started._
+## 8B-8 — Performance evidence & optimization — CLOSED
+
+Measurement-driven. Local dev server against DEV Supabase, with a temporary `globalThis.fetch`
+tracer (`instrumentation.ts`, since deleted) counting every PostgREST / Storage round-trip. Test
+data: the "Smoke test" manual (18 chapters / 18 blocks / 0 blocks referencing image assets; org
+image library = 3 images) + the published `p7-pdf-normal` / `p7-pdf-large` fixtures. Dev-mode
+wall-clock is inflated (Turbopack, ap-southeast-1 latency) — **round-trip counts and waterfall
+shape are the evidence.**
+
+**P0 / P1 fixed:**
+
+- **Sequential per-image signed-URL generation on every Builder load.** `features/images/queries.ts`
+  `listOrgImages` (`limit = 60`, runs on every builder load) and `features/manuals/data-source.ts`
+  each signed URLs in an `await`-in-`for` loop — one Storage round-trip per image. Extracted
+  `lib/images/sign-urls.ts` `signManualImageUrls()` (one batched `createSignedUrls(keys, 1800)`
+  → `key → url|null` map, positional match, failed item isolated); both call sites use it. Same
+  30-minute TTL, same private `manual-images` bucket, same authorization — only the round-trip
+  count changes.
+  - **Builder initial load, reconciled from the raw trace: 26 → 24 round-trips** (23 PostgREST
+    unchanged; **3 sequential singular `createSignedUrl` → 1 batched `createSignedUrls`**; 0
+    Storage object). On this manual **all 3 "before" signing calls belong to `listOrgImages`**;
+    `data-source.ts` contributes 0 because the manual references no image assets. (An earlier draft
+    claimed two batch calls collapsing via Next `fetch` dedup — **that was incorrect and is
+    withdrawn**; there is only ever one signing call after the fix on this journey.) Savings are
+    linear in image count — a 20-image manual saves ~1 s, a full 60-image picker several seconds.
+
+- **Published-image route issued an unused query per image.** `loadVerifiedPublishedSnapshot`
+  always ran the sibling-`publishedVersions` query, but the per-image callers
+  (`getPublicImageDescriptor`, `openPublicImageSource`) never read it. Added
+  `{ withPublishedVersions = true }`; image paths pass `false`.
+  - **`/manual/<slug>/<v>/image/<idx>`: 5 → 4 round-trips per image request** (trace: the second
+    `public_manual_versions` query removed). Zero behavior change — publication-state resolution
+    and snapshot hash verification are unaffected (regression-tested).
+
+No schema / index / RLS / RPC / permission / publishing-invariant change — client batching +
+error-surfacing + dead-query removal only.
+
+**Regression tests (21):** `tests/unit/sign-image-urls.test.ts` (7 — one `createSignedUrls` for N
+keys, never per-key `createSignedUrl`; 1800 s TTL; bucket; positional map; failed item isolated;
+whole-batch failure; empty input), `tests/unit/list-org-images-batch.test.ts` (3 — real
+`listOrgImages` query path), `tests/unit/data-source-image-signing.test.ts` (3 — real
+`SupabaseManualDataSource` call site with 3 referenced assets: one batched call, asset-id→URL
+map, isolated failure, no-reference → no call), `tests/unit/publication-loader-versions-opt.test.ts`
+(8 — default keeps the versions list; `false` skips exactly that one query; publication-state +
+hash verification unchanged either way; `getPublicManual` vs `getPublicImageDescriptor` wire the
+option correctly).
+
+**Gates:** `tsc` clean, lint clean, unit **692 / 692** (58 files, +21), build ok, DEV integration
+**152 / 152** on this exact source. `git diff --check` clean.
+
+**P2 performance backlog (non-blocking — not implemented):**
+1. Public reading page resolves the slug → snapshot chain twice (`getPublicManual` +
+   `pdfArtifactUiStatus`); thread the resolved `publishedSnapshotId` through. ~60–100 ms.
+2. Cold published-image route re-fetches the FULL `render_json` + recomputes a full SHA-256 per
+   image; `Cache-Control: immutable` limits it to first-paint-per-viewer. A real fix needs a
+   stored image-descriptor projection (schema change → out of scope).
+3. `getValidation` re-invokes `assembleManualViewModel`; free today via Next per-request `fetch`
+   dedup (measured: no extra queries) but fragile — thread the page's `vm` in.
+4. Auth context (`profiles` + `memberships`) re-queried per navigation (~2 queries, ~35–90 ms);
+   deduped within a render.
+5. Two differently-shaped parameter-group reads per builder load (`data-source` ea-version-scoped
+   vs page `listParameterGroups` org-scoped) — consolidatable with care.
+6. Middleware (`proxy.ts`) 60–600 ms/navigation in dev — measure in production before acting.
+7. PDF generation-required path — measure on Preview (real Chromium) during 8B-10 E2E.
+
+_Slices 8B-9 through 8B-12 (dependency/dead-code review, full DEV/Preview E2E lifecycle, the
+`AC-P8-1..10` evidence matrix, and final release/handover) are not yet started._

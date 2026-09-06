@@ -134,7 +134,12 @@ export async function resolvePublishedSnapshotRef(
 export async function loadVerifiedPublishedSnapshot(
   slug: string,
   version: string,
+  // Phase 8B-8 — the sibling-versions list is only used by `getPublicManual` (the reading page).
+  // The image-descriptor path (`getPublicImageDescriptor`, `openPublicImageSource`) calls this
+  // once per served image and never reads `publishedVersions`, so it opts out of that query.
+  opts: { withPublishedVersions?: boolean } = {},
 ): Promise<VerifiedPublishedSnapshot | null> {
+  const { withPublishedVersions = true } = opts;
   if (!slug || !version) return null;
   const svc = createSupabaseServiceClient();
 
@@ -167,16 +172,19 @@ export async function loadVerifiedPublishedSnapshot(
 
   const state: PublicationState = pv.publication_state === "ARCHIVED" ? "ARCHIVED" : "PUBLISHED";
 
-  const { data: pubRows } = await svc
-    .from("public_manual_versions")
-    .select("public_version, published_at")
-    .eq("public_manual_id", pm.id)
-    .eq("publication_state", "PUBLISHED")
-    .order("published_at", { ascending: false });
-  const publishedVersions: PublicVersion[] = (pubRows ?? []).map((r) => ({
-    publicVersion: r.public_version as string,
-    publishedAt: r.published_at as string,
-  }));
+  let publishedVersions: PublicVersion[] = [];
+  if (withPublishedVersions) {
+    const { data: pubRows } = await svc
+      .from("public_manual_versions")
+      .select("public_version, published_at")
+      .eq("public_manual_id", pm.id)
+      .eq("publication_state", "PUBLISHED")
+      .order("published_at", { ascending: false });
+    publishedVersions = (pubRows ?? []).map((r) => ({
+      publicVersion: r.public_version as string,
+      publishedAt: r.published_at as string,
+    }));
+  }
 
   return {
     renderJson: snap.render_json,
@@ -224,7 +232,7 @@ export async function getPublicImageDescriptor(
   version: string,
   idx: number,
 ): Promise<SnapshotImageDescriptor | null> {
-  const verified = await loadVerifiedPublishedSnapshot(slug, version);
+  const verified = await loadVerifiedPublishedSnapshot(slug, version, { withPublishedVersions: false });
   if (!verified) return null;
   const descriptors = snapshotImageDescriptors(verified.renderJson);
   if (!Number.isInteger(idx) || idx < 0 || idx >= descriptors.length) return null;

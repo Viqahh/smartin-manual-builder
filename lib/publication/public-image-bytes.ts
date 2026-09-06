@@ -58,7 +58,7 @@ export type PublicImageSource = {
 };
 
 export async function openPublicImageSource(slug: string, version: string): Promise<PublicImageSource | null> {
-  const verified = await loadVerifiedPublishedSnapshot(slug, version);
+  const verified = await loadVerifiedPublishedSnapshot(slug, version, { withPublishedVersions: false });
   if (!verified) return null;
   const descriptors = snapshotImageDescriptors(verified.renderJson);
   return {
