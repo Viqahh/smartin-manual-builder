@@ -1,20 +1,27 @@
 # Phase 8 — Quality & real-user hardening
 
-> **Status (2026-09-04):**
+> **Status (2026-09-06): PHASE 8 COMPLETE.**
 > - **Phase 8A (Real User UAT Correction Pass) — CLOSED.** Slices 8A-P0 / 8A-P1+P2 / 8A-FINAL /
 >   UAT-35 (migrations 29–31), all findings tracked in [`docs/UAT_FINDINGS.md`](./UAT_FINDINGS.md).
 > - **Phase 8A.5 (Supabase environment isolation + Production persistence/navigation hardening) —
 >   CLOSED.** See "Phase 8A.5" below. Migration 32. Isolation contract in
 >   [`docs/ENVIRONMENTS.md`](./ENVIRONMENTS.md).
-> - **Phase 8B (Final Quality & Release Closeout) — IN PROGRESS.** Closes the original `AC-P8-1`
->   through `AC-P8-10` (never formally walked until now — see the closure matrix once complete).
->   Phase 8 as a whole is **NOT YET marked complete** — that happens only once every 8B release
->   gate is green (final slice of this document).
+> - **Phase 8B (Final Quality & Release Closeout) — COMPLETE.** Slices 8B-1 … 8B-12 all CLOSED.
+>   Slice 8B-11 walked the original `AC-P8-1..10` into a single auditable closure matrix (all nine
+>   MUST criteria **PASS**; AC-P8-7 **PASS WITH KNOWN RISK**; no release blocker). Slice 8B-12
+>   (this document's final slice) produced the IT handover document
+>   [`docs/INTEGRATION.md`](./INTEGRATION.md) and confirmed every final release gate green.
+> - **Phase 8 as a whole is now marked COMPLETE.** Phases 1–8 implementation complete; all Phase 8
+>   MUST acceptance criteria PASS; one SHOULD criterion PASS WITH KNOWN RISK (PDF cold-start,
+>   §8B-12); no known release blocker. This is an internal engineering completion statement — it
+>   does **not** imply Bappebti approval, regulator approval, or compliance certification.
 > - **Production**, live commit at last update: `5bd8582` (`style(manual): add consistent block
 >   spacing across rendered surfaces`), Supabase project `wotidyhpbltoxmzvdqkj`, migration 32,
 >   drift 0. **DEV/Preview**, Supabase project `tmrwhkhydkjaubpuegqa`, migration 32, drift 0.
+>   The `main` push that carries this slice's docs will trigger the next Production deployment.
 >
 > Baseline for this whole Phase 8 document remains `c5764f2` (Phase 7 complete, migration 28).
+> Slice 8B-12 baseline commit: `f9797d289de81cfbde58816a2fe5e9a7311fc026`.
 
 Phase 8A is a **real-user UAT correction pass**, not a feature phase. A developer built a
 complete VMax EA UAT manual by hand; automated tests were green but real authoring exposed
@@ -1544,4 +1551,94 @@ warning). DEV integration **not rerun** — no test/RLS/RPC/product change in 8B
 final green 8B-10 CI **172/172** (run `34020261218`, commit `4fc83e3`) stands as RECENT-INHERITED
 evidence. No `package.json`/lockfile change → no fresh `npm ci`.
 
-_Slice 8B-12 (final release / handover) is not yet started. Phase 8 is NOT complete._
+## 8B-12 — Final release closeout & IT handover — CLOSED
+
+Final Phase 8 slice. **No product code, no schema, no migration change** — docs only, plus a new
+handover document. Baseline commit `f9797d2`.
+
+### Deliverable — `docs/INTEGRATION.md`
+
+A new IT handover document written for the company IT Head / infrastructure owner, so the
+application can be taken over **without depending on the original developer's personal GitHub or
+Vercel accounts**. It contains **no secret values** and links to the authoritative docs rather than
+restating them. Sections: purpose · architecture summary · source-repository handover (transfer vs
+mirror) · deployment ownership (transfer Vercel project / fresh company Vercel project / non-Vercel
+platform — with the Next.js‑server + Chromium requirements spelled out) · environment-variable
+inventory (names + purpose + kind only) · DEV/Preview/Production data separation + the fail-closed
+`APP_ENV`/project guard · Supabase ownership & migration handover · first/future admin setup
+(`supabase/prod-bootstrap.sql` template) · role model · CI / GitHub Actions + post-transfer
+verification · domain/DNS cutover sequence · Vercel-specific settings · PDF operations + the
+carried cold-start risk · AI configuration (Mock AI default; both-or-neither rule) · `/api/health`
+contract · deployment procedure (build never runs migrations) · application vs database rollback ·
+operational checklist · a 14-item ownership-handover checklist ("do not revoke the outgoing
+developer's access until company ownership is independently verified") · known risks / deferred
+items with owners and review dates · a reference index.
+
+### Final release gate — re-confirmed
+
+The 8B-11 `AC-P8-1..10` matrix still holds against the unchanged implementation
+(`f9797d2` = the 8B-11 baseline; 8B-12 changes are docs only):
+
+| AC | Status |
+|---|---|
+| AC-P8-1 | PASS |
+| AC-P8-2 | PASS |
+| AC-P8-3 | PASS |
+| AC-P8-4 | PASS |
+| AC-P8-5 | PASS |
+| AC-P8-6 | PASS |
+| AC-P8-7 | **PASS WITH KNOWN RISK** — PDF cold-start generation > 180 s (warm ≈ 12–19 s; READY GET ≈ 3.3 s and never invokes Chromium; `maxDuration` 300 s). Medium severity, first-request-only, self-healing, non-blocking. Owner: release engineer. Target follow-up: first post-Phase-8 maintenance window. |
+| AC-P8-8 | PASS |
+| AC-P8-9 | PASS |
+| AC-P8-10 | PASS — every PRD-OQ decided; the three deferred *extensions* (OQ-008 multi-locale UI — owner Product; OQ-009 image scanner — owner Platform/Security; OQ-012 admin template editor — owner Product) each carry an explicit **target review date of 2026-12-31** (a planning checkpoint, not a committed delivery date) and a release-impact assessment. |
+
+No MUST is PARTIAL or BLOCKED. **No release blocker.**
+
+### Final small live checks (8B-12)
+
+- **`prefers-reduced-motion` — verified live on deployed Production.** The shipped CSS bundle
+  (`/_next/static/immutable/chunks/289mz5uq_zugb.css`) is parsed by the browser CSSOM with three
+  `@media (prefers-reduced-motion: reduce)` blocks, including the comprehensive global reset
+  `*, ::before, ::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important;
+  animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }` plus
+  `svg.spin { animation: none }` and a shortened `.rc-anchor-flash`. This closes the 8B-5/8B-11 P2
+  ("`prefers-reduced-motion` not independently re-verified live"). OS-level media-feature emulation
+  is not available in the harness; the CSS-level guarantee is unconditional and now confirmed
+  present in the deployed bundle.
+- **375 px responsive spot-check — re-run on deployed Production (`/login`).** Document
+  `scrollWidth == clientWidth` (375), **zero** elements overflowing the viewport, no document
+  horizontal scroll. The two previously noted cosmetic items were re-triaged:
+  - *public-manual footer ~1-char clip @375* — `.manual-page > footer` is a two-span flex bar of
+    static text (`SMARTIN MANUAL BUILDER` + page number) at `font-size: 8px` uppercase; at the
+    narrowest width the brand label can visually crowd the page number by roughly one glyph. It
+    does **not** cause document or nested horizontal scroll. **Remains cosmetic / non-blocking P2;
+    does not violate AC-P8-4.** No UI redesign performed.
+  - *Preview occasionally pre-scrolled* — initial scroll position on the Vercel **Preview**
+    deployment only; not element overflow, not a Production issue. **Remains cosmetic / non-blocking
+    P2; does not violate AC-P8-4.**
+- **Production health — read-only.** `GET https://smartin-manual-builder.vercel.app/api/health`
+  → `{ ok: true, ready: true, env: "production", checks: [… all ok …], "APP_ENV/project match": ok }`.
+  No Production business data was created, edited, or deleted; no destructive E2E against Production.
+
+### 8B-12 gates
+
+`git diff --check` clean · `tsc --noEmit` clean · `eslint .` clean · unit **692 / 692** ·
+`next build` `✓ Compiled successfully` (`ƒ Proxy (Middleware)`, no deprecation warning).
+DEV integration **not re-run in 8B-12** — no product / test / schema / RPC / RLS change (docs
+only); the final green CI on the 8B-11 commit `f9797d2` (**run `34038344993`**, `verify` green,
+`integration` **172 / 172**) stands as RECENT-INHERITED evidence. No `package.json` / lockfile
+change → no fresh `npm ci`.
+
+### Final release summary
+
+- **Phases 1–8 implementation complete.**
+- **All Phase 8 MUST acceptance criteria: PASS.**
+- **One SHOULD acceptance criterion: PASS WITH KNOWN RISK** (PDF cold-start; owned, non-blocking).
+- **No known release blocker.**
+- IT handover documented in [`docs/INTEGRATION.md`](./INTEGRATION.md).
+
+This is an internal engineering completion statement. It does **not** imply Bappebti approval,
+regulator approval, or compliance certification — the product never grants regulatory approval
+(see [`docs/COMPLIANCE_REQUIREMENTS.md`](./COMPLIANCE_REQUIREMENTS.md)).
+
+**Slice 8B-12 CLOSED. Phase 8B COMPLETE. Phase 8 COMPLETE.**

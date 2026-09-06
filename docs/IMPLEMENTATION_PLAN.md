@@ -68,14 +68,15 @@ Finalize shared renderer, public published route, TOC/search/version navigation,
 
 Accessibility, responsive, security and performance audits; comprehensive empty/loading/error states; TypeScript cleanup; dependency review; and end-to-end coverage of permission and publishing boundaries.
 
-**Status (2026-09-04): IN PROGRESS — not yet complete.** Real-user UAT hardening added two
-sub-phases beyond the original plan, both now closed: **Phase 8A** (UAT correction pass —
-authoring/state/output/validator fixes, migrations 29–31) and **Phase 8A.5** (Supabase DEV/Preview
-vs Production environment isolation + a Production block-persistence/Preview-navigation fix,
-migration 32). **Phase 8B — Final Quality & Release Closeout** is now closing the *original*
-`AC-P8-1..10` themselves (never formally walked before now); see the evidence matrix and status in
-[`docs/PHASE_8.md`](PHASE_8.md). This row will flip to complete only once every 8B release gate
-passes.
+**Status (2026-09-06): COMPLETE.** Real-user UAT hardening added two sub-phases beyond the original
+plan, both closed: **Phase 8A** (UAT correction pass — authoring/state/output/validator fixes,
+migrations 29–31) and **Phase 8A.5** (Supabase DEV/Preview vs Production environment isolation + a
+Production block-persistence/Preview-navigation fix, migration 32). **Phase 8B — Final Quality &
+Release Closeout** (slices 8B-1 … 8B-12) walked the *original* `AC-P8-1..10` into a single
+auditable closure matrix and produced the IT handover document. All nine Phase 8 MUST acceptance
+criteria are **PASS**; one SHOULD criterion (AC-P8-7) is **PASS WITH KNOWN RISK** (PDF cold-start —
+non-blocking, owned); no known release blocker. Evidence matrix and per-slice detail:
+[`docs/PHASE_8.md`](PHASE_8.md). Infrastructure handover: [`docs/INTEGRATION.md`](INTEGRATION.md).
 
 ## Principal risks and mitigations
 

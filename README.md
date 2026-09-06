@@ -4,11 +4,16 @@ Architecture-first repository for **PT Smartin Advisor Sistem's EA Developer Too
 
 ## Current delivery
 
-**Phases 1–7 are implemented and phases 8A / 8A.5 are closed; Phase 8B — Final Quality & Release
-Closeout is in progress** (not yet complete). DEV/Preview and Production run on separate Supabase
-projects (`docs/ENVIRONMENTS.md`); migration 32 is applied to both, drift 0. Status, the migration
+**Phases 1–8 are complete.** Phases 1–7 implemented; Phase 8A / 8A.5 closed; **Phase 8B — Final
+Quality & Release Closeout is COMPLETE** (slices 8B-1 … 8B-12). All nine Phase 8 MUST acceptance
+criteria are PASS; one SHOULD criterion (AC-P8-7) is PASS WITH KNOWN RISK (PDF cold-start
+generation — non-blocking, owned); there is no known release blocker. This is an internal
+engineering completion statement and does **not** imply Bappebti / regulator approval or compliance
+certification. DEV/Preview and Production run on separate Supabase projects
+(`docs/ENVIRONMENTS.md`); migration 32 is applied to both, drift 0. Acceptance matrix, migration
 history, and the environment map: [`docs/PHASE_8.md`](docs/PHASE_8.md) and
-[`docs/ENVIRONMENTS.md`](docs/ENVIRONMENTS.md). The phase-by-phase history below is preserved as
+[`docs/ENVIRONMENTS.md`](docs/ENVIRONMENTS.md). IT / infrastructure handover:
+[`docs/INTEGRATION.md`](docs/INTEGRATION.md). The phase-by-phase history below is preserved as
 written at the time each phase shipped.
 
 **Phase 2 — Data & CRUD is implemented** (Supabase Postgres + Auth + Storage, RLS, organisation/role model, EA product/version/supported-configuration/parameter CRUD, manual + manual-version + section + block persistence, private image upload, real dynamic manual routing, action-based server authorization, `row_version` autosave with conflict handling, unit tests, CI). `lint`, `typecheck`, `test`, and `build` all pass.
@@ -103,10 +108,9 @@ Actions settings.
 5. Published manual versions are immutable and remain addressable.
 6. Phase boundaries require explicit approval.
 
-## Next step
+## Status
 
-Phase 8B — Final Quality & Release Closeout is in progress: documentation sync, DEV cleanup, and
-the CI integration gate are done; the live accessibility/responsive audit, security/RBAC/RLS
-closure, performance evidence, dependency review, full DEV/Preview E2E lifecycle, and the formal
-`AC-P8-1..10` evidence matrix are next. See [`docs/PHASE_8.md`](docs/PHASE_8.md) for current
-status — Phase 8 is marked complete only once every 8B release gate passes.
+Phases 1–8 are complete. The `AC-P8-1..10` acceptance matrix (all MUST criteria PASS; AC-P8-7 PASS
+WITH KNOWN RISK) is in [`docs/PHASE_8.md`](docs/PHASE_8.md) §8B-11 / §8B-12. Taking the application
+onto company-owned infrastructure (source repo, deployment, Supabase, domain, secrets) is covered
+end-to-end in [`docs/INTEGRATION.md`](docs/INTEGRATION.md).
