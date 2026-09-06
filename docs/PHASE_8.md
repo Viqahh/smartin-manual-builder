@@ -890,6 +890,79 @@ P2 backlog (carried, non-blocking): `parameter-manager.tsx` + `review-comments-p
 item; `parameter-manager` is already flagged in-code as a Phase 3 placeholder); plus the three
 8B-5 P2 items above.
 
-_Slices 8B-7 through 8B-12 (security/RBAC/RLS closure, performance evidence, dependency/dead-code
-review, full DEV/Preview E2E lifecycle, the `AC-P8-1..10` evidence matrix, and final
-release/handover) are not yet started._
+## 8B-7 — Security / RBAC / RLS closure — CLOSED
+
+Verification / hardening slice — **no code change made, none required**. Audited the current
+implementation against the live DEV database + application. **No P0 or P1 security/integrity
+defect found.**
+
+Surfaces covered and confirmed: org isolation across every data family; anonymous access (zero
+`anon` table/function grants anywhere — anon reaches only the unauthenticated public route);
+DEVELOPER / TECHNICAL_REVIEWER / COMPLIANCE_REVIEWER / ADMIN capability matrix; multi-role users
+(union of capabilities, no admin gain); reviewer-assignment boundaries (wrong-role / cross-org /
+inactive rejected; non-admin cannot assign); self-approval prevention (a reviewer who is a
+`manual_version_contributors` row for the version cannot approve — technical + compliance);
+cross-org UUID/reference injection (composite FKs reject foreign-org product/version/group refs on
+insert and update); direct-table mutation that should require RPC (no client write policy on
+`reviews`, `review_comments`, `checklist_results`, `published_snapshots`,
+`manual_version_contributors`, `changelog_entries`, `ai_revisions`,
+`checklist_evidence_submissions`); DRAFT vs non-DRAFT edit protection (server-side trigger, not
+just a disabled editor); review-round integrity (optimistic `status = ? and review_round = ?`
+guards; concurrent decisions converge); public vs private manual access (public route outside
+`app/(workspace)`, reads published snapshot only, DRAFT/never-published → 404); published-snapshot
+immutability (byte-identical after mutation attempts; a live EA-fact change does not alter the
+snapshot or its hash); archive (ADMIN-only, snapshot intact, second archive rejected); private
+storage + signed URLs (both buckets `public:false`; `manual-pdf-artifacts` has no anon/authenticated
+policy at all; `manual-images` org-scoped read / `can_author` write; `signImageUrl` 30-min TTL,
+org-scoped); PDF-artifact isolation (lifecycle, DB generation lock, READY immutability, cross-org
++ anon isolation); human-evidence author/reviewer boundaries + eligible-vs-ineligible checks
+(author-only submit; assigned-reviewer-of-current-stage-only decide; ineligible / MISSING / STALE
+never excused; cross-org read blocked); audit-event immutability (`app.reject_audit_mutation()`
+rejects UPDATE/DELETE for every application identity **including `service_role`** — only raw
+`postgres` / `supabase_admin`); service-role boundaries (8 call sites, all server-only trusted;
+no `"use client"` importer; `lib/supabase/service.ts` is `import "server-only"`); environment
+guards (`assertSupabaseProjectMatchesEnv` fail-closed at the server + service client boundary);
+destructive-fixture guards (`scripts/fixtures/_guard.mjs` + `tests/integration/_guard.ts` — DEV
+ref **and** `APP_ENV != production` **and** explicit `ALLOW_DESTRUCTIVE_FIXTURES=yes-dev` opt-in);
+accidental Production targeting (same guards abort on PROD ref or `APP_ENV=production`); secret
+exposure (no `.env*` tracked but `.env.example` names-only; no hard-coded key literals in source;
+server-only secrets referenced only in server modules; client bundle scan shows no server-secret
+names or values — the one `AI_API_KEY` hit is a UI error-string literal; browser Supabase client
+uses the publishable key; AI transport errors are typed/generic and never include the key; CI job
+log masks every secret as `***`).
+
+**`SECURITY DEFINER` — precise evidence statement:**
+- All **70** `SECURITY DEFINER` functions were **statically verified in migration source** to
+  declare `SET search_path = public`.
+- Their runtime authorization / state-machine behaviour is exercised by the DEV integration suite
+  (152 tests) run against the real DEV database.
+- Live `pg_proc.prosecdef` / `pg_proc.proconfig` catalog inspection was **not available** — no
+  direct database password / `psql` access was present in this environment.
+- This is an **evidence limitation, not a discovered defect**. `SET search_path = public` is the
+  Supabase-documented pattern and is pinned per-call via `proconfig`, so a caller cannot override
+  it.
+
+Authoritative evidence: **CI DEV integration 152/152** (run `34008397336`, commit `b02e3d1` —
+real job executed, not skipped; no secret values in logs); **local DEV integration 152/152**
+(DEV ref `tmrwhkhydkjaubpuegqa`, `APP_ENV=development`, 99.0s, exit 0). Unit `671 passed`; `tsc`,
+lint, build clean; Production `/api/health` → `ok:true, ready:true, env:"production"`.
+
+**P2 hardening backlog (non-blocking — no security change made to remove any of these in this
+release):**
+1. SD functions use `SET search_path = public` rather than the stricter `SET search_path = ''`
+   with fully-qualified identifiers (or `pg_catalog, pg_temp`). Current form is safe and matches
+   Supabase docs; optional future hardening.
+2. `authenticated` holds broad table-level INSERT/UPDATE/DELETE on the authoring tables with RLS
+   as the sole enforcement boundary (by design). Keep the negative-case integration suite as a
+   required merge gate so a policy regression cannot ship silently.
+3. Unauthenticated code paths (`lib/publication/get-public-manual.ts`,
+   `lib/publication/public-image-bytes.ts`, the PDF modules) use the service-role client. Safe
+   today because every query is publication-state-scoped; add an in-module convention that any
+   new query there must filter by publication state.
+4. DX: `.env.local` has no dedicated `SUPABASE_TEST_*` vars, so a local integration run must map
+   the DEV `NEXT_PUBLIC_*` / `SUPABASE_SECRET_KEY` values into those names (the `_guard` still
+   verifies the DEV ref). Documentation note only.
+
+_Slices 8B-8 through 8B-12 (performance evidence, dependency/dead-code review, full DEV/Preview
+E2E lifecycle, the `AC-P8-1..10` evidence matrix, and final release/handover) are not yet
+started._
