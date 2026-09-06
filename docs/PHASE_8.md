@@ -802,6 +802,94 @@ default-focused action (Enter is always safe); Escape cancels; only an explicit 
 with that button itself focused) on "Ya, hapus bab …" calls the real delete. No change to reorder,
 rename, add, or block-level behaviour. Tests: `tests/unit/chapter-nav-delete.test.tsx` (7).
 
-_Slices 8B-5 through 8B-12 (live accessibility/responsive audit, empty/loading/error-state audit,
-security/RBAC/RLS closure, performance evidence, dependency/dead-code review, full DEV/Preview
-E2E lifecycle, the `AC-P8-1..10` evidence matrix, and final release/handover) are not yet started._
+## 8B-5 — Live accessibility + responsive audit — CLOSED
+
+Real-browser audit (375 / 768 / 1024 / 1440 px) against a local dev server on Supabase DEV,
+across Login, Dashboard, Manual Book list, Produk EA, Manual Builder, Preview, Review Teknis, and
+the public manual page. Three P1 defects fixed:
+
+- **Duplicate manual rows** — `features/manuals/queries.ts` `listManuals()` returned one row per
+  `manual_version`, so a manual with >1 version produced duplicate `manualId`s (React duplicate-key
+  warning on Dashboard "Manual terbaru" and `/manuals`, and a wrong displayed count). Fixed with a
+  pure, unit-tested `dedupeLatestManualVersion` (`lib/manual/list-dedupe.ts`): one row per manual,
+  representative version chosen by **parsed semver number** (`major`, then `minor`, then `patch`) —
+  never by `updated_at` (an older version can be touched later) and never by incidental DB row
+  order (ties are non-deterministic). List *order* still follows `updated_at DESC`.
+- **Mobile nav drawer had no focus trap** — `components/app-shell/app-shell.tsx`: the drawer is a
+  modal overlay but Tab could escape to the page behind the scrim. Added `role="dialog"` +
+  `aria-modal="true"`, focus-in on open, Tab/Shift+Tab wrap, Escape-to-close, and focus restore to
+  the trigger on close.
+- **Manual Builder top bar unusable at 375 px** — `app/globals.css` mobile breakpoint: the
+  breadcrumb was crushed to ~12 px. Root cause was a nested `.review-controls` flex item with no
+  `min-width: 0` of its own; `min-width: 0` on the parent alone was not enough. Fixed with
+  `min-width: 0` + an explicit `max-width` on the nested item so the summary text wraps.
+
+Tests: `tests/unit/manual-list-dedupe.test.ts` (8), `tests/unit/app-shell-drawer.test.tsx` (5).
+P2 backlog (non-blocking): public-manual footer ~1-char clip at 375 px; Preview occasionally
+loads pre-scrolled; `prefers-reduced-motion` not independently re-verified live.
+Committed `54eb591`; CI `verify` + real DEV `integration` green; Production `/api/health` green.
+
+## 8B-6 — Empty / loading / error / retry audit — CLOSED
+
+Audited every user-facing async surface (login, list loading, empty states, create product /
+version / manual, autosave, chapter nav, Preview transition, image upload, parameter + changelog
+mutations, validation refresh, human-evidence, review actions, reviewer comments, publish,
+archive, clone, PDF). Most surfaces already handle busy/error/retry from prior phases. Two P1
+defects fixed, plus one concurrency race found during live verification.
+
+- **P1 — chapter add / rename / reorder / delete swallowed server failure.**
+  `features/manuals/manual-builder.tsx` fired the section-mutation server actions and ignored the
+  result (`.then(res => { if (res.ok) … })` with no `else`). reorder / rename / delete apply an
+  **optimistic** change to `sections` *before* the request resolves, so a failure (permission,
+  network, stale row) left the chapter list silently diverged from the server with no feedback —
+  and `ChapterNav` had no error surface at all. Fix: each handler snapshots state before its
+  optimistic write, and on failure reverts (sections + selected chapter for delete) and sets a
+  visible Indonesian `role="alert"` message rendered in `ChapterNav` (`error` prop). No workflow,
+  RLS, or schema change — client optimistic-UI + error surfacing only.
+
+- **P1 — PDF transient download failure was indistinguishable from "no artifact".**
+  `components/public-manual/pdf-download-button.tsx`: a failed `fetch` of a **READY** artifact
+  (network blip) collapsed into the same terminal state as a missing artifact — a disabled
+  "PDF belum tersedia" button, recoverable only by a full page reload (undiscoverable), on the
+  public manual page's primary CTA. Fix: a local fetch failure now renders its own
+  "Gagal mengunduh — coba lagi" retry that re-attempts the plain download, independent of the
+  admin `retryAction`; never the "artifact missing" message.
+
+- **Concurrency race (found during verification) — resolved.** The revert restores a snapshot
+  taken *before that handler's own optimistic write*; with two mutations overlapping, a failing
+  older request could restore a snapshot predating a later successful mutation and wipe it
+  (`A optimistic → B optimistic → A fails → A restores pre-A state`). Resolved by **serializing —
+  one chapter structural mutation in flight at a time**: `chapterMutInFlightRef` is a synchronous
+  re-entrancy guard (a second call, incl. a rapid double-click or a drag mid-request, is ignored
+  and never issues a duplicate request); `chapterMutPending` disables every mutation control in
+  `ChapterNav` (drag handle, move ▲/▼, rename, delete, delete-confirm, add-toggle, both form
+  submits) and early-returns from `moveTo` and the form `onSubmit`s. `.catch` + `.finally` added
+  to all four handlers so a hard reject reverts and always releases the guard.
+
+**Live DEV failure-injection evidence** (browser-tab `fetch` wrapper rejecting `next-action`
+requests; server behaviour never weakened; Production untouched; one custom chapter added then
+deleted, post-test reload confirmed the manual back to its original 18 chapters):
+
+- add / rename / reorder / delete each restored the last confirmed server state on failure, showed
+  the Indonesian `role="alert"` error, kept a valid selected chapter, produced no false success,
+  succeeded on retry after "connectivity" was restored, and matched the server exactly after a
+  reload;
+- in a delayed-success run, all mutation controls read `disabled` while a reorder was in flight;
+  **5 rapid extra clicks during the in-flight window produced a net move of exactly 1**; 6 rapid
+  clicks on delete-confirm issued **exactly 1** server-action request;
+- PDF: on `/manual/p7-pdf-normal/1.0.0` (real READY artifact) a transient failure showed
+  "Gagal mengunduh — coba lagi" (not "PDF belum tersedia", not disabled); after recovery the retry
+  fetched the real artifact and triggered the download with **no page reload**.
+
+Tests: `tests/unit/chapter-nav-concurrency.test.tsx` (8), `tests/unit/chapter-nav-error.test.tsx`
+(2), `tests/unit/pdf-download-button.test.tsx` (4). Unit baseline after this slice: **671 passed**
+(54 files). No DB schema / RLS / permission / workflow-state-machine / publishing-invariant change.
+
+P2 backlog (carried, non-blocking): `parameter-manager.tsx` + `review-comments-panel.tsx` call
+`router.refresh()` per fine-grained mutation (full-route refetch, no state corruption — a polish
+item; `parameter-manager` is already flagged in-code as a Phase 3 placeholder); plus the three
+8B-5 P2 items above.
+
+_Slices 8B-7 through 8B-12 (security/RBAC/RLS closure, performance evidence, dependency/dead-code
+review, full DEV/Preview E2E lifecycle, the `AC-P8-1..10` evidence matrix, and final
+release/handover) are not yet started._

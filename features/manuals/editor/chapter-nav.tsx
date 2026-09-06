@@ -26,6 +26,8 @@ export function ChapterNav({
   onRename,
   onDelete,
   onClose,
+  error,
+  pending = false,
 }: {
   sections: Section[];
   selectedId: string;
@@ -38,6 +40,12 @@ export function ChapterNav({
   onRename: (id: string, title: string) => void;
   onDelete: (id: string) => void;
   onClose?: () => void;
+  /** Phase 8B-6 — surfaced when a chapter add/rename/reorder/delete request fails server-side;
+      any optimistic UI change is reverted by the caller before this is set. */
+  error?: string | null;
+  /** Phase 8B-6 — a chapter structural mutation is in flight; disable the mutation controls so
+      they are serialized (one at a time) and rapid clicks can't issue duplicate requests. */
+  pending?: boolean;
 }) {
   const [adding, setAdding] = useState(false);
   const [newTitle, setNewTitle] = useState("");
@@ -51,6 +59,7 @@ export function ChapterNav({
   const [dragOver, setDragOver] = useState<number | null>(null);
 
   const moveTo = (from: number, to: number, keepFocus: boolean) => {
+    if (pending) return; // a mutation is already in flight — serialize
     if (from === to || to < 0 || to >= sections.length) return;
     const ordered = arrayMove(sections, from, to).map((s) => s.id);
     onReorder(ordered);
@@ -79,6 +88,11 @@ export function ChapterNav({
       <p className="progress-copy">
         {completedCount} dari {sections.length} bab ditandai selesai
       </p>
+      {error && (
+        <p className="field-error" role="alert">
+          {error}
+        </p>
+      )}
 
       <nav className="chapter-list">
         {sections.map((chapter, i) => {
@@ -107,8 +121,13 @@ export function ChapterNav({
                   type="button"
                   className="chapter-drag-handle"
                   aria-label={`Seret untuk memindahkan bab ${chapter.title}`}
-                  draggable
+                  draggable={!pending}
+                  disabled={pending}
                   onDragStart={(e) => {
+                    if (pending) {
+                      e.preventDefault();
+                      return;
+                    }
                     dragFrom.current = i;
                     e.dataTransfer.effectAllowed = "move";
                   }}
@@ -126,12 +145,13 @@ export function ChapterNav({
                   className="chapter-rename"
                   onSubmit={(e) => {
                     e.preventDefault();
+                    if (pending) return;
                     if (renameTitle.trim().length >= 2) onRename(chapter.id, renameTitle.trim());
                     setRenamingId(null);
                   }}
                 >
                   <input autoFocus value={renameTitle} onChange={(e) => setRenameTitle(e.target.value)} maxLength={120} />
-                  <button type="submit" aria-label="Simpan judul">
+                  <button type="submit" aria-label="Simpan judul" disabled={pending}>
                     <Check aria-hidden="true" size={13} />
                   </button>
                   <button type="button" aria-label="Batal" onClick={() => setRenamingId(null)}>
@@ -182,7 +202,9 @@ export function ChapterNav({
                     type="button"
                     className="chapter-delete-confirm-danger"
                     aria-label={`Ya, hapus bab ${chapter.title}`}
+                    disabled={pending}
                     onClick={() => {
+                      if (pending) return;
                       setDeletingId(null);
                       onDelete(chapter.id);
                     }}
@@ -197,7 +219,7 @@ export function ChapterNav({
                     type="button"
                     data-chapter-move={i}
                     aria-label={`Naikkan bab ${chapter.title}`}
-                    disabled={i === 0}
+                    disabled={i === 0 || pending}
                     onClick={() => moveTo(i, i - 1, true)}
                   >
                     ▲
@@ -205,7 +227,7 @@ export function ChapterNav({
                   <button
                     type="button"
                     aria-label={`Turunkan bab ${chapter.title}`}
-                    disabled={i === sections.length - 1}
+                    disabled={i === sections.length - 1 || pending}
                     onClick={() => moveTo(i, i + 1, true)}
                   >
                     ▼
@@ -215,6 +237,7 @@ export function ChapterNav({
                       <button
                         type="button"
                         aria-label={`Ubah judul bab ${chapter.title}`}
+                        disabled={pending}
                         onClick={() => {
                           setRenamingId(chapter.id);
                           setRenameTitle(chapter.title);
@@ -223,7 +246,12 @@ export function ChapterNav({
                         <Pencil aria-hidden="true" size={12} />
                       </button>
                       {/* First click only opens the inline confirmation — never deletes directly. */}
-                      <button type="button" aria-label={`Hapus bab ${chapter.title}`} onClick={() => setDeletingId(chapter.id)}>
+                      <button
+                        type="button"
+                        aria-label={`Hapus bab ${chapter.title}`}
+                        disabled={pending}
+                        onClick={() => setDeletingId(chapter.id)}
+                      >
                         <Trash2 aria-hidden="true" size={12} />
                       </button>
                     </>
@@ -241,6 +269,7 @@ export function ChapterNav({
             className="chapter-add"
             onSubmit={(e) => {
               e.preventDefault();
+              if (pending) return;
               if (newTitle.trim().length >= 2) {
                 onAdd(newTitle.trim());
                 setNewTitle("");
@@ -249,7 +278,7 @@ export function ChapterNav({
             }}
           >
             <input autoFocus placeholder="Judul bab baru" value={newTitle} onChange={(e) => setNewTitle(e.target.value)} maxLength={120} />
-            <button type="submit" className="secondary-button">
+            <button type="submit" className="secondary-button" disabled={pending}>
               Tambah
             </button>
             <button type="button" className="ghost-button" onClick={() => setAdding(false)}>
@@ -257,7 +286,12 @@ export function ChapterNav({
             </button>
           </form>
         ) : (
-          <button type="button" className="secondary-button chapter-add-toggle" onClick={() => setAdding(true)}>
+          <button
+            type="button"
+            className="secondary-button chapter-add-toggle"
+            disabled={pending}
+            onClick={() => setAdding(true)}
+          >
             <Plus aria-hidden="true" size={14} /> Tambah bab kustom
           </button>
         ))}

@@ -676,50 +676,113 @@ export function ManualBuilder({
   }
 
   // -------------------------------------------------------------- chapter actions
+  // Phase 8B-6 (live audit finding) — add/rename/reorder/delete previously fired-and-forgot the
+  // server result: a failure (permission error, network error, stale state) was never surfaced,
+  // and reorder/rename/delete apply an OPTIMISTIC change to `sections` *before* the request
+  // resolves, so a failed request used to leave the UI showing a chapter list that had silently
+  // diverged from the server with no indication anything went wrong. Every handler below now
+  // reverts its optimistic change and sets `chapterActionError` on failure.
+  //
+  // Phase 8B-6 review follow-up — the revert restores a snapshot taken *before* that handler's
+  // own optimistic write. If two structural mutations overlapped, a failing older request could
+  // restore a snapshot that predates a later successful mutation and silently wipe it. So chapter
+  // structural mutations are SERIALIZED: `chapterMutInFlightRef` is a synchronous re-entrancy
+  // guard (a second call — a rapid double-click, or a drag mid-request — is ignored, never a
+  // duplicate request), and `chapterMutPending` disables the mutation controls in ChapterNav for
+  // the duration. Only one snapshot is ever "live" at a time, so revert is always correct.
+  // Chapter *selection* (navigation) is deliberately NOT blocked — it has its own save barrier.
+  const [chapterActionError, setChapterActionError] = useState<string | null>(null);
+  const chapterMutInFlightRef = useRef(false);
+  const [chapterMutPending, setChapterMutPending] = useState(false);
+  const beginChapterMutation = useCallback(() => {
+    if (chapterMutInFlightRef.current) return false;
+    chapterMutInFlightRef.current = true;
+    setChapterMutPending(true);
+    setChapterActionError(null);
+    return true;
+  }, []);
+  const endChapterMutation = useCallback(() => {
+    chapterMutInFlightRef.current = false;
+    setChapterMutPending(false);
+  }, []);
+
   const handleReorderChapters = useCallback(
     (orderedIds: string[]) => {
+      if (!beginChapterMutation()) return;
+      const prevSections = sectionsRef.current;
       setSections((prev) => {
         const byId = new Map(prev.map((s) => [s.id, s]));
         return orderedIds.map((id, i) => ({ ...(byId.get(id) as Section), position: i }));
       });
-      void reorderSections({ manualVersionId: vm.manualVersion.id, orderedSectionIds: orderedIds }).then((res) => {
-        if (res.ok) void resyncSectionVersions();
-      });
+      void reorderSections({ manualVersionId: vm.manualVersion.id, orderedSectionIds: orderedIds })
+        .then((res) => {
+          if (res.ok) {
+            void resyncSectionVersions();
+          } else {
+            setSections(prevSections);
+            setChapterActionError(res.message ?? "Gagal mengubah urutan bab. Coba lagi.");
+          }
+        })
+        .catch(() => {
+          setSections(prevSections);
+          setChapterActionError("Gagal mengubah urutan bab. Coba lagi.");
+        })
+        .finally(endChapterMutation);
     },
-    [vm.manualVersion.id, resyncSectionVersions],
+    [beginChapterMutation, endChapterMutation, vm.manualVersion.id, resyncSectionVersions],
   );
 
   const handleAddChapter = useCallback(
     (title: string) => {
-      void addCustomSection({ manualVersionId: vm.manualVersion.id, title }).then((res) => {
-        if (!res.ok) return;
-        const newSection: Section = {
-          id: res.data.id,
-          key: res.data.sectionKey,
-          title,
-          required: false,
-          isCustom: true,
-          position: res.data.position,
-          completionState: "incomplete",
-          rowVersion: 1,
-          blocks: [],
-        };
-        setSections((prev) => [...prev, newSection]);
-        setBlockCounts((c) => ({ ...c, [res.data.id]: 0 }));
-        setSelectedId(res.data.id);
-      });
+      if (!beginChapterMutation()) return;
+      void addCustomSection({ manualVersionId: vm.manualVersion.id, title })
+        .then((res) => {
+          if (!res.ok) {
+            setChapterActionError(res.message ?? "Gagal menambah bab. Coba lagi.");
+            return;
+          }
+          const newSection: Section = {
+            id: res.data.id,
+            key: res.data.sectionKey,
+            title,
+            required: false,
+            isCustom: true,
+            position: res.data.position,
+            completionState: "incomplete",
+            rowVersion: 1,
+            blocks: [],
+          };
+          setSections((prev) => [...prev, newSection]);
+          setBlockCounts((c) => ({ ...c, [res.data.id]: 0 }));
+          setSelectedId(res.data.id);
+        })
+        .catch(() => setChapterActionError("Gagal menambah bab. Coba lagi."))
+        .finally(endChapterMutation);
     },
-    [vm.manualVersion.id, setSelectedId],
+    [beginChapterMutation, endChapterMutation, vm.manualVersion.id, setSelectedId],
   );
 
   const handleRenameChapter = useCallback(
     (id: string, title: string) => {
+      if (!beginChapterMutation()) return;
+      const prevSections = sectionsRef.current;
       setSections((prev) => prev.map((s) => (s.id === id ? { ...s, title } : s)));
-      void renameSection({ sectionId: id, title }).then((res) => {
-        if (res.ok) void resyncSectionVersions();
-      });
+      void renameSection({ sectionId: id, title })
+        .then((res) => {
+          if (res.ok) {
+            void resyncSectionVersions();
+          } else {
+            setSections(prevSections);
+            setChapterActionError(res.message ?? "Gagal mengubah judul bab. Coba lagi.");
+          }
+        })
+        .catch(() => {
+          setSections(prevSections);
+          setChapterActionError("Gagal mengubah judul bab. Coba lagi.");
+        })
+        .finally(endChapterMutation);
     },
-    [resyncSectionVersions],
+    [beginChapterMutation, endChapterMutation, resyncSectionVersions],
   );
 
   const handleDeleteChapter = useCallback(
@@ -728,26 +791,43 @@ export function ManualBuilder({
       // immediately; the server also recompacts (AC-P3-5) and resyncSectionVersions reconciles.
       // The chapter (and its unsaved block edits) is being discarded — skip the save barrier and
       // switch directly, so a pending edit in the deleted chapter can't strand the user here.
+      if (!beginChapterMutation()) return;
+      const prevSections = sectionsRef.current;
+      const prevSelectedId = selectedIdRef.current;
       setSections((prev) => {
         const next = prev.filter((s) => s.id !== id).map((s, i) => ({ ...s, position: i }));
         if (selectedIdRef.current === id) commitSelectedId(next[0]?.id ?? "");
         return next;
       });
-      void deleteCustomSection({ sectionId: id }).then((res) => {
-        if (!res.ok) return;
-        // reconcile straight from the atomic RPC result (id -> {position, rowVersion})
-        const byId = new Map(res.data.sections.map((s) => [s.id, s]));
-        setSections((prev) =>
-          prev
-            .filter((s) => byId.has(s.id))
-            .map((s) => ({ ...s, position: byId.get(s.id)!.position, rowVersion: byId.get(s.id)!.rowVersion })),
-        );
-        for (const s of res.data.sections) {
-          if (!completionSaver.hasPending(s.id)) completionSaver.adoptVersion(s.id, s.rowVersion);
-        }
-      });
+      const restore = () => {
+        setSections(prevSections);
+        if (selectedIdRef.current !== prevSelectedId) commitSelectedId(prevSelectedId);
+      };
+      void deleteCustomSection({ sectionId: id })
+        .then((res) => {
+          if (!res.ok) {
+            restore();
+            setChapterActionError(res.message ?? "Gagal menghapus bab. Bab dikembalikan.");
+            return;
+          }
+          // reconcile straight from the atomic RPC result (id -> {position, rowVersion})
+          const byId = new Map(res.data.sections.map((s) => [s.id, s]));
+          setSections((prev) =>
+            prev
+              .filter((s) => byId.has(s.id))
+              .map((s) => ({ ...s, position: byId.get(s.id)!.position, rowVersion: byId.get(s.id)!.rowVersion })),
+          );
+          for (const s of res.data.sections) {
+            if (!completionSaver.hasPending(s.id)) completionSaver.adoptVersion(s.id, s.rowVersion);
+          }
+        })
+        .catch(() => {
+          restore();
+          setChapterActionError("Gagal menghapus bab. Bab dikembalikan.");
+        })
+        .finally(endChapterMutation);
     },
-    [completionSaver, commitSelectedId],
+    [beginChapterMutation, endChapterMutation, completionSaver, commitSelectedId],
   );
 
   // -------------------------------------------------------------- parameter groups (inline mgmt)
@@ -816,6 +896,8 @@ export function ManualBuilder({
     onAdd: handleAddChapter,
     onRename: handleRenameChapter,
     onDelete: handleDeleteChapter,
+    error: chapterActionError,
+    pending: chapterMutPending,
   };
 
   return (

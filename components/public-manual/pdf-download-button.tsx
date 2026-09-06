@@ -90,7 +90,21 @@ export function PdfDownloadButton({
     );
   }
 
-  if (state === "FAILED" || state === "error" || state === "NONE") {
+  // Phase 8B-6 (live audit finding) — a plain download-fetch failure (e.g. a transient network
+  // blip) used to collapse into the SAME terminal state as "no artifact exists": a disabled
+  // button reading "PDF belum tersedia", even though the artifact is READY and only the fetch
+  // failed. That was a false, permanent dead-end on the public page (no `retryAction` there) —
+  // the one real recovery, reloading the page, was undiscoverable. A local fetch failure now
+  // always gets its own retry, independent of whether the caller passed a `retryAction`.
+  if (state === "error") {
+    return (
+      <button type="button" className={className} onClick={download}>
+        <RotateCcw aria-hidden="true" size={17} /> Gagal mengunduh — coba lagi
+      </button>
+    );
+  }
+
+  if (state === "FAILED" || state === "NONE") {
     if (retryAction) {
       return (
         <button type="button" className={className} onClick={retry} disabled={pending} aria-busy={pending}>
