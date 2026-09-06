@@ -214,7 +214,7 @@ describe("SQL <-> TS parity", () => {
   });
 
   it("audit rows + server logs carry a request id (AC-P2-23)", () => {
-    expect(read("middleware.ts")).toMatch(/x-request-id/);
+    expect(read("proxy.ts")).toMatch(/x-request-id/);
     expect(read("features/audit/write.ts")).toMatch(/requestId/);
     expect(read("lib/observability/request-id.ts")).toMatch(/getRequestId/);
     expect(read("lib/supabase/errors.ts")).toMatch(/logServerError\("db"/);

@@ -5,6 +5,10 @@ import { publicEnv, isSupabaseConfigured } from "@/lib/env";
 export const REQUEST_ID_HEADER = "x-request-id";
 
 /**
+ * Next 16 Proxy convention (formerly `middleware.ts` → `middleware()`). Runs on the Node.js
+ * runtime; the code here is runtime-agnostic (no Edge-only or Node-only APIs) so the rename is
+ * behaviour-preserving. `config.matcher` is unchanged.
+ *
  * - Assigns a per-request id (`x-request-id`), reused if the caller/proxy already sent one.
  *   It is placed on the forwarded request headers (so Server Components / Actions can read it
  *   via `headers()`) and echoed on the response. Structured server logs + audit rows key on it
@@ -12,7 +16,7 @@ export const REQUEST_ID_HEADER = "x-request-id";
  * - Refreshes the Supabase auth session so Server Components see a current session.
  *   No Supabase work when unconfigured.
  */
-export async function middleware(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   const requestId = request.headers.get(REQUEST_ID_HEADER) ?? crypto.randomUUID();
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set(REQUEST_ID_HEADER, requestId);

@@ -30,7 +30,7 @@ export async function createSupabaseServerClient() {
             cookieStore.set(name, value, options);
           }
         } catch {
-          // `set` throws in a pure Server Component render; middleware refreshes the session instead.
+          // `set` throws in a pure Server Component render; the proxy refreshes the session instead.
         }
       },
     },

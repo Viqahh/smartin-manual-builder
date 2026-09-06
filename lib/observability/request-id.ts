@@ -4,7 +4,7 @@ import { headers } from "next/headers";
 export const REQUEST_ID_HEADER = "x-request-id";
 
 /**
- * The current request id, assigned by `middleware.ts`. Used to correlate structured server
+ * The current request id, assigned by `proxy.ts`. Used to correlate structured server
  * logs and `audit_events` rows (PRD-NFR-007, AC-P2-23). Falls back to `"no-request-id"` when
  * called outside a request scope (should not happen for server actions / route handlers).
  */

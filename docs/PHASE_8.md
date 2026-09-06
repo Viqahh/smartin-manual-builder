@@ -1028,5 +1028,58 @@ option correctly).
 6. Middleware (`proxy.ts`) 60–600 ms/navigation in dev — measure in production before acting.
 7. PDF generation-required path — measure on Preview (real Chromium) during 8B-10 E2E.
 
-_Slices 8B-9 through 8B-12 (dependency/dead-code review, full DEV/Preview E2E lifecycle, the
-`AC-P8-1..10` evidence matrix, and final release/handover) are not yet started._
+## 8B-9 — Dependency, dead-code & repository hygiene — CLOSED
+
+Release hygiene audit. `npm audit` **0 vulnerabilities** (prod-only + full). No P0. Two P1
+deprecations resolved; two dead files removed; P2 backlog recorded (not touched).
+
+**P1 — Next 16 `middleware` → `proxy` convention (build deprecation warning).**
+`middleware.ts` was inspected first: no explicit `runtime` config, no Edge-only or Node-only
+APIs (`crypto.randomUUID()` is a global on both runtimes), no middleware-specific Next config
+flags, `config.matcher` is a static literal. Fully compatible with the Proxy convention (which
+defaults to the Node.js runtime). Minimal official migration applied: `git mv middleware.ts
+proxy.ts`; `export async function middleware()` → `proxy()`; `config.matcher` byte-identical;
+no `next.config.ts` change (no middleware/proxy flags in this repo). Updated one test that reads
+the file by name (`schema-parity.test.ts`) and two doc comments. Live-verified behaviour is
+unchanged: unauthenticated workspace routes still `307 → /login`; authenticated developer routes
+still `200`; public manual still `200`; `/api/health` + `/_next/static` still excluded by the
+matcher (no `x-request-id`, proxy not run); caller-supplied `x-request-id` still reused, absent
+one still generated. Build no longer emits the `middleware` deprecation warning.
+
+**P1 — GitHub Actions Node-20 runtime deprecation (`actions/checkout@v4`, `actions/setup-node@v4`).**
+Verified from each action's `action.yml`: v4 = `using: node20` (the warning source); v5/v6/v7 =
+`using: node24`. Bumped both to **`@v5`** — the minimum major that clears the warning — in both
+CI jobs. Breaking-change review: `checkout@v5` = runtime bump only, and this workflow passes zero
+`checkout` inputs; `setup-node@v5`'s breaking change (auto npm cache when `package.json` has a
+`packageManager` field) does **not** apply — no such field, and the explicit `cache: npm` is
+preserved. **App test runtime stays Node 22** (`setup-node` `node-version: 22` unchanged). `npm
+ci`, the fork-PR skip `if:`, the authoritative-repo fail-closed secret check, and the real DEV
+integration step are textually unchanged.
+
+**Proven dead code removed** (only two unused top-level exports in the whole codebase):
+`lib/supabase/client.ts` (`getSupabaseBrowserClient` — zero importers; the app is fully
+SSR/server-actions/service-client; last touched Phase 2) and `features/manuals/use-autosave.ts`
+(`useAutosave` — superseded by `lib/editor/autosave-queue.ts` `createAutosaveQueue`; zero
+importers; last touched Phase 2). No TODO/FIXME markers, no commented-out code, no
+`console.log`/`debugger`, no stale feature flags anywhere in app code.
+
+**Repository hygiene:** `.gitignore` adequate; no tracked logs/temp/screenshots/binaries/secrets
+(only `.env.example`, names-only). 32 migrations, monotonic, no duplicate timestamps (the `*_fix`
+/ `*_guard_bypass` names are the append-only forward-correction discipline, not duplicates).
+`AGENTS.md` / `CLAUDE.md` are per-developer `next dev`-generated artifacts (fixed vendor template,
+no project content); the repo keeps its real guidance in `docs/` — untracked copies removed, no
+`.gitignore` rule added (**P2 recommendation only**).
+
+**P2 maintenance backlog (not implemented):** 19 minor/patch dependency updates; `eslint` 9→10
+(major, 9.x deprecated) and `typescript` 6→7 (major) — deferred; `package.json` `db:types` script
+targets a nonexistent `database.generated.ts` and uses `--local` (retarget or remove);
+`.gitignore` `/AGENTS.md` + `/CLAUDE.md`; optional `engines.node >=22`; duplicate private helpers
+(`authFail` ×13, `mapRpcError` ×4, `resolveVersion` ×2, `fmt` ×2, `safePlain` ×4, `parseSemver`
+×2) — consolidating the server-action ones risks error-path behaviour changes.
+
+**Gates:** `git diff --check` clean, `tsc` clean, lint clean, unit **692 / 692** (58 files),
+build ok (no `middleware` deprecation warning), DEV integration **152 / 152** (run because
+`middleware → proxy` changes a runtime entrypoint).
+
+_Slices 8B-10 through 8B-12 (full DEV/Preview E2E lifecycle, the `AC-P8-1..10` evidence matrix,
+and final release/handover) are not yet started._
