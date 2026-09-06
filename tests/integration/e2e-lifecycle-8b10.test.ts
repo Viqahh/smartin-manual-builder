@@ -69,7 +69,9 @@ const one = <T>(d: T | T[] | null): T => (Array.isArray(d) ? d[0] : d) as T;
 describe.skipIf(!HAS_SERVICE)("Phase 8B-10 — full DEV E2E lifecycle", () => {
   let dev: SupabaseClient, admin: SupabaseClient, reviewer: SupabaseClient, compliance: SupabaseClient, outsider: SupabaseClient;
   let DEV = "", ADMIN = "", REV = "", COMP = "", OUT = "";
-  const svc = service();
+  // lazily created in beforeAll — never at describe-body scope (vitest still runs that even when
+  // `skipIf` skips the tests, and `createClient(undefined, …)` throws in the credential-free run).
+  let svc: SupabaseClient;
 
   // fixture ids, filled by section 1
   let productId = "", eaVersionId = "", manualId = "", mvId = "";
@@ -100,6 +102,7 @@ describe.skipIf(!HAS_SERVICE)("Phase 8B-10 — full DEV E2E lifecycle", () => {
   };
 
   beforeAll(async () => {
+    svc = service();
     dev = await signIn("developer@smartin.demo");
     admin = await signIn("admin@smartin.demo");
     reviewer = await signIn("reviewer@smartin.demo");
