@@ -1081,5 +1081,141 @@ targets a nonexistent `database.generated.ts` and uses `--local` (retarget or re
 build ok (no `middleware` deprecation warning), DEV integration **152 / 152** (run because
 `middleware → proxy` changes a runtime entrypoint).
 
-_Slices 8B-10 through 8B-12 (full DEV/Preview E2E lifecycle, the `AC-P8-1..10` evidence matrix,
-and final release/handover) are not yet started._
+## 8B-10 — Full DEV / Preview end-to-end lifecycle — CLOSED
+
+Primary evidence for **AC-P8-5** (cross-org role/RLS isolation) and **AC-P8-8** (end-to-end
+permission + publishing boundary). Baseline `de0ae46`. No product/schema change; two new test
+suites; the PDF generation-required measurement that PHASE_8.md deferred to this slice.
+
+**Scope:** one continuous real-workflow run on a disposable fixture — authoring (all 6 block
+kinds) → reviewer assignment → technical request-changes → resubmission → technical approval →
+compliance approval → publish → published immutability → archive — every server-side boundary
+asserted through the actual authenticated user path (never a hidden button, never the service
+path for a user action), plus cross-org isolation, human-evidence regression, audit integrity,
+and, on a deployed uncommitted Preview, the public-route boundary and the real-Chromium PDF
+generation-required path.
+
+**Fixture strategy:** per-run unique EA Product + EA Version + Manual Version, all prefixed
+`E2E-8B10-<YYYYMMDDhhmmss>` / slug `e2e-8b10-<run>`. Every fixture is cascade-deleted in
+`afterAll`; only `audit_events` rows persist (strictly append-only by design, migration
+20260901002400) and are retained as E2E-prefixed DEV evidence. Shared Phase 7/8 fixtures
+(`p7-pdf-*`, VMax, `slice6-pub-ea`) are never touched. Verified: post-run DEV orphan scan is
+empty (`ea_products` / `published_snapshots` matching the E2E prefix → `[]`).
+
+**Suites added:**
+- `tests/integration/e2e-lifecycle-8b10.test.ts` — 20 tests, DEV only, guarded by
+  `assertIntegrationTargetIsDev()`; self-skips with no credentials. Runs the full lifecycle on one
+  fixture.
+- `tests/e2e/lifecycle-pdf-8b10.e2e.test.ts` — 6 tests against a deployed Preview; creates + drops
+  its own freshly-published `e2e-8b10-pdf-<run>` fixture (no artifact) and drives the real
+  generation path.
+
+**DEV lifecycle result — 20/20:** environment guard (target = DEV ref `tmrwhkhydkjaubpuegqa`, not
+Prod `wotidyhpbltoxmzvdqkj`); canonical chapters instantiated from the system template;
+representative blocks (text / callout / steps / parameterTable-by-ref / faq-multi / structured
+changelog via `create_changelog_entry`); non-DRAFT edit server-refused, DRAFT edit round-trips.
+**DEVELOPER negatives (server-side, forged direct RPC/table calls):** cannot `assign_reviewers`,
+cannot `record_technical_decision` / `record_compliance_decision`, cannot `publish_manual_version`
+(forged DEVELOPER `p_actor_id` → `only an ADMIN`), cannot forge a cross-org `ea_version`.
+**Reviewer assignment:** ADMIN assigns → exactly one `manual_version:assign_reviewers` audit;
+DEVELOPER re-assign refused; wrong-role and cross-org assignees refused. **Technical review:**
+submit → `TECHNICAL_REVIEW` + one `submit_review` audit + content becomes server-side read-only;
+manual/section/block anchored comments; empty request-changes summary refused; `REQUEST_CHANGES`
+→ `CHANGES_REQUESTED` + one audit + exactly one r1 technical `reviews` row + prior 3 comments
+retained. **Resubmission:** `begin_revision` → `DRAFT` (editable again) → `submit_for_technical_review`
+→ `TECHNICAL_REVIEW` round 2 — never `COMPLIANCE_REVIEW`. **Technical approval:** DEVELOPER and
+the unassigned (compliance) reviewer cannot approve; **§9 self-approval** — assigning
+`developer@` (a contributor to the version) as technical reviewer and attempting APPROVE →
+typed `self approval forbidden … authored or edited`; stale content hash → `stale content`;
+independent assigned reviewer APPROVE → `COMPLIANCE_REVIEW` + exactly one r2 technical APPROVE
+`reviews` row (correct `reviewer_id` + `decided_at`) + one `technical_approve` audit.
+**Compliance:** DEVELOPER / technical reviewer cannot make a compliance decision; assigned
+compliance APPROVE → `APPROVED` + one r2 compliance APPROVE row + one `compliance_approve` audit.
+**Publish:** non-admin actor ids (`DEV`/`REV`/`COMP`) → `only an ADMIN`; ADMIN before checklist →
+validation error; ADMIN + full 31-PASS checklist → `PUBLISHED`, one `published_snapshots` row
+(`content_hash` == `computeSnapshotHash(render_json)`, correct `public_slug`/`public_version`),
+`published_at` set, one `publish` audit, `public_manuals` + `public_manual_versions` index rows
+present and `PUBLISHED`. **Published immutability:** block update / soft-delete / insert and
+section update are all server-rejected; frozen snapshot bytes recompute to the stored hash.
+**Archive:** DEVELOPER archive refused; ADMIN archive → `ARCHIVED` + `archived_at` + one `archive`
+audit; snapshot hash-stable; the public index row for the version flips to `ARCHIVED`.
+**Cross-org (AC-P8-5), through normal authenticated user paths:** an Org B member (`outsider@`)
+reads `[]` for the E2E product / ea_version / manual / manual_version / sections / blocks /
+reviews / review_comments / checklist_results / published_snapshots; cross-org mutations affect 0
+rows; forged `create_review_comment` / `record_technical_decision` on the Org A mv → typed denial;
+a forged Org B ADMIN `p_actor_id` on `publish_manual_version` / `archive_manual_version` of the
+Org A mv → rejected (not an admin *of Org A*). **Human-evidence (UAT-35):** on a throwaway sibling
+mv, an author evidence submission on an eligible WARNING never flips the automated state to PASS;
+the author cannot decide their own evidence; editing the anchored block STALEs the live
+submission; an evidence submission against an authoritative REQUIRED-MISSING check is rejected
+outright; an Org B member reads `[]` of the org's evidence rows. **Audit integrity:** exactly one
+event per privileged command (`assign_reviewers` ≥1, `submit_review` 2, `technical_request_changes`
+1, `technical_approve` 1, `compliance_approve` 1, `publish` 1, `archive` 1); every row carries a
+real `actor_id`, `entity_type = manual_version`, a timestamp, and secret-free metadata; UPDATE and
+DELETE of an `audit_events` row are rejected for an authenticated caller **and for the
+service_role**.
+
+**Deployed Preview result — 6/6** (`dpl_7D138MxNv9KSN8PdFD28gXM75cic`, uncommitted, `target: preview`,
+`APP_ENV=preview`, `/api/health` `env:"preview"` + `APP_ENV/project match` ok → DEV Supabase):
+- **Public route boundary:** PUBLISHED `slug/1.0.0` → 200 (HTML free of `storage_key` /
+  `render_json` / `service_role` / `supabase.co/storage`); unknown version → 404; unknown slug →
+  404; sibling DRAFT `1.0.1` (never published) → 404.
+- **PDF generation-required (real `@sparticuz/chromium` on Vercel):** first trigger of a
+  never-generated snapshot ran a real Chromium generation and returned `outcome: "generated"`,
+  `status: "READY"`, `sha256`, `byteSize ≈ 25 KB`, `pageCount 3`. **Timing — see the KNOWN
+  PERFORMANCE RISK below** (warm ≈ 12–19 s; cold > 180 s observed; carried into AC-P8-7).
+- **Idempotency:** re-triggering the same snapshot returns `outcome: "ready"` (never a second
+  `generated`) — no second Chromium run.
+- **READY GET:** `GET /manual/<slug>/1.0.0/pdf` → 200 in **≈ 3.3 s** (stored-artifact read, no
+  Chromium), `%PDF-`, byte length and SHA-256 **byte-identical** to the generated artifact,
+  `Cache-Control: immutable`, `X-Content-Type-Options: nosniff`, `Content-Disposition` filename
+  `Manual_E2E-8B10-PDF-<run>_EA_v1.0.0.pdf` (matches `Manual_<EAName>_v<X.Y.Z>.pdf`); bytes +
+  headers carry no `render_json` / `storage_key` / `service_role` / `PDF_PRINT_SECRET` /
+  `x-smartin-print-token` / `lease_token`.
+- **Print-token boundary:** `/print` → 404 with no token, 404 with a garbage token, 404 with a
+  legacy `?t=`; 200 with a valid HMAC print token.
+- **Web / PDF parity:** the deployed public page and the same-snapshot PDF both carry the same
+  chapter titles ("… Identitas Produk", "Instalasi"), the same EA name, the same version, and the
+  authored intro text + a step instruction render; neither surface contains
+  `disetujui regulator` / `regulator-approved` / `bappebti approved` / `certified compliant`.
+
+**Phase 7 output-parity / visual-parity — INHERITED, NOT rerun in 8B-10.**
+`tests/e2e/output-parity.e2e.test.ts` and `tests/e2e/visual-parity.e2e.test.ts` were **not
+rerun** in this slice: the environment lacked `pdftotext` and the required headless-browser
+tooling. Their status is **inherited Phase 7 evidence** (AC-P7-4 content-model diff + AC-P7-10
+regulatory-language sweep, PASS in Phase 7). The renderer / generator / output / parity code is
+**unchanged in 8B-10** (`git diff --stat` for this slice = `docs/PHASE_8.md` + two new test files
+only), so the Phase 7 result stands by construction. This is **not** a fresh 8B-10 PASS. 8B-10's
+own deployed parity check (`lifecycle-pdf-8b10.e2e.test.ts`) is title / identity / authored-text
+level on a hand-built `render_json` stub (real `snapshotToViewModel` payload shapes), not a
+block-by-block diff.
+
+**KNOWN PERFORMANCE RISK — PDF cold-start generation > 180 s (carried into AC-P8-7).**
+Not a correctness blocker for 8B-10, but recorded here and to be resolved / decided in the
+AC-P8-7 evidence & decision matrix (8B-11):
+- **Warm generation:** trigger → READY round trip ≈ **12–19 s**.
+- **Cold generation:** > **180 s** observed (a cold first run exceeded a 180 s client wait; the
+  route's `maxDuration` is 300 s and the artifact still became durably READY server-side).
+- **Root cause:** Vercel Lambda + `@sparticuz/chromium` **cold start dominates** and varies per
+  invocation; the render itself is a small fraction.
+- **`maxDuration` remains 300 s** (`vercel.json` for `app/manual/[eaSlug]/[version]/pdf/route.ts`
+  — unchanged in 8B-10).
+- **READY-artifact GET is unaffected:** ≈ 3.3 s stored-bytes read, **never invokes Chromium**;
+  bytes + SHA-256 byte-identical to the generated artifact.
+- **No product-code change made for this in 8B-10.**
+
+**Environment isolation proof:** every destructive write went through a client whose
+`SUPABASE_TEST_URL` resolves to the DEV ref `tmrwhkhydkjaubpuegqa` (asserted in-test); the Preview
+is bound to the same DEV project (`/api/health` `env:"preview"`, `APP_ENV/project match` ok). No
+migration was authored in 8B-10 → the DEV and Production migration set is unchanged (32 files).
+No Production Supabase credential was used; no Production fixture, review, audit row, schema
+change, or PDF artifact was created. The two canonical DEV `p7-pdf-*` READY artifacts are
+untouched (still `byte_size` 287493 / 2536304).
+
+**Gates:** `git diff --check` clean; `tsc --noEmit` clean; `lint` clean; unit **692/692**; DEV
+integration **172/172** (152 existing + 20 new 8B-10 lifecycle tests); `build` OK
+(`ƒ Proxy (Middleware)`, no deprecation warning); deployed Preview E2E **6/6**. Phase 7
+output-parity / visual-parity: inherited, not rerun (see above).
+
+_Slices 8B-11 (the `AC-P8-1..10` evidence matrix) and 8B-12 (final release/handover) are not yet
+started._
