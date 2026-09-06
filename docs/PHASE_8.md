@@ -1217,5 +1217,331 @@ integration **172/172** (152 existing + 20 new 8B-10 lifecycle tests); `build` O
 (`ƒ Proxy (Middleware)`, no deprecation warning); deployed Preview E2E **6/6**. Phase 7
 output-parity / visual-parity: inherited, not rerun (see above).
 
-_Slices 8B-11 (the `AC-P8-1..10` evidence matrix) and 8B-12 (final release/handover) are not yet
-started._
+## 8B-11 — AC-P8-1..10 evidence & closure matrix — CLOSED
+
+Evidence / audit / decision slice. Baseline `4fc83e3`. **Docs only** — no product / schema /
+migration / RBAC / workflow change; no Preview or Production deploy. All ten MUST/SHOULD
+acceptance criteria are supported (see the final matrix); Phase 8 is **not** marked complete
+(that is 8B-12).
+
+**Evidence-freshness vocabulary** — FRESH (verified in 8B-11 or the final green 8B-10 CI where
+still applicable) · RECENT-INHERITED (verified in 8B-9 / 8B-10, relevant code unchanged since) ·
+HISTORICAL-INHERITED (verified in an earlier Phase 7/8 slice, implementation unchanged; source
+named) · DOCUMENTARY (code / config / schema inspection) · DEFERRED (owner + date + reason).
+
+---
+
+### AC-P8-1 — GI-1..GI-12 hold across the whole app — **PASS**
+
+| GI | Requirement (abbrev.) | Current implementation | Evidence | Freshness | Status |
+|---|---|---|---|---|---|
+| GI-1 | No "Approved / Bappebti Approved / Certified / Compliant" on any screen, PDF, log, API — only "ready for compliance review" / internal-decision wording | `INTERNAL_NOTE` constants in `publish-controls.tsx` / `review-controls.tsx` / `review-history.tsx`; builder note `features/manuals/manual-builder.tsx:275`; compliance-note on `resources/compliance/page.tsx`, `reviews/compliance/page.tsx` | AC-P5-9 (rendered-output scan, Phase 5) + AC-P7-10 (public web + PDF scan, Phase 7) + 8B-10 deployed web/PDF language sweep (`disetujui regulator` / `regulator-approved` / `bappebti approved` / `certified compliant` → 0) + 8B-11 source scan (only hit = a *search-keyword* string in `resources/guide/page.tsx:99` listing forbidden claims for an author-guidance article — not rendered as a claim) | HISTORICAL-INHERITED (P5/P7) + FRESH (8B-10 CI, 8B-11 scan) | PASS |
+| GI-2 | Manual X never shows another EA's data (no VMax bleed); every value is for the route's manual | `assembleManualViewModel` loads by explicit `manualId`, never "a" manual; `lib/manual/list-dedupe.ts` (8B-5) picks the route manual's own latest version | AC-P2-12 (Polaris end-to-end assertion, Phase 2) + `tests/unit/manual-list-dedupe.test.ts` (8) + 8B-10 lifecycle authored + rendered its own fixture only | HISTORICAL-INHERITED (P2) + RECENT-INHERITED (8B-5/8B-10) | PASS |
+| GI-3 | `lint`, `typecheck`, `next build` pass, zero errors | — | 8B-11 FRESH: `tsc --noEmit` clean, `eslint .` clean (0/0), `next build` `✓ Compiled successfully`; final green 8B-10 CI `verify` job (Lint/Typecheck/Unit/Build all success) | FRESH | PASS |
+| GI-4 | Browser console free of errors/warnings on the main workflow | — | 8B-5 live real-browser audit (login → dashboard → list → builder → preview → public) + 8B-8 live perf pass; `preview_logs` server-side "no errors"; the 3 fixed 8B-5/8B-6 P1s removed the known console warnings (duplicate React key, focus trap, chapter-action swallowed error) | RECENT-INHERITED (8B-5/8B-6/8B-8) | PASS |
+| GI-5 | No document-level horizontal scroll; builder centre column no nested h-scroll at 375/768/1024/1440 | `.builder-grid` centre track = `minmax(0, 1fr)`; `.responsive-table-wrap { overflow-x:auto }` contains table scroll; 8B-5 fixed the 375 px top-bar crush | 8B-5 live responsive audit at all 4 widths (this slice's own audit); `app/globals.css` inspection | RECENT-INHERITED (8B-5) + DOCUMENTARY | PASS |
+| GI-6 | Every disabled control has a visible reason; no inert buttons | `title=` on all `disabled` controls (publish "Terbitkan manual…", preview "Ekspor PDF", review "Belum siap dikirim", param manager, etc.); `button:disabled { opacity:.52 }` + adjacent blocker copy | AC-P1-12 (Phase 1) + 8B-6 empty/loading/error audit confirmed disabled-with-reason across all async controls | HISTORICAL-INHERITED (P1) + RECENT-INHERITED (8B-6) | PASS |
+| GI-7 | Icon+text status (never colour alone); visible focus rings; 44 px targets; `prefers-reduced-motion` | `StateIcon`/`StatusBadge` render icon **and** label; `:focus-visible { outline: 3px solid … }`; `touch-action: manipulation`; status pills carry text | 8B-5 live a11y audit (§AC-P8-3 table below); `app/globals.css` | RECENT-INHERITED (8B-5) + DOCUMENTARY | PASS |
+| GI-8 | Org A member cannot list/read/mutate any Org B entity | RLS on every table + composite FKs + SD RPC actor checks | AC-P8-5 (this slice's row) — `tests/integration/rls.test.ts` (152) + `tests/integration/e2e-lifecycle-8b10.test.ts` (20, cross-org section); final green 8B-10 CI **172/172** | FRESH (8B-10 CI) + RECENT-INHERITED (8B-7 static RLS review) | PASS |
+| GI-9 | Supabase secret/service key absent from the browser bundle | Secret read only in `lib/env.ts` + `lib/supabase/service.ts` (both `import "server-only"`); browser client uses the publishable key | 8B-7 security closure + 8B-11 FRESH: `grep .next/static/` for `SUPABASE_SECRET_KEY` / `PDF_PRINT_SECRET` / `VERCEL_AUTOMATION_BYPASS_SECRET` / `service_role` / `sb_secret_…` / service-role JWT → **0** | RECENT-INHERITED (8B-7) + FRESH (8B-11 bundle scan) | PASS |
+| GI-10 | A supported `symbol × timeframe` exists only as an explicit `ea_version_setups` row; nothing infers a combination | `ea_version_setups` rows; renderer + validation + AI bundle read the stored rows, never a cross-product of distinct symbols/timeframes | AC-P2-9a (UI + code review + fixture, Phase 2) + AC-P3-10 (render test, Phase 3); `create_ea_version_with_setups` stores explicit rows | HISTORICAL-INHERITED (P2/P3) | PASS |
+| GI-11 | Parameter definitions owned by `ea_versions`, never `manual_versions`; two manual versions of one EA version resolve to identical definitions | `parameter_groups` / `ea_parameters` FK → `ea_versions` (no `manual_version_id` column); `parameterTable` block references groups of the manual version's single linked EA version; cross-EA-version group rejected | AC-P2-18a (schema inspection + test) + AC-P2-18b (propagation test) + AC-P3-8 (two-manual-version propagation) + `rls.test.ts` "Phase 3 — parameter definition edits propagate…" + 8B-10 authored a `parameterTable`-by-ref block | HISTORICAL-INHERITED (P2/P3) + RECENT-INHERITED (8B-10) | PASS |
+| GI-12 | Any "minimum lot" is labelled *Tested Minimum Lot* (developer data) with the broker-spec statement; no EA-controlled universal minimum lot | `BROKER_MIN_LOT_NOTE_ID` note in the setup editor; "tested data — bukan minimum broker" small text; version detail + Ch.2/9 render "Tested Minimum Lot" | AC-P2-9c (UI + output scan, Phase 2) | HISTORICAL-INHERITED (P2) | PASS |
+
+**AC-P8-1 status: PASS.** GI-3, GI-8, GI-9 have FRESH 8B-11 / final-8B-10-CI evidence; the rest are HISTORICAL- or RECENT-INHERITED against unchanged implementations (verified no relevant code changed after each source slice).
+
+---
+
+### AC-P8-2 — route loading / empty / error / retry matrix — **PASS**
+
+Routes enumerated from `app/`. The `(workspace)` group shares one boundary: `app/(workspace)/loading.tsx`
+(skeleton, `aria-busy` + `aria-live` + `.sr-only "Memuat…"`) and `app/(workspace)/error.tsx`
+(`role`-less `route-state-page`, generic Indonesian copy, **"Coba lagi"** button calling `reset()`,
+no data/secret leak). Empty/error states within a route are the component-level ones audited in 8B-6.
+
+| Route | Scope | Loading | Empty | Error | Retry / next action | Evidence | Status |
+|---|---|---|---|---|---|---|---|
+| `/` | public | n/a (redirect) | n/a | n/a | redirects to `/dashboard` or `/login` | `app/page.tsx` | PASS |
+| `/login` | auth | `useActionState` `pending` → "Memproses…" button | n/a | `state.error` + `!configured` → `role="alert"` field-error | inline error; resubmit | `login-form.tsx` (8B-6) | PASS |
+| `/no-membership` | auth | static | static (is itself the empty/exception state) | static | link back | `no-membership/page.tsx` | PASS |
+| `/not-found` (global 404) | any | n/a | is the empty state | n/a | "Kembali ke dashboard" link | `app/not-found.tsx` | PASS |
+| `/dashboard` | workspace | group `loading.tsx` skeleton | `ManualTable` `rows.length===0` → "Belum ada manual" + "Buat manual" (if `canCreate`) | group `error.tsx` + "Coba lagi" | create-manual CTA / retry | `dashboard/page.tsx`, `manual-table.tsx` (8B-6) | PASS |
+| `/manuals` | workspace | group skeleton | `rows.length===0` "Belum ada manual"; `displayed.length===0` (filtered) "Manual tidak ditemukan" + **Reset filter** | group `error.tsx` + "Coba lagi" | create / reset-filter / retry | `manuals/page.tsx`, `manual-table.tsx` (8B-6) | PASS |
+| `/manuals/new` | workspace (create) | wizard `pending` → "Membuat…" | n/a (form) | `formError` `role="alert"` error-summary + per-row `field-error` | fix + resubmit | `create-manual-wizard.tsx` (8B-6) | PASS |
+| `/manuals/[id]/edit` | manual authoring | group skeleton + inner `SectionEditor` optimistic; `save-state` role="status" | empty chapter → "Apa yang perlu diisi di bab ini?" guidance; 0 blocks → block-count "0 blok" + guidance | group `error.tsx`; block save failure → per-block `field-error`; chapter-action failure → `ChapterNav` `role="alert"` (8B-6); nav-flush failure → `save-state-warn` | retry save / "coba lagi" / fix block; chapter mutations serialized + reverted | `manual-builder.tsx`, `section-editor.tsx`, `chapter-nav.tsx` (8B-6) | PASS |
+| `/manuals/[id]/preview` | preview | group skeleton; "Membuka preview…" transition button | read-only view of the manual (guidance shown where chapters empty) | group `error.tsx`; PDF button: FAILED → "PDF belum tersedia", transient fetch fail → **"Gagal mengunduh — coba lagi"** (8B-6) | retry PDF download; "Edit manual" link | `preview/page.tsx`, `pdf-download-button.tsx` (8B-6) | PASS |
+| `/manuals/[id]/reviews` | review | group skeleton | `review-history.tsx` — "Belum ada" states per section | group `error.tsx` + "Coba lagi" | n/a (history view) | `reviews/page.tsx`, `review-history.tsx` (8B-6) | PASS |
+| `/reviews/technical`, `/reviews/compliance` | review | group skeleton | assignment-scoped queue empty → empty-state copy | group `error.tsx` + "Coba lagi" | n/a (queue) | `reviews/*/page.tsx` (8B-6) | PASS |
+| `/settings` | workspace | group skeleton | static content | group `error.tsx` + "Coba lagi" | n/a | `settings/page.tsx` | PASS |
+| `/templates` | workspace | group skeleton | template list (seeded system template always present) | group `error.tsx` + "Coba lagi" | n/a | `templates/page.tsx` | PASS |
+| `/resources/guide`, `/resources/compliance` | workspace | group skeleton | static reference content | group `error.tsx` + "Coba lagi" | n/a | `resources/*/page.tsx` | PASS |
+| `/ea-products` | workspace | group skeleton | 0 products → `card empty-state` "Belum ada produk EA" + "Tambah produk" | group `error.tsx` + "Coba lagi" | create-product CTA | `ea-products/page.tsx` (8B-6) | PASS |
+| `/ea-products/[id]` | workspace | group skeleton | 0 versions → empty-state + "Buat versi EA"; `ProductNotFound` → 404 | group `error.tsx` + "Coba lagi" | create-version / back | `ea-products/[productId]/page.tsx` (8B-6) | PASS |
+| `/manual/[slug]/[version]` | public manual | `dynamic` server render (no client loading needed) | never-published / unknown slug or version → **404** (`notFound()`); ARCHIVED → 200 + neutral banner | `PublicSnapshotCorruptError` → generic 500, no DB detail | "view latest published" link on archived | `manual/[eaSlug]/[version]/page.tsx` + 8B-10 boundary test | PASS |
+| `/manual/[slug]/[version]/print` | public (token) | server render | invalid/absent token → **404** (non-enumerating) | generic 404 | n/a | `print/page.tsx` + 8B-10 token-boundary test | PASS |
+| `/api/health`, `/api/internal/pdf-artifact`, `/manual/.../image/[idx]`, `/manual/.../pdf` | API (not navigable UI) | n/a | n/a | typed JSON / bare 404 / 502; no leak | 8B-10 + `pdf-endpoint.e2e.test.ts` | PASS (API — no UI state required) |
+
+**AC-P8-2 status: PASS.** Every user-navigable route has a defined loading, empty, and error state
+with a retry or clear next action. Evidence = the 8B-6 empty/loading/error/retry audit (which
+fixed the 2 real P1 gaps) + the shared `(workspace)` `loading.tsx`/`error.tsx` boundary + 8B-10's
+public-route boundary tests. Freshness: RECENT-INHERITED (8B-6) + FRESH (8B-10 CI for the public
+routes). No MUST gap remains.
+
+---
+
+### AC-P8-3 — accessibility (WCAG 2.1 AA against this project's acceptance) — **PASS**
+
+Source: **8B-5 live real-browser accessibility + responsive audit** (this slice's own audit, real
+DEV data, keyboard + screen-reader-oriented checks), plus `app/globals.css` / component inspection.
+
+| Requirement | Implementation | Evidence | Freshness | State |
+|---|---|---|---|---|
+| Contrast ≥ 4.5:1 (body/label text) | token palette (`--primary #0f172a` on `--surface #fff`, `--muted-foreground #475569`); status colours paired with text | 8B-5 audit; token inspection | RECENT-INHERITED (8B-5) | conforms |
+| Visible focus | `:focus-visible { outline: 3px solid rgba(37,99,235,.38); outline-offset: 2px }` global | `app/globals.css:37` | DOCUMENTARY | conforms |
+| 44 px touch targets | `touch-action: manipulation`; button/nav sizing meets 44 px on the mobile breakpoint | 8B-5 audit at 375 px | RECENT-INHERITED (8B-5) | conforms |
+| Icon **and** text status | `StateIcon` + `COMPLETION_LABEL`, `StatusBadge` icon + `STATUS_LABELS`, review pills carry text | component code; 8B-5 | DOCUMENTARY + RECENT-INHERITED | conforms |
+| Keyboard alternative for every drag/reorder | ChapterNav ▲/▼ move buttons alongside the drag handle; block reorder ▲/▼; setup-row ▲/▼ | AC-P3-5 (keyboard + pointer test, Phase 3) + 8B-6 concurrency tests exercise the move buttons | HISTORICAL-INHERITED (P3) + RECENT-INHERITED (8B-6) | conforms |
+| `prefers-reduced-motion` | honoured in `app/globals.css`; **not independently re-verified live in 8B-5** | 8B-5 P2 backlog item (carried) | RECENT-INHERITED + open P2 spot-check | conforms (P2 spot-check outstanding) |
+| Landmarks | `app-shell` `<aside aria-label="Navigasi utama">`, `<header>`, `<main id="main-content" tabIndex={-1}>`, skip link "Lewati ke konten utama" | `components/app-shell/app-shell.tsx` | DOCUMENTARY | conforms |
+| Heading structure | one `<h1 id="chapter-title">` per builder view; public manual `<h1>` cover + `<h2>` per chapter | 8B-10 rendered-HTML inspection (`<h1>`/`<h2>` hierarchy); component code | FRESH (8B-10 HTML) + DOCUMENTARY | conforms |
+| Labelled controls | every `<input>`/`<select>` in a `<label>` or with `aria-label`; search fields carry `.sr-only` labels | 8B-5 audit; component code | RECENT-INHERITED + DOCUMENTARY | conforms |
+| Inline + summary form errors | wizard `error-summary` `role="alert"` + per-row `field-error`; login `role="alert"`; changelog per-entry `cl-error` | AC-P8-2 evidence; 8B-6 | RECENT-INHERITED (8B-6) | conforms |
+| Modal focus trap (mobile nav drawer) | `role="dialog"` + `aria-modal`, Tab/Shift+Tab wrap, focus-in on open, focus-restore on close | **8B-5 fix** + `tests/unit/app-shell-drawer.test.tsx` (5) | RECENT-INHERITED (8B-5) | conforms |
+
+**Automated tooling:** the repo ships no axe/pa11y harness; none added (per the slice constraint —
+not "genuinely necessary" when the 8B-5 live audit + `app-shell-drawer` unit tests + DOCUMENTARY
+CSS/landmark evidence cover the acceptance wording). **Known exception / open P2:**
+`prefers-reduced-motion` was fixed in code but not independently re-verified in a live 8B-5 pass —
+carried as a P2 spot-check (owner: release engineer; target: 8B-12 handover checklist). This does
+not block AC-P8-3: the acceptance criterion's listed items are each supported by live-audit or
+code evidence; the reduced-motion rule *is present in the stylesheet*, only its live re-check is
+outstanding.
+
+**AC-P8-3 status: PASS** (conformance evidence against this project's acceptance criterion — not a
+formal external WCAG certification).
+
+---
+
+### AC-P8-4 — responsive at 375 / 768 / 1024 / 1440 px — **PASS**
+
+Source: **8B-5 live responsive audit** (real browser, real DEV data, all 4 widths, across Login,
+Dashboard, Manual Book list, Produk EA, Manual Builder (chapter nav / block editor / add-delete
+chapter), Preview, Review Teknis, Public Manual).
+
+| Surface | 375 | 768 | 1024 | 1440 | Notes | Evidence | Status |
+|---|---|---|---|---|---|---|---|
+| Login | ok | ok | ok | ok | single card, centred | 8B-5 | PASS |
+| Dashboard | ok | ok | ok | ok | metric grid + `responsive-table-wrap` (`overflow-x:auto`) contains the table | 8B-5 | PASS |
+| Manual Book list | ok | ok | ok | ok | filter bar wraps; table scroll contained; **duplicate-key bug fixed in 8B-5** | 8B-5 | PASS |
+| Produk EA (list + detail) | ok | ok | ok | ok | product grid → 1 col on mobile | 8B-5 | PASS |
+| **Manual Builder** | **fixed in 8B-5** | ok | ok | ok | 375 px top-bar breadcrumb crush fixed (`min-width:0` + nested `max-width`); mobile drawers for Bab/Inspector; **centre column = `minmax(0,1fr)` → no document h-scroll, no nested h-scroll** | 8B-5 (fix + re-verify) | PASS |
+| Validation inspector / inline parameter manager | ok | ok | ok | ok | inspector is a mobile drawer < 768; param tables in `param-table-editor` flex column; long param table → contained region | 8B-5 | PASS |
+| Review pages (technical / compliance / reviews history) | ok | ok | ok | ok | queue lists + comment panel stack on mobile | 8B-5 | PASS |
+| Settings / Templates / Resources | ok | ok | ok | ok | static content, single column | 8B-5 (spot-check) | PASS |
+| Preview | ok | ok | ok | ok | A4 doc scales; **P2: occasionally loads pre-scrolled** (carried) | 8B-5 | PASS (P2 noted) |
+| Public manual | ok | **P2** | ok | ok | **P2: footer text ~1-char clip at 375 px** (carried, non-blocking) | 8B-5 + 8B-10 (deployed render inspected) | PASS (P2 noted) |
+
+**AC-P8-4 status: PASS.** No document-level horizontal scroll and no nested h-scroll in the builder
+centre column at any of the 4 widths (the two conditions the criterion calls out). Two cosmetic
+P2s remain (public-manual footer ~1-char clip at 375 px; Preview occasionally pre-scrolled) —
+carried in the 8B-5 backlog, neither is a horizontal-scroll or layout-break defect. Freshness:
+RECENT-INHERITED (8B-5) + FRESH (8B-10 deployed public-manual HTML inspected).
+
+---
+
+### AC-P8-5 — cross-org / RLS test suite (service path disabled) — **PASS**
+
+**Primary evidence: RECENT-INHERITED (8B-10) + FRESH (final green 8B-10 CI).** Relevant code
+(RLS / RPC / schema) is unchanged since `4fc83e3` → no destructive browser E2E rerun needed.
+
+| Org B entity family | Org A member (via authenticated user path, no service path) | Test |
+|---|---|---|
+| EA products | read `[]`; `update` 0 rows | `rls.test.ts` "cross-org isolation" + `e2e-lifecycle-8b10.test.ts` "cross-org" |
+| EA versions | read `[]`; forged `create_ea_version_with_setups` referencing a B product id → rejected | both suites |
+| ea_version_setups / parameter_groups / ea_parameters | read `[]`; `copy_parameter_definitions` cross-org copy refused, no partial write | `rls.test.ts` "Finding 5" |
+| manuals / manual_versions / manual_sections / manual_blocks | read `[]`; `update` 0 rows | `e2e-lifecycle-8b10.test.ts` cross-org |
+| reviews / review_comments | read `[]`; forged `create_review_comment` / `record_technical_decision` on the A mv → typed denial | `e2e-lifecycle-8b10.test.ts` |
+| checklist_results / checklist_evidence_submissions | read `[]` | `e2e-lifecycle-8b10.test.ts` + `rls.test.ts` UAT-35 block |
+| published_snapshots / public index / private image + storage | read `[]`; published-image proxy is snapshot-membership-scoped; private buckets have no anon/authenticated policy | `rls.test.ts` "private image access", "Phase 7 slice 1" |
+| reviewer decisions (publish / archive) | forged Org B ADMIN `p_actor_id` on `publish_manual_version` / `archive_manual_version` of the A mv → rejected (not an admin **of Org A**) | `e2e-lifecycle-8b10.test.ts` |
+
+**Fresh CI proof:** run `34020261218` (commit `4fc83e3`) DEV integration **172/172** =
+`rls.test.ts` (152) + `e2e-lifecycle-8b10.test.ts` (20). No secret values in the CI log; fork-PR
+skip step `=> skipped` (real DEV job executed). Also 8B-7's static RLS review: RLS enabled on
+every table, zero `anon` grants, all 70 SECURITY DEFINER functions pin `search_path`.
+
+**AC-P8-5 status: PASS.**
+
+---
+
+### AC-P8-6 — security review — **PASS**
+
+| Requirement | Threat | Control | Evidence | Last verification | Status |
+|---|---|---|---|---|---|
+| Secret/service key absent from client bundle (GI-9) | key exfiltration via JS bundle | secret read only in `lib/env.ts` + `lib/supabase/service.ts` (`import "server-only"`); browser client uses publishable key | 8B-7 + **8B-11 FRESH** `grep .next/static/` → 0 for `SUPABASE_SECRET_KEY` / `PDF_PRINT_SECRET` / `VERCEL_AUTOMATION_BYPASS_SECRET` / `service_role` / `sb_secret_…` / service-role JWT | 8B-11 | PASS |
+| Public routes read only published-safe snapshots | draft/private data on a public URL | `app/manual/[eaSlug]/[version]/*` + `lib/publication/get-public-manual.ts` query only `public_manuals` / `public_manual_versions` / `published_snapshots`; DRAFT/never-published → 404; `snapshotToViewModel` strips DB ids | AC-P7-2 (Phase 7) + 8B-8 read-path review + 8B-10 deployed HTML free of `storage_key` / `render_json` / `service_role` / `supabase.co/storage` | 8B-10 CI | PASS |
+| AI payload carries only the grounded bundle | prompt exfiltration of unrelated data | `lib/ai/fact-bundle.ts` builds a bounded bundle; `lib/ai/transport/anthropic.ts` sends only `system` + `user`; errors are typed and never echo the key or body | AC-P4 (Phase 4) + 8B-7 transport review | 8B-7 | PASS (HISTORICAL/RECENT-INHERITED) |
+| Private buckets reject unsigned access | direct object fetch | both buckets `public:false`; `manual-pdf-artifacts` has **no** anon/authenticated storage policy; `manual-images` policies org-scoped; signed URLs 30-min TTL | `rls.test.ts` "private image access" (other-org cannot sign; object not reachable unsigned; URL expires) | 8B-10 CI | PASS |
+| `audit_events` append-only | tamper / delete of the trail | `app.reject_audit_mutation()` rejects UPDATE/DELETE for **every** app identity incl. `service_role`; only raw `postgres` | `rls.test.ts` "neither authenticated NOR service_role can UPDATE/DELETE" + `e2e-lifecycle-8b10.test.ts` "audit integrity" | 8B-10 CI | PASS |
+| Logs scrubbed | secret/PII in server logs | `lib/observability/request-id.ts` `redact()` drops `token|secret|key|password|authorization|signedurl`; AI/PDF errors typed; CI masks all secrets `***` | 8B-7 log-path review + 8B-11 CI-log scan (0 unmasked) | 8B-11 | PASS |
+| No service-role in the browser | RLS bypass from the client | 8 `createSupabaseServiceClient()` sites, all server-only trusted; no `"use client"` importer; `service.ts` is `import "server-only"` | 8B-7 call-site audit | 8B-7 | PASS (RECENT-INHERITED) |
+| PDF print token / bypass secret not leaked | token replay / protection bypass | HMAC print token in a header only, TTL ~120 s; bypass secret in a header only; 8B-10: PDF bytes + response headers carry no `x-smartin-print-token` / `PDF_PRINT_SECRET` / `lease_token` / bypass secret | `pdf-endpoint.e2e.test.ts` "does not leak private identifiers" + `lifecycle-pdf-8b10.e2e.test.ts` | 8B-10 (local E2E) | PASS |
+| Cross-org isolation | see AC-P8-5 | — | AC-P8-5 row | 8B-10 CI | PASS |
+| Preview / Production environment isolation | writing test data to Prod; wrong project | `lib/env.ts` `assertSupabaseProjectMatchesEnv` (fail-closed, DEV↔`tmrwhkhydkjaubpuegqa` / PROD↔`wotidyhpbltoxmzvdqkj`); `_guard.ts` + `scripts/fixtures/_guard.mjs`; `/api/health` `APP_ENV/project match` | 8B-7 guard review + 8B-10 (Preview `env:"preview"` bound to DEV; no Prod write) + 8B-11 (Prod `/api/health` `ok:true` untouched) | 8B-11 | PASS |
+
+**AC-P8-6 status: PASS.** (Formal "review report" = this table + the 8B-7 §Security closure
+section.)
+
+---
+
+### AC-P8-7 — performance (SHOULD) — **PASS WITH KNOWN RISK**
+
+**Literal acceptance wording:**
+
+| Condition | Evidence | Freshness | Result |
+|---|---|---|---|
+| list/dashboard routes render server-side | `/dashboard`, `/manuals`, `/ea-products` are **server components** (no `"use client"`, `dynamic = "force-dynamic"`, data fetched server-side, `Promise.all`-parallelised) | 8B-11 DOCUMENTARY + 8B-8 trace | conforms |
+| builder chapter switch feels immediate | **8B-8 measured: 0 DB round-trips — purely client-side** | RECENT-INHERITED (8B-8) | conforms |
+| block edit feels immediate | optimistic `SectionEditor`; single-flight debounced autosave; 8B-8 confirmed no blocking work on edit | RECENT-INHERITED (8B-8) | conforms |
+| autosave debounce ≤ ~1 s | `DEFAULT_AUTOSAVE_DEBOUNCE_MS = 800` (`lib/domain/autosave.ts`), `createAutosaveQueue` default 800 ms | 8B-11 DOCUMENTARY | conforms (800 ms) |
+| large parameter tables scroll within a contained region | `.responsive-table-wrap { overflow-x:auto }`, `.param-table-editor` flex column; builder centre = `minmax(0,1fr)` | 8B-11 DOCUMENTARY + 8B-5 live | conforms |
+
+Every explicit AC-P8-7 condition is satisfied. **8B-8 also delivered two measured optimisations**
+(batched image signing: builder load 26 → 24 DB round-trips; published-image route 5 → 4 per
+request) and a documented P2 backlog.
+
+**KNOWN RISK carried from 8B-10 — PDF cold-start generation:**
+- **Warm generation** (Lambda hot): trigger → durable READY ≈ **12–19 s**.
+- **Cold generation** (fresh Lambda + `@sparticuz/chromium` cold start): **> 180 s observed** (a
+  cold first run exceeded a 180 s client wait; the artifact still became durably READY server-side;
+  route `maxDuration` = 300 s, unchanged).
+- **Root cause:** Lambda + Chromium cold start dominates; the render itself is a small fraction.
+- **User impact:** a viewer who requests a PDF for a *just-published* manual whose artifact has not
+  yet been generated may wait tens of seconds to > 3 min on a cold path. After the first
+  generation, **READY-artifact GET ≈ 3.3 s and never invokes Chromium** (byte-identical SHA-256).
+  The publish flow also seeds generation server-side, so in normal operation a viewer usually hits
+  a warm/READY artifact.
+- **Severity:** medium (SHOULD-level, first-request-only, self-healing once READY).
+- **Release-blocking?** **No** — AC-P8-7 is a SHOULD and its explicit conditions pass; the PDF path
+  is not in the AC-P8-7 wording. Recorded as a follow-up.
+- **Owner / target:** platform/perf owner (release engineer); **target: first post-Phase-8
+  maintenance window** — options to evaluate then: pre-warm on publish (already partially done),
+  a keep-warm ping, `@sparticuz/chromium` version bump, or a queued/async generation UX. **No
+  Chromium-architecture change in 8B-11.**
+
+**AC-P8-7 status: PASS WITH KNOWN RISK** (SHOULD criterion — explicit wording satisfied; the PDF
+cold-start performance risk is documented, non-blocking, and owned for post-Phase-8).
+
+---
+
+### AC-P8-8 — end-to-end permission + publishing boundary — **PASS**
+
+**Primary evidence: RECENT-INHERITED (8B-10) + FRESH (final green 8B-10 CI 172/172).** Relevant
+code unchanged since `4fc83e3` → not rerun in 8B-11.
+
+`tests/integration/e2e-lifecycle-8b10.test.ts` (20/20 in CI run `34020261218`) proves, on one
+continuous fixture through real authenticated user paths: developer cannot review
+(`assign_reviewers` / `record_*_decision` rejected); content is server-side read-only in every
+non-DRAFT state (block edit rejected); **no self-approval** (a contributor assigned as reviewer
+cannot APPROVE — typed `self approval forbidden`); non-admin cannot publish (`DEV`/`REV`/`COMP`
+`p_actor_id` → `only an ADMIN`); assigned-reviewer boundaries (unassigned reviewer / wrong role
+rejected); request-changes → `CHANGES_REQUESTED` (comments retained, one audit, one decision row);
+resubmission → `TECHNICAL_REVIEW` round 2 (never straight to `COMPLIANCE_REVIEW`); technical
+approve → `COMPLIANCE_REVIEW`; compliance approve → `APPROVED`; ADMIN publish → `PUBLISHED`
+(one snapshot, content hash, slug/version, `published_at`, one audit, public index rows); published
+immutability (block insert/update/delete + section mutation all rejected; snapshot hash-stable);
+archive → `ARCHIVED`; cross-org isolation (see AC-P8-5); human-evidence (WARNING never flips to
+PASS; author can't self-decide; block edit STALEs; authoritative MISSING can't use the fallback);
+audit integrity (exactly one event per privileged command; append-only for authenticated callers
+**and** `service_role`).
+
+**AC-P8-8 status: PASS.**
+
+---
+
+### AC-P8-9 — TypeScript / dependency / npm ci — **PASS**
+
+| Sub-requirement | Evidence | Freshness | Status |
+|---|---|---|---|
+| `tsc --noEmit` clean | 8B-11 FRESH + final 8B-10 CI `verify` `Typecheck = success` | FRESH | PASS |
+| No new TS suppressions since Phase 2 baseline | 8B-11 FRESH scan: `@ts-ignore` **0**, `@ts-expect-error` **0**, `as any` **0** across `app/ lib/ features/ components/`; `eslint-disable` **3** — all pre-existing/justified (`react-hooks/exhaustive-deps` in `section-editor.tsx:512`; two `@next/next/no-img-element` in `manual-renderer.tsx` for proxy/signed URLs). None added in Phase 8. | FRESH | PASS |
+| Dependency set = phase-approved only | 8B-9 dependency audit: `npm audit` **0 vulnerabilities**; `package.json` reviewed — only phase-approved packages (Next 16, React 19, `@supabase/*`, `@tiptap/*`, `zod`, `lucide-react`, `playwright-core` + `@sparticuz/chromium` for Phase 7 PDF, `react-hook-form` + `@hookform/resolvers`, Tailwind v4 for the base reset only). No unexplained package. | RECENT-INHERITED (8B-9) | PASS |
+| Reproducible `npm ci` | final 8B-10 CI: `npm ci` from lockfile, `cache: npm` hit, Node `v22.23.2` / npm `10.9.8` on `setup-node@v5` | FRESH (8B-10 CI) | PASS |
+| Node version appropriate | CI = **Node 22** (`node-version: 22`); Vercel Prod/Preview ≥ 18 (default 22); local dev Node 20 (EBADENGINE warning only, non-shipping) — documented in 8B-9 | RECENT-INHERITED (8B-9) | PASS |
+| CI cache behaviour sane | 8B-9 fix: `actions/checkout@v5` + `actions/setup-node@v5` (node24 action runtime); explicit `cache: npm` preserved; `packageManager` field absent so v5 auto-cache inert; cache-hit shown in the CI log | RECENT-INHERITED (8B-9) + FRESH (8B-10 CI) | PASS |
+
+**AC-P8-9 status: PASS.** No `package.json` / lockfile change in 8B-10 or 8B-11 → `npm ci` was
+last exercised in the final green 8B-10 CI (`34020261218`); no fresh `npm ci` from a clean state
+needed.
+
+---
+
+### AC-P8-10 — close every PRD §25 Open Question — **PASS**
+
+All 12 `PRD-OQ-*` items are decided; the canonical decision table is below. `docs/PRD.md` §25 and
+`docs/REQUIREMENTS_TRACEABILITY.md` are synchronised in this slice (the stale "Open" labels are
+corrected to point at the actual phase decision record — historical decision text is not
+rewritten). **No item remains marked "Open"; no deferred extension is left with "no fixed date".**
+
+Every DEFERRED extension carries a concrete **target review date: 2026-12-31** — a planning
+checkpoint for the named owner to reassess scope, **not a committed delivery date** and not a
+Phase 8 release gate.
+
+| ID | Question (abbrev.) | Needed by | Final decision | Decision source | Status | Owner | Decision date | Reason / notes |
+|---|---|---|---|---|---|---|---|---|
+| PRD-OQ-001 | Styling: bespoke CSS vs Tailwind utilities vs shadcn | Phase 2 | **Bespoke `app/globals.css` token stylesheet is authoritative** (1548 lines, 1094 classes, 0 `@apply`/`@layer`/`@theme`). Tailwind v4 is `@import`-ed for its base reset/preflight only; **no** utility classes in components, **no** shadcn. | `docs/PHASE_2.md` §"PRD-OQ-001"; confirmed 8B-11 (grep: ~0 utility-class usage) | RESOLVED | Frontend lead | Phase 2 | Consistency with the Phase 1 design-token system; keeps the CSS surface auditable. |
+| PRD-OQ-002 | Inspector tabs: 2 vs 3 | Phase 3–5 | **2 tabs (Validasi, Metadata)** — completion score + per-chapter status live in Validasi; a separate validation tab was revisited at Phase 5 and stayed folded in. | `docs/PHASE_3.md` §10; AC-P3-14 | RESOLVED | UX | Phase 3 | Third tab only meaningful with the Phase 5 checklist engine, which was integrated into Validasi. |
+| PRD-OQ-003 | Auth route group `(auth)` vs `app/login/` | Phase 2 | **`app/login/`** (no `(auth)` group); `/login` + `/no-membership` at app root. | `docs/PHASE_2.md` §"PRD-OQ-003" | RESOLVED | Frontend lead | Phase 2 | Simpler tree; no shared auth layout needed. |
+| PRD-OQ-004 | Exact checklist item set + rule keys (v1) | Phase 5 | **The full 31-check set of `COMPLIANCE_REQUIREMENTS.md` §12**, with stable `rule_key`s, seeded as checklist template v1; every `rule_key` maps to a registered evaluator (drift guard test). | `docs/PHASE_5.md` §"PRD-OQ-004 — RESOLVED"; AC-P5-13; `rls.test.ts` "31-item set with stable keys" | RESOLVED | Compliance + Product | Phase 5 | — |
+| PRD-OQ-005 | Which chapters are truly `required` | Phase 2 (template) / Phase 5 (validation) | **Resolved with the required set + PBK conditionals** — `manual_template_sections.required` on the seeded system template; seven Bappebti-only items become NOT_APPLICABLE for `pbkScope = OUT_OF_SCOPE`. | `docs/PHASE_5.md` §"PRD-OQ-005 — RESOLVED"; AC-P5-13; `rls.test.ts` template-instantiation test | RESOLVED | Compliance + Product | Phase 5 | — |
+| PRD-OQ-006 | Supported-setup granularity | Phase 2 | **Resolved** — configuration = `symbol` (broker suffixes) + `timeframe` (controlled MT enum) + optional preset ref + optional Tested Minimum Lot + optional notes + supported flag + order; model **and** input UI both shipped in Phase 2. | PRD §25 (already marked Resolved); `PRD-EA-009`/`PRD-EA-010`; AC-P2-9 | RESOLVED | Product | Phase 2 | — |
+| PRD-OQ-007 | Publishing authority: admin-only vs compliance-reviewer | Phase 6 | **ADMIN only.** `COMPLIANCE_REVIEWER` approves the *documentation* (`COMPLIANCE_REVIEW → APPROVED`); only `ADMIN` runs `APPROVED → PUBLISHED`. Not regulatory approval. | `docs/PHASE_6.md` §"PRD-OQ-007"; `publish_manual_version` RPC (`app.is_admin` check); `rls.test.ts` + `e2e-lifecycle-8b10.test.ts` publish negatives | RESOLVED | Product + Compliance | Phase 6 | Enforced server-side; 8B-10 re-proved (non-admin `p_actor_id` → `only an ADMIN`). |
+| PRD-OQ-008 | Locale strategy: separate `manuals` rows vs per-locale versions | Post-MVP (affects Phase 2 schema) | **Per-`manuals`-row locale** — `manuals.locale` column; one `manuals` row per (EA product, locale); manual versions are locale-agnostic under it. Multi-locale authoring UI is **deferred post-MVP** (schema is ready; only `id` is authored in the MVP). | `docs/DATA_MODEL.md` (`locale` on `manuals`); shipped schema (`create_manual_with_version(p_locale)`); `docs/PHASE_2.md` §"schema" | RESOLVED (schema decision) / DEFERRED (multi-locale UI) | Product | Phase 2 (schema decision) | Multi-locale UI deferred — owner: **Product**; **target review date: 2026-12-31** (planning checkpoint, not a committed delivery date); impact: none on MVP (single `id` locale ships); not a Phase 8 release gate. |
+| PRD-OQ-009 | Image `scan_status` mechanism; unscanned = blocked vs warning | Phase 2 (upload) / Phase 5 (gate) | **Field stored, no scanner in the MVP, NOT a Phase 5 publish gate.** `image_assets.scan_status` exists and defaults such that the current publish gate does not block on it; a real scanner (Supabase extension or external service) is deferred post-MVP. | `docs/PHASE_5.md` §"PRD-OQ-009"; AC-P5-13 ("image scan not a Phase 5 gate"); `docs/PHASE_2.md` §"schema" note 4 | RESOLVED (MVP scope) / DEFERRED (scanner) | Platform/Security | Phase 5 (MVP-scope decision) | Scanner deferred — owner: **Platform/Security**; **target review date: 2026-12-31** (planning checkpoint, not a committed delivery date); not a Phase 8 release gate; impact: images are org-private (RLS + signed URLs) and only appear in a published snapshot after a human review round, so the residual risk is low. |
+| PRD-OQ-010 | Changelog ↔ Pasal 8: record-only vs also produce artefact + task | Phase 6 | **Record + remind only.** IN_SCOPE feature/behaviour entry → records the entry + surfaces a Pasal 8 operational reminder; never files, submits, simulates approval, produces a fake client-approval artefact, or marks the obligation complete. OUT_OF_SCOPE → reminder not shown as an applicable Indonesian PBK requirement. | `docs/PHASE_6.md` §"PRD-OQ-010"; PRD-VER-007; AC-P6 changelog tests | RESOLVED | Compliance + Product | Phase 6 | — |
+| PRD-OQ-011 | Non-Bappebti EAs: which chapters/checks suppressed | Phase 5 | **Seven Bappebti-only checklist items become NOT_APPLICABLE for `pbkScope = OUT_OF_SCOPE`** (item-level flag in `evaluate.ts`); chapters stay but their PBK-specific checks are suppressed. | `docs/PHASE_5.md` §"PRD-OQ-011"; AC-P5-13; `rls.test.ts` validation-rules coverage | RESOLVED | Compliance | Phase 5 | — |
+| PRD-OQ-012 | Template editing depth in v1 | Phase 2 | **v1 ships versioned template tables + the seeded system template + version-recording on manual creation; NO admin template-CRUD UI.** Per-manual-version custom chapters (add/rename/reorder/delete) shipped in Phase 3 at the *manual* level, not the template level. A future admin surface owns `template:manage`. | `docs/PHASE_2.md` §"PRD-OQ-012"; Phase 3 chapter-management (manual-level) | RESOLVED (v1 scope) / DEFERRED (admin template-CRUD) | Product | Phase 2 (v1-scope decision) | Admin template editor deferred — owner: **Product**; **target review date: 2026-12-31** (planning checkpoint, not a committed delivery date); not a Phase 8 release gate; impact: none on MVP (system template is authoritative; manual-level chapter edits cover author needs). |
+
+**Stale traceability entries corrected in 8B-11** (`docs/REQUIREMENTS_TRACEABILITY.md` §Open
+questions): PRD-OQ-001, -003, -004, -005, -008, -009, -011, -012 moved from "Open" to their
+resolution (source slice cited). PRD-OQ-002, -006, -007, -010 were already marked resolved.
+`docs/PRD.md` §25 table: rows -001, -003, -004, -005, -008, -009, -011, -012 annotated with
+**RESOLVED** + the phase decision reference (original open-question text kept as
+`~~strikethrough~~`); the "Needed by" column updated to `Decided`. `PRD-SEC-008` traceability row's "Planned (rule TBD, PRD-OQ-009)"
+updated to "Field-only in MVP; scanner deferred post-MVP (PRD-OQ-009 resolved)".
+
+**AC-P8-10 status: PASS.** Every PRD-OQ is decided. The three with a deferred *extension*
+(OQ-008 multi-locale UI — owner Product; OQ-009 image scanner — owner Platform/Security; OQ-012
+admin template editor — owner Product) each carry an owner, an explicit **target review date of
+2026-12-31** (planning checkpoint, not a committed delivery date), a reason, and a release-impact
+assessment confirming the deferment does **not** violate a Phase 8 MUST release gate. No OQ row is
+"Open"; no deferment says "no fixed date" or an undated "post-MVP".
+
+---
+
+### Final AC-P8-1..10 matrix
+
+| AC | Type | Requirement (abbrev.) | Evidence | Freshness | Status | Risk / gap |
+|---|---|---|---|---|---|---|
+| AC-P8-1 | MUST | GI-1..GI-12 across the app | GI matrix above; `tests/unit/*`, `rls.test.ts`, `e2e-lifecycle-8b10.test.ts`; 8B-11 build/bundle scans | FRESH (GI-3/8/9) + HISTORICAL/RECENT-INHERITED | **PASS** | none |
+| AC-P8-2 | MUST | every route: loading / empty / error / retry | route-state matrix above; 8B-6 audit; `(workspace)/loading.tsx` + `error.tsx`; 8B-10 public-route boundary tests | RECENT-INHERITED (8B-6) + FRESH (8B-10 CI) | **PASS** | none |
+| AC-P8-3 | MUST | WCAG 2.1 AA (project acceptance) | a11y table above; 8B-5 live audit; `app-shell-drawer.test.tsx` (5); `app/globals.css` | RECENT-INHERITED (8B-5) + DOCUMENTARY | **PASS** | P2: `prefers-reduced-motion` live spot-check (owner: release eng; 8B-12) |
+| AC-P8-4 | MUST | responsive 375/768/1024/1440; no doc h-scroll; no nested builder h-scroll | route×viewport matrix above; 8B-5 live audit; `.builder-grid minmax(0,1fr)` | RECENT-INHERITED (8B-5) + FRESH (8B-10 HTML) | **PASS** | P2 cosmetic: public-manual footer ~1-char clip @375; Preview occasionally pre-scrolled |
+| AC-P8-5 | MUST | cross-org role/RLS suite, service path disabled | AC-P8-5 table; `rls.test.ts` (152) + `e2e-lifecycle-8b10.test.ts` (20); CI run `34020261218` **172/172** | FRESH (8B-10 CI) + RECENT-INHERITED (8B-7) | **PASS** | none |
+| AC-P8-6 | MUST | security review report | security matrix above; 8B-7 §Security closure; 8B-11 bundle + CI-log scans | RECENT-INHERITED (8B-7) + FRESH (8B-11) | **PASS** | none |
+| AC-P8-7 | SHOULD | list/dashboard SSR; builder immediate; autosave ≤~1s; param tables contained | perf table above; 8B-8 measurements; `DEFAULT_AUTOSAVE_DEBOUNCE_MS = 800`; 8B-11 SSR/CSS inspection | RECENT-INHERITED (8B-8) + FRESH (8B-11 DOCUMENTARY) | **PASS WITH KNOWN RISK** | PDF cold-start > 180 s (medium, first-request-only, self-healing; owner: release eng; target: first post-Phase-8 maintenance window) |
+| AC-P8-8 | MUST | full permission + publishing boundary E2E | AC-P8-8 summary; `e2e-lifecycle-8b10.test.ts` (20/20 in CI `34020261218`) | FRESH (8B-10 CI) + RECENT-INHERITED (8B-10) | **PASS** | none |
+| AC-P8-9 | MUST | `tsc` clean, no new suppressions, deps reviewed, reproducible `npm ci` | AC-P8-9 table; 8B-11 suppression scan (0/0/0 + 3 baseline `eslint-disable`); 8B-9 dep audit; 8B-10 CI `npm ci` | FRESH (8B-11) + RECENT-INHERITED (8B-9/8B-10) | **PASS** | none |
+| AC-P8-10 | MUST | close every PRD §25 OQ | PRD-OQ decision table above; `docs/PRD.md` §25 + `docs/REQUIREMENTS_TRACEABILITY.md` synced in 8B-11 | FRESH (8B-11 audit + sync) | **PASS** | 3 deferred *extensions* (multi-locale UI, image scanner, admin template editor) — each with owner + explicit target review date 2026-12-31 (planning checkpoint, not a delivery commitment) + reason + impact = not a Phase 8 gate |
+
+**Release-blocker check:** every MUST AC is **PASS**; the one SHOULD is **PASS WITH KNOWN RISK**
+with a documented, owned, non-blocking follow-up. **No PARTIAL, BLOCKED, or unsupported MUST.**
+→ **Slice 8B-11 CLOSED.** Phase 8 is **not** marked complete — that is 8B-12.
+
+**8B-11 gates:** `git diff --check` clean; `tsc --noEmit` clean; `eslint .` clean; unit
+**692/692**; `next build` `✓ Compiled successfully` (`ƒ Proxy (Middleware)`, no deprecation
+warning). DEV integration **not rerun** — no test/RLS/RPC/product change in 8B-11 (docs only); the
+final green 8B-10 CI **172/172** (run `34020261218`, commit `4fc83e3`) stands as RECENT-INHERITED
+evidence. No `package.json`/lockfile change → no fresh `npm ci`.
+
+_Slice 8B-12 (final release / handover) is not yet started. Phase 8 is NOT complete._
